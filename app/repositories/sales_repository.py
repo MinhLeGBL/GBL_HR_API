@@ -4,10 +4,10 @@ Retail Sales Service for executing sales queries
 from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 from app.database.connection import get_oracle_connection
-from app.queries.sales_reports.retail_queries import RetailSalesQueries
+from app.queries.sales_queries import RetailSalesQueries
 
 
-class RetailSalesService:
+class RetailSalesRepository:
     """Service for executing retail sales-related reports and queries"""
     
     def __init__(self):
