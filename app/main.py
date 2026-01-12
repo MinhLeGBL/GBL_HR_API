@@ -5,6 +5,7 @@ from flask import Flask, jsonify
 from app.api.v1.routes.employee_routes import employee_bp
 from app.api.v1.routes.sales_routes import sales_bp
 from app.api.v1.routes.health_routes import health_bp
+from app.api.v1.routes.commission_routes import commission_bp
 
 
 def create_app():
@@ -23,6 +24,7 @@ def create_app():
     app.register_blueprint(health_bp)
     app.register_blueprint(employee_bp)
     app.register_blueprint(sales_bp)
+    app.register_blueprint(commission_bp)
 
     # Root endpoint
     @app.route('/')
@@ -35,7 +37,8 @@ def create_app():
                 'health': '/api/v1/health',
                 'database_health': '/api/v1/health/database',
                 'employees': '/api/v1/employees',
-                'sales_reports': '/api/v1/sales/reports'
+                'sales_reports': '/api/v1/sales/reports',
+                'commission': '/api/v1/commission'
             }
         }), 200
 

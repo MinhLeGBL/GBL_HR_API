@@ -15,7 +15,7 @@ class RetailSalesQueries:
             --di.VEND_CODE                                                           as VENDOR_CODE,
             --v.VEND_NAME                                                            as VENDOR_NAME,
             --dep.D_LONG_NAME                                                        as DEPARTMENT,
-            --SUBSTR(i.DESCRIPTION2, INSTR(i.DESCRIPTION2, '-', -1) + 1)            as CATEGORY,
+            --SUBSTR(i.DESCRIPTION2, INSTR(i.DESCRIPTION2, '-', -1) + 1)             as CATEGORY,
             --di.DESCRIPTION1                                                        as ITEM_NAME,
             --di.ATTRIBUTE                                                           as ATTRIBUTE,
             --di.ITEM_SIZE                                                           as ITEM_SIZE,

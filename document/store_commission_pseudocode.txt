@@ -1,0 +1,51 @@
+START
+  │
+  ├─→ [STEP 1] Check Store Eligibility & Calculate Achievement
+  │   │
+  │   ├─→ Calculate achievement_pct = (actual_revenue / target_revenue) × 100%
+  │   │
+  │   ├─→ IF (actual_full_price_revenue < target_revenue × 70%)
+  │   │   └─→ RETURN "Not eligible for commission"
+  │   │
+  │   └─→ IF (actual_fp_ratio < target_fp_ratio)
+  │       └─→ Check discounted goods compensation
+  │           │
+  │           ├─→ fp_shortage = (target_fp_ratio - actual_fp_ratio) × actual_revenue
+  │           ├─→ required_discounted = fp_shortage × 200%
+  │           │
+  │           └─→ IF (actual_discounted_revenue < required_discounted)
+  │               └─→ RETURN "Not eligible for commission"
+  │
+  ├─→ [STEP 2] Calculate Each Employee's Contribution to Store Pool
+  │   │
+  │   └─→ FOR EACH employee IN employee_list
+  │       │
+  │       ├─→ Determine applicable commission rates by tier
+  │       │   based on employee's tenure
+  │       │
+  │       ├─→ Allocate employee's sales to tiers based on 
+  │       │   store achievement_pct
+  │       │
+  │       ├─→ Apply tier rates to employee's FP revenue by tier
+  │       │
+  │       ├─→ Apply 0.25% to employee's discounted revenue (70-80% tier only)
+  │       │
+  │       └─→ employee_contribution = SUM(all tier commissions)
+  │
+  ├─→ [STEP 3] Calculate Total Store Pool
+  │   │
+  │   └─→ store_pool = SUM(all employee_contributions)
+  │
+  ├─→ [STEP 4] Distribute Store Pool to Each Employee
+  │   │
+  │   └─→ FOR EACH employee IN employee_list
+  │       │
+  │       ├─→ part_A = 70% × store_pool × (employee_contribution / store_pool)
+  │       ├─→ part_B = 30% × store_pool / employee_count
+  │       ├─→ personal_commission = part_A + part_B
+  │       │
+  │       └─→ IF (employee.is_manager AND achievement_pct >= 100%)
+  │           └─→ personal_commission += 3,000,000
+  │
+  └─→ RETURN results[]
+END
