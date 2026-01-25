@@ -458,3 +458,251 @@ class CommissionService:
             })
 
         return results
+
+    def calculate_personal_commissions(
+        self,
+        month: int,
+        year: int,
+        employees: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Calculate personal commissions for all employees based on the new algorithm
+
+        Args:
+            month: Month for commission calculation (1-12)
+            year: Year for commission calculation
+            employees: List of employee dictionaries with structure:
+                {
+                    'employee_id': str,
+                    'target': float,
+                    'employee_name': str (optional),
+                    'department': str (optional)
+                }
+
+        Returns:
+            Dictionary containing:
+            {
+                'success': bool,
+                'month': int,
+                'year': int,
+                'summary': {
+                    'total_employees': int,
+                    'eligible_employees': int,
+                    'ineligible_employees': int,
+                    'total_commission_payout': float
+                },
+                'employee_commissions': List[Dict]
+            }
+        """
+        # 2. VALIDATE INPUT
+        if month is None or year is None or employees is None or len(employees) == 0:
+            return {
+                'success': False,
+                'error': "Missing required fields: month, year, or employees list"
+            }
+
+        # 3. GET ALL SALES DATA AS PANDAS DATAFRAME
+        sales_df = self.repository.get_personal_commission_sales_data(year, month)
+
+        # 4. PREPARE RESULTS LIST
+        results = []
+
+        # 5. PROCESS EACH EMPLOYEE
+        for employee_data in employees:
+            employee_id = employee_data.get('employee_id')
+            target = employee_data.get('target')
+            employee_name = employee_data.get('employee_name', '')
+            department = employee_data.get('department', '')
+
+            # Validate employee data
+            if employee_id is None or target is None:
+                results.append({
+                    'success': False,
+                    'employee_id': employee_id,
+                    'employee_name': employee_name,
+                    'error': 'Missing employee_id or target'
+                })
+                continue
+
+            # Filter sales for this specific employee
+            employee_sales_df = sales_df[sales_df['employee_id'] == employee_id].copy()
+
+            # Check if employee has any sales
+            if len(employee_sales_df) == 0:
+                results.append({
+                    'success': True,
+                    'eligible': False,
+                    'reason': 'No sales data found',
+                    'employee_id': employee_id,
+                    'employee_name': employee_name,
+                    'department': department,
+                    'month': month,
+                    'year': year,
+                    'target': target,
+                    'total_revenue': 0,
+                    'achievement_rate': 0,
+                    'commission': 0
+                })
+                continue
+
+            # Calculate total revenue (all transactions are already paid)
+            total_revenue_before_vat = employee_sales_df['revenue_before_vat'].sum()
+
+            # Calculate full-price sales (discount_rate <= 0.30)
+            full_price_df = employee_sales_df[employee_sales_df['discount_rate'] <= 0.30]
+            full_price_sales = full_price_df['revenue_before_vat'].sum()
+
+            # Calculate discounted sales (discount_rate > 0.30)
+            discounted_df = employee_sales_df[employee_sales_df['discount_rate'] > 0.30]
+            discounted_sales = discounted_df['revenue_before_vat'].sum()
+
+            # Calculate achievement rate
+            achievement_rate = (total_revenue_before_vat / target) * 100 if target > 0 else 0
+
+            # Check minimum threshold
+            if achievement_rate < 50:
+                results.append({
+                    'success': True,
+                    'eligible': False,
+                    'reason': 'Did not reach 50% of monthly target',
+                    'employee_id': employee_id,
+                    'employee_name': employee_name,
+                    'department': department,
+                    'month': month,
+                    'year': year,
+                    'target': target,
+                    'total_revenue': total_revenue_before_vat,
+                    'achievement_rate': achievement_rate,
+                    'commission': 0
+                })
+                continue
+
+            # Calculate running total to find when target was reached (for >100% bonus)
+            employee_sales_df['running_total'] = employee_sales_df['revenue_before_vat'].cumsum()
+
+            # Find full-price sales after reaching target (for >100% tier)
+            full_price_sales_after_target = 0
+
+            if achievement_rate > 100:
+                # Find the row where target was first reached or exceeded
+                target_reached_df = employee_sales_df[employee_sales_df['running_total'] >= target]
+
+                if len(target_reached_df) > 0:
+                    # Get the first sale that reached/exceeded target
+                    first_target_row_index = target_reached_df.index[0]
+                    first_target_row = employee_sales_df.loc[first_target_row_index]
+
+                    previous_total = first_target_row['running_total'] - first_target_row['revenue_before_vat']
+
+                    # If this sale pushed over target, calculate excess portion
+                    if previous_total < target:
+                        excess_from_this_sale = first_target_row['running_total'] - target
+
+                        # Only count if it's full-price (discount_rate <= 0.30)
+                        if first_target_row['discount_rate'] <= 0.30:
+                            full_price_sales_after_target = full_price_sales_after_target + excess_from_this_sale
+
+                    # Get all sales after the target-reaching sale
+                    sales_after_target_df = employee_sales_df.loc[first_target_row_index + 1:]
+
+                    # Filter for full-price items (discount_rate <= 0.30)
+                    full_price_after_df = sales_after_target_df[sales_after_target_df['discount_rate'] <= 0.30]
+
+                    # Add to full_price_sales_after_target
+                    full_price_sales_after_target = full_price_sales_after_target + full_price_after_df['revenue_before_vat'].sum()
+
+            # Calculate commission based on cumulative tiers
+            commission = 0
+            commission_breakdown = []
+
+            # TIER 1: 50% - 70% of target
+            if achievement_rate >= 50 and achievement_rate < 70:
+                commission = (full_price_sales * 0.0025) + (discounted_sales * 0.00125)
+
+                commission_breakdown.append({
+                    'tier': '50-70%',
+                    'full_price_rate': '0.25%',
+                    'discounted_rate': '0.125%',
+                    'full_price_sales': full_price_sales,
+                    'discounted_sales': discounted_sales,
+                    'commission': commission
+                })
+
+            # TIER 2: 70% - 100% of target
+            elif achievement_rate >= 70 and achievement_rate < 100:
+                commission = (full_price_sales * 0.0075) + (discounted_sales * 0.00375)
+
+                commission_breakdown.append({
+                    'tier': '70-100%',
+                    'full_price_rate': '0.25% + 0.5% = 0.75%',
+                    'discounted_rate': '0.125% + 0.25% = 0.375%',
+                    'full_price_sales': full_price_sales,
+                    'discounted_sales': discounted_sales,
+                    'commission': commission
+                })
+
+            # TIER 3: 100% of target and above
+            elif achievement_rate >= 100:
+                # Base commission at 100% tier rates
+                commission_up_to_target = (full_price_sales * 0.0175) + (discounted_sales * 0.00875)
+                commission = commission_up_to_target
+
+                commission_breakdown.append({
+                    'tier': '100%',
+                    'full_price_rate': '0.25% + 0.5% + 1% = 1.75%',
+                    'discounted_rate': '0.125% + 0.25% + 0.5% = 0.875%',
+                    'full_price_sales': full_price_sales,
+                    'discounted_sales': discounted_sales,
+                    'commission': commission_up_to_target
+                })
+
+                # TIER 4: Over 100% - Additional bonus
+                if achievement_rate > 100 and full_price_sales_after_target > 0:
+                    excess_commission = full_price_sales_after_target * 0.02
+                    commission = commission + excess_commission
+
+                    commission_breakdown.append({
+                        'tier': 'Over 100% (Excess Bonus)',
+                        'full_price_rate': '2%',
+                        'discounted_rate': '0%',
+                        'total_excess_revenue': total_revenue_before_vat - target,
+                        'full_price_sales_after_target': full_price_sales_after_target,
+                        'commission': excess_commission,
+                        'note': 'Bonus only applies to full-price transactions that occurred after reaching 100% target'
+                    })
+
+            # Add result for this employee
+            results.append({
+                'success': True,
+                'employee_id': employee_id,
+                'employee_name': employee_name,
+                'department': department,
+                'month': month,
+                'year': year,
+                'eligible': True,
+                'achievement_rate': achievement_rate,
+                'target': target,
+                'total_revenue': total_revenue_before_vat,
+                'full_price_sales': full_price_sales,
+                'discounted_sales': discounted_sales,
+                'total_commission': commission,
+                'commission_breakdown': commission_breakdown
+            })
+
+        # 6. CALCULATE SUMMARY STATISTICS
+        eligible_results = [r for r in results if r.get('eligible') == True]
+        total_commission_payout = sum([r['total_commission'] for r in eligible_results])
+
+        # 7. RETURN ALL RESULTS
+        return {
+            'success': True,
+            'month': month,
+            'year': year,
+            'summary': {
+                'total_employees': len(results),
+                'eligible_employees': len(eligible_results),
+                'ineligible_employees': len(results) - len(eligible_results),
+                'total_commission_payout': total_commission_payout
+            },
+            'employee_commissions': results
+        }

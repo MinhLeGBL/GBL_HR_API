@@ -2,6 +2,7 @@
 Commission Repository for executing commission-related queries
 """
 from typing import List, Dict, Any, Optional
+import pandas as pd
 from app.database.connection import get_oracle_connection
 from app.queries.commission_queries import CommissionQueries
 
@@ -114,3 +115,37 @@ class CommissionRepository:
         parameters = {'store_code': store_code}
 
         return self.execute_query(self.queries.EMPLOYEE_INFO, parameters)
+
+    def get_personal_commission_sales_data(
+        self,
+        year: int,
+        month: int
+    ) -> pd.DataFrame:
+        """
+        Get sales data for personal commission calculation as pandas DataFrame
+
+        Args:
+            year: Year for the commission period
+            month: Month for the commission period
+
+        Returns:
+            DataFrame containing sales data with columns:
+            ['sale_id', 'employee_id', 'store_id', 'sale_date', 'sale_time',
+             'revenue_before_vat', 'discount_rate', 'department']
+        """
+        year_month = f"{year:04d}-{month:02d}"
+        parameters = {'year_month': year_month}
+
+        results = self.execute_query(self.queries.PERSONAL_COMMISSION_SALES_DATA, parameters)
+
+        # Convert to pandas DataFrame
+        df = pd.DataFrame(results)
+
+        # If no data, return empty DataFrame with expected columns
+        if df.empty:
+            return pd.DataFrame(columns=[
+                'sale_id', 'employee_id', 'store_id', 'sale_date', 'sale_time',
+                'sale_datetime', 'revenue_before_vat', 'discount_rate', 'department'
+            ])
+
+        return df

@@ -305,3 +305,80 @@ def export_commission_excel():
             'success': False,
             'error': str(e)
         }), 500
+
+
+@commission_bp.route('/personal/calculate', methods=['POST'])
+def calculate_personal_commission():
+    """
+    Calculate personal commissions for employees
+
+    Request Body:
+        {
+            "month": integer (1-12),
+            "year": integer,
+            "employees": [
+                {
+                    "employee_id": "string",
+                    "target": number,
+                    "employee_name": "string" (optional),
+                    "department": "string" (optional)
+                }
+            ]
+        }
+
+    Returns:
+        JSON response with personal commission calculation results for all employees
+    """
+    try:
+        data = request.get_json()
+
+        # Validate required fields
+        required_fields = ['month', 'year', 'employees']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        # Validate month range
+        if not (1 <= data['month'] <= 12):
+            return jsonify({
+                'success': False,
+                'error': 'month must be between 1 and 12'
+            }), 400
+
+        # Validate employees list
+        if not isinstance(data['employees'], list) or len(data['employees']) == 0:
+            return jsonify({
+                'success': False,
+                'error': 'employees must be a non-empty list'
+            }), 400
+
+        # Validate each employee entry
+        for i, employee in enumerate(data['employees']):
+            if 'employee_id' not in employee or 'target' not in employee:
+                return jsonify({
+                    'success': False,
+                    'error': f'Employee at index {i} is missing required field: employee_id or target'
+                }), 400
+
+        # Execute personal commission calculation
+        service = CommissionService()
+        result = service.calculate_personal_commissions(
+            month=data['month'],
+            year=data['year'],
+            employees=data['employees']
+        )
+
+        # Check if calculation was successful
+        if not result.get('success', False):
+            return jsonify(result), 400
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
