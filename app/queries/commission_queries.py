@@ -83,20 +83,19 @@ class CommissionQueries:
                  JOIN DCS dep on dep.SID = i.DCS_SID
                  JOIN CUSTOMER c ON c.SID = d.BT_CUID
                  JOIN VENDOR v ON v.VEND_CODE = di.VEND_CODE
-        WHERE 1 = 1
-          --AND d.RECEIPT_TYPE in (0,1)
+        WHERE d.STATUS != 2
+          AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
-          AND d.STATUS = 4
-          AND d.CREATED_DATETIME >= :start_date
-          AND d.CREATED_DATETIME <= :end_date
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.CREATED_DATETIME >= :start_date
-                AND d2.CREATED_DATETIME <= :end_date
-          )))
+          AND d.invc_post_date >= :start_date
+          AND d.invc_post_date <= :end_date
+        #   -- Exclude returns that reference sales from outside the query period
+        #   AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
+        #       SELECT 1 FROM DOCUMENT d2
+        #       JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
+        #       WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
+        #         AND d2.invc_post_date >= :start_date
+        #         AND d2.invc_post_date <= :end_date
+        #   )))
     """
     
     # Store sales summary query
@@ -108,22 +107,24 @@ class CommissionQueries:
             COUNT(DISTINCT d.DOC_NO) as TOTAL_TRANSACTIONS,
             COUNT(DISTINCT d.BT_CUID) as UNIQUE_CUSTOMERS,
             SUM(CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) as TOTAL_QTY,
-            ROUND(SUM(CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END * di.price), 0) as TOTAL_SALES_VAT,
-            ROUND(SUM(CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END * (di.price - di.tax_amt)), 0) as TOTAL_SALES
+            ROUND(SUM(CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END * di.price * (1 - d.DISC_PERC/100)), 0) as TOTAL_SALES_VAT,
+            ROUND(SUM(CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt), 0) as TOTAL_SALES
+
         FROM DOCUMENT d
                  JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
                  JOIN STORE st ON st.SID = d.STORE_SID
         WHERE d.STATUS = 4
+          AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
-          AND d.CREATED_DATETIME >= :start_date
-          AND d.CREATED_DATETIME <= :end_date
+          AND d.invc_post_date >= :start_date
+          AND d.invc_post_date <= :end_date
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
               SELECT 1 FROM DOCUMENT d2
               JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
               WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.CREATED_DATETIME >= :start_date
-                AND d2.CREATED_DATETIME <= :end_date
+                AND d2.invc_post_date >= :start_date
+                AND d2.invc_post_date <= :end_date
           )))
         GROUP BY d.STORE_CODE, st.STORE_NAME, TO_CHAR(d.invc_post_date, 'YYYY-MM')
         ORDER BY d.STORE_CODE, YEAR_MONTH
@@ -134,18 +135,18 @@ class CommissionQueries:
         SELECT
             d.STORE_CODE,
             st.STORE_NAME,
-            -- Total revenue (excluding tax)
+            -- Total revenue
             ROUND(SUM(
                 CASE WHEN di.item_type = 2
                 THEN di.qty * -1
-                ELSE di.qty END * (di.price - di.tax_amt)
+                ELSE di.qty END * di.price
             ), 0) as ACTUAL_REVENUE,
 
             -- Full price revenue (items with less or equal than 30% discount)
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
             ), 0) as ACTUAL_FULL_PRICE_REVENUE,
@@ -154,7 +155,7 @@ class CommissionQueries:
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
             ), 0) as ACTUAL_DISCOUNTED_REVENUE
@@ -163,17 +164,18 @@ class CommissionQueries:
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
         JOIN STORE st ON st.SID = d.STORE_SID
         WHERE d.STATUS = 4
+          AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
-          AND d.CREATED_DATETIME >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND d.CREATED_DATETIME <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.STORE_CODE = :store_code
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
               SELECT 1 FROM DOCUMENT d2
               JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
               WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.CREATED_DATETIME >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-                AND d2.CREATED_DATETIME <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+                AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+                AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           )))
         GROUP BY d.STORE_CODE, st.STORE_NAME
     """
@@ -181,52 +183,54 @@ class CommissionQueries:
     # Get employee sales data for a specific store
     EMPLOYEE_SALES_DATA = """
         SELECT
-            -- Employee information
-            COALESCE(di.EMPLOYEE1_FULL_NAME, 'UNKNOWN') as EMPLOYEE_NAME,
-            di.EMPLOYEE1_FULL_NAME as EMPLOYEE_FULL_NAME,
+            e.UDF4_STRING as EMPLOYEE_CODE,
+            e.SID as EMPLOYEE_SID,
+            e.STORE_CODE as EMPLOYEE_STORE_CODE,
+            e.FULL_NAME as EMPLOYEE_FULL_NAME,
 
-            -- Total revenue by employee (excluding tax)
+            -- Total revenue by employee (excluding tax, after discount)
             ROUND(SUM(
                 CASE WHEN di.item_type = 2
                 THEN di.qty * -1
-                ELSE di.qty END * (di.price - di.tax_amt)
+                ELSE di.qty END * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt
             ), 0) as EMPLOYEE_REVENUE,
 
-            -- Full price revenue by employee
+            -- Full price revenue by employee (items with <= 30% total discount)
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt
                     ELSE 0
                 END
             ), 0) as EMPLOYEE_FP_REVENUE,
 
-            -- Discounted revenue by employee
+            -- Discounted revenue by employee (items with > 30% total discount)
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt
                     ELSE 0
                 END
             ), 0) as EMPLOYEE_DISCOUNTED_REVENUE
 
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
+        JOIN EMPLOYEE_LIST_V e ON di.EMPLOYEE1_SID = e.SID
         WHERE d.STATUS = 4
+          AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
-          AND d.CREATED_DATETIME >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND d.CREATED_DATETIME <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND d.STORE_CODE = :store_code
-          AND di.EMPLOYEE1_FULL_NAME IS NOT NULL
+          AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          AND e.STORE_CODE = :store_code
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
               SELECT 1 FROM DOCUMENT d2
               JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
               WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.CREATED_DATETIME >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-                AND d2.CREATED_DATETIME <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+                AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+                AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           )))
-        GROUP BY di.EMPLOYEE1_FULL_NAME
+        GROUP BY e.UDF4_STRING, e.SID, e.STORE_CODE, e.FULL_NAME
         ORDER BY EMPLOYEE_REVENUE DESC
     """
 
