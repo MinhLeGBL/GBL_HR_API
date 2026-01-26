@@ -706,3 +706,283 @@ class CommissionService:
             },
             'employee_commissions': results
         }
+
+    def calculate_batch_store_commissions(
+        self,
+        employees: List[Dict[str, Any]],
+        stores: List[Dict[str, Any]],
+        year: int,
+        month: int,
+        start_date: str,
+        end_date: str
+    ) -> Dict[str, Any]:
+        """
+        Calculate store commissions for multiple employees across multiple stores
+
+        Args:
+            employees: List of employee dicts with structure:
+                {
+                    'employee_code': str,
+                    'employee_name': str,
+                    'store_code': str,
+                    'personal_target': float,
+                    'seniority': int (tenure in months)
+                }
+            stores: List of store dicts with structure:
+                {
+                    'store_code': str,
+                    'store_name': str (optional),
+                    'target_revenue': float,
+                    'target_fp_ratio': float (0.0 to 1.0)
+                }
+            year: Year for the commission period
+            month: Month for the commission period
+            start_date: Period start date in 'YYYY-MM-DD HH:MI:SS' format
+            end_date: Period end date in 'YYYY-MM-DD HH:MI:SS' format
+
+        Returns:
+            Dictionary containing commission results for all employees
+        """
+        # Validate inputs
+        if not employees or not stores:
+            return {
+                'success': False,
+                'error': 'Both employees and stores arrays are required'
+            }
+
+        # Create lookup dictionaries
+        store_lookup = {store['store_code']: store for store in stores}
+
+        # Group employees by store
+        employees_by_store = {}
+        for emp in employees:
+            store_code = emp.get('store_code')
+            if store_code not in employees_by_store:
+                employees_by_store[store_code] = []
+            employees_by_store[store_code].append(emp)
+
+        # Get unique store codes from employees
+        store_codes = list(employees_by_store.keys())
+
+        # Fetch store sales data for all stores
+        stores_sales_data = self.repository.get_multiple_stores_sales_data(
+            store_codes, start_date, end_date
+        )
+
+        # Fetch employee sales data for all stores
+        stores_employee_sales = self.repository.get_multiple_stores_employee_sales_data(
+            store_codes, start_date, end_date
+        )
+
+        # Process each store and calculate commissions
+        all_employee_results = []
+        store_results = []
+
+        for store_code in store_codes:
+            # Get store configuration from request
+            store_config = store_lookup.get(store_code)
+            if not store_config:
+                # Skip if store config not provided
+                for emp in employees_by_store[store_code]:
+                    all_employee_results.append({
+                        'employee_code': emp.get('employee_code'),
+                        'employee_name': emp.get('employee_name'),
+                        'store_code': store_code,
+                        'eligible': False,
+                        'reason': 'Store configuration not provided',
+                        'total_commission': 0
+                    })
+                continue
+
+            store_name = store_config.get('store_name', store_code)
+            target_revenue = store_config.get('target_revenue', 0)
+            target_fp_ratio = store_config.get('target_fp_ratio', 0.0)
+
+            # Get store sales data
+            store_data = stores_sales_data.get(store_code, {})
+
+            # Create targets dictionary
+            targets = {
+                'TARGET_REVENUE': target_revenue,
+                'TARGET_FP_RATIO': target_fp_ratio
+            }
+
+            # Check store eligibility
+            eligibility_result = self._check_store_eligibility(store_data, targets)
+
+            if not eligibility_result['eligible']:
+                # Store not eligible - all employees get 0 commission
+                for emp in employees_by_store[store_code]:
+                    all_employee_results.append({
+                        'employee_code': emp.get('employee_code'),
+                        'employee_name': emp.get('employee_name'),
+                        'store_code': store_code,
+                        'store_name': store_name,
+                        'eligible': False,
+                        'reason': f"Store not eligible: {eligibility_result['reason']}",
+                        'achievement_pct': eligibility_result.get('achievement_pct', 0),
+                        'total_commission': 0
+                    })
+
+                store_results.append({
+                    'store_code': store_code,
+                    'store_name': store_name,
+                    'eligible': False,
+                    'reason': eligibility_result['reason'],
+                    'achievement_pct': eligibility_result.get('achievement_pct', 0)
+                })
+                continue
+
+            achievement_pct = eligibility_result['achievement_pct']
+
+            # Get employee sales data for this store
+            employee_sales_list = stores_employee_sales.get(store_code, [])
+
+            # Create employee sales lookup by name
+            employee_sales_lookup = {
+                emp_sale.get('EMPLOYEE_FULL_NAME'): emp_sale
+                for emp_sale in employee_sales_list
+            }
+
+            # Filter to only requested employees with their provided seniority
+            requested_employees_data = []
+            for emp in employees_by_store[store_code]:
+                emp_name = emp.get('employee_name')
+                emp_sales = employee_sales_lookup.get(emp_name)
+
+                if emp_sales:
+                    # Add seniority from request
+                    requested_employees_data.append({
+                        'EMPLOYEE_FULL_NAME': emp_name,
+                        'EMPLOYEE_FP_REVENUE': emp_sales.get('EMPLOYEE_FP_REVENUE', 0),
+                        'EMPLOYEE_DISCOUNTED_REVENUE': emp_sales.get('EMPLOYEE_DISCOUNTED_REVENUE', 0),
+                        'TENURE_MONTHS': emp.get('seniority', 0)
+                    })
+
+            if not requested_employees_data:
+                # No sales data for requested employees
+                for emp in employees_by_store[store_code]:
+                    all_employee_results.append({
+                        'employee_code': emp.get('employee_code'),
+                        'employee_name': emp.get('employee_name'),
+                        'store_code': store_code,
+                        'store_name': store_name,
+                        'eligible': False,
+                        'reason': 'No sales data found for employee',
+                        'achievement_pct': achievement_pct,
+                        'total_commission': 0
+                    })
+                continue
+
+            # Calculate employee contributions with provided seniority
+            employee_contributions = []
+            for emp_data in requested_employees_data:
+                emp_name = emp_data['EMPLOYEE_FULL_NAME']
+                fp_revenue = emp_data['EMPLOYEE_FP_REVENUE']
+                discounted_revenue = emp_data['EMPLOYEE_DISCOUNTED_REVENUE']
+                tenure_months = emp_data['TENURE_MONTHS']
+
+                # Check if manager (you may want to add this to request)
+                is_manager = False
+
+                # Determine tier rates based on tenure and achievement
+                tier_rates = self._get_tier_rates(tenure_months, achievement_pct)
+
+                # Allocate FP revenue to tiers
+                fp_by_tier = self._allocate_revenue_to_tiers(fp_revenue, achievement_pct)
+
+                # Calculate commission from FP revenue
+                fp_commission = sum(
+                    fp_by_tier[tier] * rate for tier, rate in tier_rates.items()
+                )
+
+                # Add discounted revenue commission (0.25% for 70-80% tier only)
+                discounted_commission = 0
+                if 70 <= achievement_pct < 80:
+                    discounted_commission = discounted_revenue * 0.0025
+
+                total_contribution = fp_commission + discounted_commission
+
+                employee_contributions.append({
+                    'employee_name': emp_name,
+                    'tenure_months': tenure_months,
+                    'is_manager': is_manager,
+                    'fp_revenue': fp_revenue,
+                    'discounted_revenue': discounted_revenue,
+                    'fp_commission': fp_commission,
+                    'discounted_commission': discounted_commission,
+                    'contribution': total_contribution
+                })
+
+            # Calculate total store pool
+            store_pool = sum(emp['contribution'] for emp in employee_contributions)
+
+            # Distribute store pool to each employee
+            employee_commissions = self._distribute_store_pool(
+                employee_contributions,
+                store_pool,
+                achievement_pct
+            )
+
+            # Add employee codes to results
+            for emp_commission in employee_commissions:
+                emp_name = emp_commission['employee_name']
+                # Find matching employee in request to get employee_code
+                matching_emp = next(
+                    (e for e in employees_by_store[store_code] if e.get('employee_name') == emp_name),
+                    None
+                )
+                emp_code = matching_emp.get('employee_code', '') if matching_emp else ''
+
+                all_employee_results.append({
+                    'employee_code': emp_code,
+                    'employee_name': emp_name,
+                    'store_code': store_code,
+                    'store_name': store_name,
+                    'eligible': True,
+                    'achievement_pct': achievement_pct,
+                    'tenure_months': emp_commission['tenure_months'],
+                    'is_manager': emp_commission['is_manager'],
+                    'fp_revenue': emp_commission['fp_revenue'],
+                    'discounted_revenue': emp_commission['discounted_revenue'],
+                    'contribution': emp_commission['contribution'],
+                    'commission_70pct': emp_commission['commission_70pct'],
+                    'commission_30pct': emp_commission['commission_30pct'],
+                    'manager_bonus': emp_commission['manager_bonus'],
+                    'total_commission': emp_commission['total_commission']
+                })
+
+            store_results.append({
+                'store_code': store_code,
+                'store_name': store_name,
+                'eligible': True,
+                'achievement_pct': achievement_pct,
+                'target_revenue': target_revenue,
+                'target_fp_ratio': target_fp_ratio,
+                'store_pool': store_pool,
+                'employee_count': len(employee_commissions)
+            })
+
+        # Calculate summary statistics
+        eligible_employees = [r for r in all_employee_results if r.get('eligible', False)]
+        total_commission_payout = sum(r.get('total_commission', 0) for r in eligible_employees)
+
+        return {
+            'success': True,
+            'period': {
+                'year': year,
+                'month': month,
+                'start_date': start_date,
+                'end_date': end_date
+            },
+            'summary': {
+                'total_employees': len(all_employee_results),
+                'eligible_employees': len(eligible_employees),
+                'ineligible_employees': len(all_employee_results) - len(eligible_employees),
+                'total_stores': len(store_codes),
+                'eligible_stores': len([s for s in store_results if s.get('eligible', False)]),
+                'total_commission_payout': total_commission_payout
+            },
+            'stores': store_results,
+            'employees': all_employee_results
+        }

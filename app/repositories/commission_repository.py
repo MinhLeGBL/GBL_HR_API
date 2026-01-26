@@ -149,3 +149,69 @@ class CommissionRepository:
             ])
 
         return df
+
+    def get_multiple_stores_sales_data(
+        self,
+        store_codes: List[str],
+        start_date: str,
+        end_date: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get sales data for multiple stores
+
+        Args:
+            store_codes: List of store codes
+            start_date: Start date in 'YYYY-MM-DD HH:MI:SS' format
+            end_date: End date in 'YYYY-MM-DD HH24:MI:SS' format
+
+        Returns:
+            Dictionary mapping store_code to store sales data
+        """
+        results = {}
+        for store_code in store_codes:
+            store_data = self.get_store_sales_data(store_code, start_date, end_date)
+            if store_data:
+                results[store_code] = store_data
+        return results
+
+    def get_multiple_stores_employee_sales_data(
+        self,
+        store_codes: List[str],
+        start_date: str,
+        end_date: str
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get employee sales data for multiple stores
+
+        Args:
+            store_codes: List of store codes
+            start_date: Start date in 'YYYY-MM-DD HH:MI:SS' format
+            end_date: End date in 'YYYY-MM-DD HH24:MI:SS' format
+
+        Returns:
+            Dictionary mapping store_code to list of employee sales data
+        """
+        results = {}
+        for store_code in store_codes:
+            employee_data = self.get_employee_sales_data(store_code, start_date, end_date)
+            results[store_code] = employee_data
+        return results
+
+    def get_multiple_stores_employee_info(
+        self,
+        store_codes: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get employee information for multiple stores
+
+        Args:
+            store_codes: List of store codes
+
+        Returns:
+            Dictionary mapping store_code to list of employee info
+        """
+        results = {}
+        for store_code in store_codes:
+            employee_info = self.get_employee_info(store_code)
+            results[store_code] = employee_info
+        return results
