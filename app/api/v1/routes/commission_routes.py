@@ -3,6 +3,7 @@ Commission API Routes
 """
 from flask import Blueprint, jsonify, request, Response
 from app.services.commission_service import CommissionService
+from app.services.google_sheets_service import GoogleSheetsService
 import pandas as pd
 import io
 
@@ -623,6 +624,94 @@ def calculate_store_commission_v2():
             'success': True,
             'data': result
         }), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/store/calculate-from-sheet', methods=['GET'])
+def calculate_store_commission_from_sheet():
+    """
+    Calculate store commission by reading input data from Google Sheets
+
+    Query Parameters:
+        - spreadsheet_id: Google Sheets spreadsheet ID (required)
+        - store_code: Store code to calculate commission for (required)
+        - from_date: Start date in YYYY-MM-DD HH:MI:SS format (required)
+        - to_date: End date in YYYY-MM-DD HH:MI:SS format (required)
+        - sheet_name: Name of the sheet/tab (optional, default: 'Sheet1')
+
+    Returns:
+        JSON response with commission calculation results
+    """
+    try:
+        # Get query parameters
+        spreadsheet_id = request.args.get('spreadsheet_id')
+        store_code = request.args.get('store_code')
+        from_date = request.args.get('from_date')
+        to_date = request.args.get('to_date')
+        sheet_name = request.args.get('sheet_name', 'Sheet1')
+
+        # Validate required parameters
+        if not spreadsheet_id:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required parameter: spreadsheet_id'
+            }), 400
+
+        if not store_code:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required parameter: store_code'
+            }), 400
+
+        if not from_date:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required parameter: from_date'
+            }), 400
+
+        if not to_date:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required parameter: to_date'
+            }), 400
+
+        # Initialize Google Sheets service
+        sheets_service = GoogleSheetsService()
+
+        # Get commission input data from Google Sheets
+        commission_input = sheets_service.get_store_commission_input(
+            spreadsheet_id=spreadsheet_id,
+            store_code=store_code,
+            from_date=from_date,
+            to_date=to_date,
+            sheet_name=sheet_name
+        )
+
+        # Calculate commission using the v2 method
+        commission_service = CommissionService()
+        result = commission_service.calculate_store_commission_v2(
+            store_code=commission_input['store_code'],
+            store_target=commission_input['store_target'],
+            store_fp_ratio_target=commission_input['store_fp_ratio_target'],
+            query_date=commission_input['query_date'],
+            employees=commission_input['employees']
+        )
+
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 400
 
     except Exception as e:
         return jsonify({
