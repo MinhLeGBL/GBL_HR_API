@@ -1,0 +1,32 @@
+# Test directory (only on development branch)
+tests/
+
+# Documentation (only deployment-related docs allowed)
+docs/
+document/
+!docs/deployment/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Distribution
+dist/
+build/
+*.egg-info/
