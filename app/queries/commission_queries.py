@@ -221,7 +221,14 @@ class CommissionQueries:
           AND di.ITEM_TYPE in (1, 2)
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND e.STORE_CODE = :store_code
+          -- Special handling for RHN and RWP stores: employees can overlap/work in both stores
+          -- For RHN/RWP: filter by where the sale was made (d.STORE_CODE)
+          -- For other stores: filter by employee's assigned store (e.STORE_CODE)
+          AND (
+              (:store_code IN ('RHN', 'RWP') AND d.STORE_CODE = :store_code)
+              OR
+              (:store_code NOT IN ('RHN', 'RWP') AND e.STORE_CODE = :store_code)
+          )
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
               SELECT 1 FROM DOCUMENT d2
@@ -237,17 +244,12 @@ class CommissionQueries:
     # Get employee information including tenure
     EMPLOYEE_INFO = """
         SELECT
-            EMPLOYEE_CODE,
+            UDF4_STRING as EMPLOYEE_CODE,
             FULL_NAME,
-            POSITION,
-            STORE_CODE,
-            HIRE_DATE,
-            -- Calculate tenure in months
-            ROUND(MONTHS_BETWEEN(SYSDATE, HIRE_DATE), 0) as TENURE_MONTHS
-        FROM EMPLOYEE
+            STORE_CODE
+        FROM EMPLOYEE_LIST_V
         WHERE STORE_CODE = :store_code
-          AND STATUS = 'ACTIVE'
-        ORDER BY FULL_NAME
+        ORDER BY EMPLOYEE_CODE
     """
 
     # Personal commission sales data query

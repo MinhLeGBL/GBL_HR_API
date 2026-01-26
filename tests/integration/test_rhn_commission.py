@@ -12,7 +12,7 @@ class TestRHNStoreCommission:
         Store: RHN (RUNWAY HA NOI)
         Target Revenue: 16,800,000,000 VND
         Target FP Ratio: 65% (0.65)
-        Employees: GH016 (Dang Thanh Huyen), GH003 (Nguyen Bich Ngoc)
+        Employees: GH016 (Dang Thanh Huyen), GH109 (Tran Phan Anh)
         """
         service = CommissionService()
 
@@ -23,14 +23,14 @@ class TestRHNStoreCommission:
                 'employee_name': 'Dang Thanh Huyen',
                 'store_code': 'RHN',
                 'personal_target': 800000000,  # 800 million VND
-                'seniority': 18  # 1.5 years
+                'seniority': 16  # 16 months
             },
             {
-                'employee_code': 'GH003',
-                'employee_name': 'Nguyen Bich Ngoc',
+                'employee_code': 'GH109',
+                'employee_name': 'Tran Phan Anh',
                 'store_code': 'RHN',
                 'personal_target': 850000000,  # 850 million VND
-                'seniority': 30  # 2.5 years
+                'seniority': 24  # 2 years (24 months)
             }
         ]
 
