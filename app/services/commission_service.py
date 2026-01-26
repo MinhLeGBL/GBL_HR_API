@@ -707,6 +707,241 @@ class CommissionService:
             'employee_commissions': results
         }
 
+    def calculate_store_commission_v2(
+        self,
+        store_code: str,
+        store_target: float,
+        store_fp_ratio_target: float,
+        query_date: Dict[str, str],
+        employees: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Calculate commission for a store following the updated pseudocode algorithm
+
+        Args:
+            store_code: Store code (e.g., "RHN", "HBT", "HDG")
+            store_target: Store's revenue target
+            store_fp_ratio_target: Target full-price ratio (0.0 to 1.0)
+            query_date: Dictionary with 'from_date' and 'to_date' (YYYY-MM-DD HH:MI:SS format)
+            employees: List of employee dictionaries with:
+                - employee_code: String
+                - full_name: String
+                - seniority: Number (tenure in years)
+                - personal_target: Number
+                - working_day_count: Number
+                - is_manager: Boolean
+                - is_probation: Boolean
+
+        Returns:
+            Dictionary containing commission calculation results
+        """
+        from_date = query_date['from_date']
+        to_date = query_date['to_date']
+
+        # Derived parameters
+        total_employee_count = len(employees)
+        total_working_days = sum(emp['working_day_count'] for emp in employees)
+
+        # Get store sales data from repository
+        store_data = self.repository.get_store_sales_data(store_code, from_date, to_date)
+
+        actual_revenue = store_data.get('ACTUAL_REVENUE', 0)
+        actual_full_price_revenue = store_data.get('ACTUAL_FULL_PRICE_REVENUE', 0)
+        actual_discounted_revenue = store_data.get('ACTUAL_DISCOUNTED_REVENUE', 0)
+
+        # STEP 1: Check Store Eligibility & Calculate Achievement
+        achievement_pct = (actual_revenue / store_target * 100) if store_target > 0 else 0
+        actual_fp_ratio = (actual_full_price_revenue / actual_revenue) if actual_revenue > 0 else 0
+
+        # Check if actual FP ratio meets target
+        if actual_fp_ratio < store_fp_ratio_target:
+            fp_shortage = (store_fp_ratio_target - actual_fp_ratio) * actual_revenue
+            required_discounted = fp_shortage * 2.0  # 200% compensation
+
+            if actual_discounted_revenue < required_discounted:
+                return {
+                    'eligible': False,
+                    'reason': 'Not eligible for commission - discounted goods compensation insufficient',
+                    'achievement_pct': achievement_pct,
+                    'actual_fp_ratio': actual_fp_ratio,
+                    'store_code': store_code,
+                    'employees': []
+                }
+
+        # Check minimum 70% achievement (implicit from tier structure)
+        if achievement_pct < 70:
+            return {
+                'eligible': False,
+                'reason': 'Store achievement below 70%',
+                'achievement_pct': achievement_pct,
+                'store_code': store_code,
+                'employees': []
+            }
+
+        # Get employee sales data from repository
+        # For RHN/RWP stores, we need to include both stores' sales
+        if store_code in ('RHN', 'RWP'):
+            employee_sales_rhn = self.repository.get_employee_sales_data('RHN', from_date, to_date)
+            employee_sales_rwp = self.repository.get_employee_sales_data('RWP', from_date, to_date)
+            # Combine and deduplicate
+            employee_sales_combined = employee_sales_rhn + employee_sales_rwp
+            # Create lookup by employee name
+            employee_sales_lookup = {}
+            for emp_sale in employee_sales_combined:
+                emp_name = emp_sale.get('EMPLOYEE_FULL_NAME', emp_sale.get('EMPLOYEE_NAME'))
+                if emp_name not in employee_sales_lookup:
+                    employee_sales_lookup[emp_name] = {
+                        'fp_revenue': 0,
+                        'disc_revenue': 0
+                    }
+                employee_sales_lookup[emp_name]['fp_revenue'] += emp_sale.get('EMPLOYEE_FP_REVENUE', 0)
+                employee_sales_lookup[emp_name]['disc_revenue'] += emp_sale.get('EMPLOYEE_DISCOUNTED_REVENUE', 0)
+        else:
+            employee_sales_data = self.repository.get_employee_sales_data(store_code, from_date, to_date)
+            employee_sales_lookup = {
+                emp_sale.get('EMPLOYEE_FULL_NAME', emp_sale.get('EMPLOYEE_NAME')): {
+                    'fp_revenue': emp_sale.get('EMPLOYEE_FP_REVENUE', 0),
+                    'disc_revenue': emp_sale.get('EMPLOYEE_DISCOUNTED_REVENUE', 0)
+                }
+                for emp_sale in employee_sales_data
+            }
+
+        # STEP 2: Calculate Each Employee's Contribution to Store Pool
+        employee_contributions = []
+
+        for employee in employees:
+            employee_code = employee['employee_code']
+            full_name = employee['full_name']
+            seniority = employee['seniority']  # in years
+            is_manager = employee['is_manager']
+            is_probation = employee.get('is_probation', False)  # Default to False if not provided
+            working_day_count = employee['working_day_count']
+
+            # Get employee sales data
+            emp_sales = employee_sales_lookup.get(full_name, {'fp_revenue': 0, 'disc_revenue': 0})
+            fp_revenue = emp_sales['fp_revenue']
+            disc_revenue = emp_sales['disc_revenue']
+
+            # Determine tier category based on seniority
+            tier_category = "Senior" if seniority >= 3 else "Junior"
+
+            # Calculate commission for each tier
+            commission_tier_70_80 = 0
+            commission_tier_80_90 = 0
+            commission_tier_90_100 = 0
+            commission_tier_100_plus = 0
+
+            # Tier 70-80%: 0.5% FP, 0.25% disc (all employees)
+            if achievement_pct >= 70:
+                commission_tier_70_80 = (fp_revenue * 0.005) + (disc_revenue * 0.0025)
+
+            # Tier 80-90%: 0.2% FP (senior) or 0.1% FP (junior), no disc
+            if achievement_pct >= 80:
+                rate = 0.002 if tier_category == "Senior" else 0.001
+                commission_tier_80_90 = fp_revenue * rate
+
+            # Tier 90-100%: 0.2% FP (senior) or 0.1% FP (junior), no disc
+            if achievement_pct >= 90:
+                rate = 0.002 if tier_category == "Senior" else 0.001
+                commission_tier_90_100 = fp_revenue * rate
+
+            # Tier 100%+: 0.1% FP (senior) or 0.05% FP (junior), ONLY on revenue exceeding 100%
+            if achievement_pct > 100:
+                rate = 0.001 if tier_category == "Senior" else 0.0005
+                # Calculate revenue exceeding 100% target
+                excess_ratio = (achievement_pct - 100) / 100
+                excess_revenue = fp_revenue * excess_ratio
+                commission_tier_100_plus = excess_revenue * rate
+
+            # Sum total employee contribution
+            employee_contribution = (
+                commission_tier_70_80 +
+                commission_tier_80_90 +
+                commission_tier_90_100 +
+                commission_tier_100_plus
+            )
+
+            employee_contributions.append({
+                'employee_code': employee_code,
+                'full_name': full_name,
+                'seniority': seniority,
+                'is_manager': is_manager,
+                'is_probation': is_probation,
+                'working_day_count': working_day_count,
+                'tier_category': tier_category,
+                'fp_revenue': fp_revenue,
+                'disc_revenue': disc_revenue,
+                'contribution': employee_contribution,
+                'commission_breakdown': {
+                    'tier_70_80': commission_tier_70_80,
+                    'tier_80_90': commission_tier_80_90,
+                    'tier_90_100': commission_tier_90_100,
+                    'tier_100_plus': commission_tier_100_plus
+                }
+            })
+
+        # STEP 3: Calculate Total Store Pool
+        store_pool = sum(emp['contribution'] for emp in employee_contributions)
+
+        # STEP 4: Distribute Store Pool to Each Employee
+        results = []
+
+        for emp in employee_contributions:
+            # 4.1: Calculate Individual Share (70% based on contribution)
+            individual_share = 0.70 * emp['contribution']
+
+            # 4.2: Calculate Equal Share (30% pool distribution)
+            if store_code in ('RHN', 'RWP'):
+                # RHN, RWP: Distribute based on working day contribution
+                working_day_ratio = emp['working_day_count'] / total_working_days if total_working_days > 0 else 0
+                equal_share = 0.30 * store_pool * working_day_ratio
+            else:
+                # Other stores: Divide equally among employees
+                equal_share = 0.30 * store_pool / total_employee_count if total_employee_count > 0 else 0
+
+            # 4.3: Calculate Manager Bonus (if applicable)
+            manager_bonus = 0
+            if emp['is_manager']:
+                if achievement_pct >= 100:
+                    manager_bonus = 3_000_000
+                elif achievement_pct >= 70:
+                    manager_bonus = 750_000
+
+            # 4.4: Calculate Total Store Commission
+            # If employee is on probation, they only receive equal share portion
+            if emp['is_probation']:
+                total_store_commission = equal_share
+            else:
+                total_store_commission = individual_share + equal_share + manager_bonus
+
+            results.append({
+                'employee_code': emp['employee_code'],
+                'full_name': emp['full_name'],
+                'seniority': emp['seniority'],
+                'is_manager': emp['is_manager'],
+                'is_probation': emp['is_probation'],
+                'working_day_count': emp['working_day_count'],
+                'store_code': store_code,
+                'individual_share': individual_share,
+                'equal_share': equal_share,
+                'manager_bonus': manager_bonus,
+                'total_store_commission': total_store_commission
+            })
+
+        # STEP 5: Return Results
+        return {
+            'eligible': True,
+            'store_code': store_code,
+            'achievement_pct': achievement_pct,
+            'actual_fp_ratio': actual_fp_ratio,
+            'store_target': store_target,
+            'actual_revenue': actual_revenue,
+            'store_pool': store_pool,
+            'total_employee_count': total_employee_count,
+            'total_working_days': total_working_days,
+            'employees': results
+        }
+
     def calculate_batch_store_commissions(
         self,
         employees: List[Dict[str, Any]],
