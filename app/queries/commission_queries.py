@@ -192,29 +192,45 @@ class CommissionQueries:
             ROUND(SUM(
                 CASE WHEN di.item_type = 2
                 THEN di.qty * -1
-                ELSE di.qty END * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt
+                ELSE di.qty END * (di.price - di.tax_amt)
             ), 0) as EMPLOYEE_REVENUE,
 
-            -- Full price revenue by employee (items with <= 30% total discount)
+            -- Full price revenue by employee (items with <= 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
+            -- Exception: RHN and RWP employees can count transactions from both RHN and RWP stores
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt
+                         AND dep.D_LONG_NAME NOT IN ('WJEW')
+                         AND (
+                             (e.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
+                             OR
+                             (e.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = e.STORE_CODE)
+                         )
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
                     ELSE 0
                 END
             ), 0) as EMPLOYEE_FP_REVENUE,
 
-            -- Discounted revenue by employee (items with > 30% total discount)
+            -- Discounted revenue by employee (items with > 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
+            -- Exception: RHN and RWP employees can count transactions from both RHN and RWP stores
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price * (1 - d.DISC_PERC/100)) - di.tax_amt
+                         AND dep.D_LONG_NAME NOT IN ('WJEW')
+                         AND (
+                             (e.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
+                             OR
+                             (e.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = e.STORE_CODE)
+                         )
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
                     ELSE 0
                 END
             ), 0) as EMPLOYEE_DISCOUNTED_REVENUE
 
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
+        JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
+        JOIN DCS dep ON dep.SID = i.DCS_SID
         JOIN EMPLOYEE_LIST_V e ON di.EMPLOYEE1_SID = e.SID
         WHERE d.STATUS = 4
           AND d.receipt_type in (0, 1)
@@ -222,10 +238,10 @@ class CommissionQueries:
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           -- Special handling for RHN and RWP stores: employees can overlap/work in both stores
-          -- For RHN/RWP: filter by where the sale was made (d.STORE_CODE)
+          -- For RHN/RWP: include both RHN and RWP employees and sales from both stores
           -- For other stores: filter by employee's assigned store (e.STORE_CODE)
           AND (
-              (:store_code IN ('RHN', 'RWP') AND d.STORE_CODE = :store_code)
+              (:store_code IN ('RHN', 'RWP') AND d.STORE_CODE = :store_code AND e.STORE_CODE IN ('RHN', 'RWP'))
               OR
               (:store_code NOT IN ('RHN', 'RWP') AND e.STORE_CODE = :store_code)
           )
@@ -253,30 +269,41 @@ class CommissionQueries:
     """
 
     # Personal commission sales data query
-    # Returns sales data filtered for personal commission calculation
+    # Returns ALL sales data (jewelry + non-jewelry) for personal commission calculation
+    # Returns DataFrame with columns matching pseudocode specification
     PERSONAL_COMMISSION_SALES_DATA = """
         SELECT
-            d.DOC_NO || '_' || di.SID                                             as sale_id,
-            di.EMPLOYEE1_FULL_NAME                                                as employee_id,
-            d.STORE_CODE                                                          as store_id,
+            di.SID                                                                as sale_id,
+            di.SCAN_UPC                                                           as upc,
+            e.UDF4_STRING                                                         as employee_code,
+            d.DOC_NO                                                              as bill_number,
+            d.STORE_CODE                                                          as store_code,
             TRUNC(d.CREATED_DATETIME)                                             as sale_date,
             TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
-            d.CREATED_DATETIME                                                    as sale_datetime,
+            ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
+                  di.price, 0)                                                    as revenue_with_vat,
             ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
                   (di.price - di.tax_amt), 0)                                     as revenue_before_vat,
             ROUND((1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) * 100, 2) / 100
                                                                                   as discount_rate,
+            CASE
+                WHEN dep.D_LONG_NAME IN ('WJEW', 'MJEW')
+                     OR di.VEND_CODE IN ('ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'ROM', 'SPK', 'TED', 'BRT')
+                THEN 1
+                ELSE 0
+            END                                                                   as is_jewelry,
+            di.VEND_CODE                                                          as vendor_code,
+            SUBSTR(i.DESCRIPTION2, INSTR(i.DESCRIPTION2, '-', -1) + 1)            as category,
             dep.D_LONG_NAME                                                       as department
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
         JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
         JOIN DCS dep ON dep.SID = i.DCS_SID
+        JOIN EMPLOYEE_LIST_V e ON di.EMPLOYEE1_SID = e.SID
         WHERE 1 = 1
           AND d.STATUS = 4
           AND di.ITEM_TYPE in (1, 2)
-          AND di.EMPLOYEE1_FULL_NAME IS NOT NULL
-          AND UPPER(dep.D_LONG_NAME) NOT LIKE '%JEWELRY%'
-          AND UPPER(dep.D_LONG_NAME) NOT LIKE '%เครื่องประดับ%'
+          AND e.UDF4_STRING IS NOT NULL
           AND TO_CHAR(d.CREATED_DATETIME, 'YYYY-MM') = :year_month
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
@@ -285,5 +312,5 @@ class CommissionQueries:
               WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
                 AND TO_CHAR(d2.CREATED_DATETIME, 'YYYY-MM') = :year_month
           )))
-        ORDER BY di.EMPLOYEE1_FULL_NAME, d.CREATED_DATETIME
+        ORDER BY e.UDF4_STRING, d.CREATED_DATETIME, d.DOC_NO
     """
