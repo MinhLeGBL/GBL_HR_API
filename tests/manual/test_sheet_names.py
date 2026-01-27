@@ -16,9 +16,9 @@ sheet_name = "Sheet1"  # Change this to the actual sheet name
 
 sheets_service = GoogleSheetsService()
 
-# Option 1: Get all sheet data (stores and employees)
+# Option 1: Get all sheet data (stores, employees, and query period)
 print("=" * 80)
-print("OPTION 1: Get All Sheet Data")
+print("OPTION 1: Get All Sheet Data (including query period from selector)")
 print("=" * 80)
 try:
     all_data = sheets_service.get_sheet_data(spreadsheet_id, sheet_name)
@@ -29,13 +29,31 @@ except Exception as e:
     traceback.print_exc()
 
 print("\n" + "=" * 80)
-print("OPTION 2: Get Store Commission Input (formatted for API)")
+print("OPTION 2: Get Store Commission Input (using month/year from sheet)")
 print("=" * 80)
 
-# Option 2: Get formatted input for a specific store
+# Option 2: Get formatted input for a specific store using sheet selector
 store_code = "RHN"  # Change this to test different stores
-from_date = "2025-11-01 00:00:00"
-to_date = "2025-11-30 23:59:59"
+
+try:
+    commission_input = sheets_service.get_store_commission_input(
+        spreadsheet_id=spreadsheet_id,
+        store_code=store_code,
+        sheet_name=sheet_name
+    )
+    print(json.dumps(commission_input, indent=2, ensure_ascii=False))
+except Exception as e:
+    print(f"Error: {e}")
+    import traceback
+    traceback.print_exc()
+
+print("\n" + "=" * 80)
+print("OPTION 3: Get Store Commission Input (with explicit dates)")
+print("=" * 80)
+
+# Option 3: Get formatted input with explicit dates (overriding sheet selector)
+from_date = "2025-10-01 00:00:00"
+to_date = "2025-10-31 23:59:59"
 
 try:
     commission_input = sheets_service.get_store_commission_input(

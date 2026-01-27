@@ -5,6 +5,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from typing import Dict, List, Any, Optional
 import os
+from datetime import datetime
+import calendar
 
 
 class GoogleSheetsService:
@@ -62,7 +64,7 @@ class GoogleSheetsService:
             sheet_name: Name of the sheet/tab to read from
 
         Returns:
-            Dictionary containing store data and employee data
+            Dictionary containing store data, employee data, and query period
         """
         if not self.client:
             raise Exception("Google Sheets client not initialized")
@@ -74,6 +76,9 @@ class GoogleSheetsService:
         # Get all values
         all_values = worksheet.get_all_values()
 
+        # Parse month and year selector (Row 2, Col F = index [1][5] and Row 3, Col F = index [2][5])
+        query_period = self._parse_query_period(all_values)
+
         # Parse store data (rows 3-7 in sheet = indices 2:7 in array)
         # Row 1: Title, Row 2: Headers, Rows 3-7: Data
         stores = self._parse_store_data(all_values[2:7])
@@ -84,8 +89,62 @@ class GoogleSheetsService:
 
         return {
             'stores': stores,
-            'employees': employees
+            'employees': employees,
+            'query_period': query_period
         }
+
+    def _parse_query_period(self, all_values: List[List[str]]) -> Dict[str, str]:
+        """
+        Parse month and year from sheet selector and convert to query period
+
+        Args:
+            all_values: All sheet values
+
+        Returns:
+            Dictionary with from_date and to_date
+        """
+        try:
+            # Month is in row 2, column F (index [1][5])
+            month_str = all_values[1][5].strip()
+            # Year is in row 3, column F (index [2][5])
+            year_str = all_values[2][5].strip()
+
+            # Convert month name to number
+            month_map = {
+                'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+                'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+                'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6,
+                'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12
+            }
+
+            month = month_map.get(month_str, 1)  # Default to January if not found
+            year = int(year_str) if year_str else datetime.now().year
+
+            # Get the last day of the month
+            last_day = calendar.monthrange(year, month)[1]
+
+            # Format dates
+            from_date = f"{year:04d}-{month:02d}-01 00:00:00"
+            to_date = f"{year:04d}-{month:02d}-{last_day:02d} 23:59:59"
+
+            return {
+                'from_date': from_date,
+                'to_date': to_date,
+                'month': month_str,
+                'year': year
+            }
+        except (IndexError, ValueError) as e:
+            # Return default values if parsing fails
+            now = datetime.now()
+            year = now.year
+            month = now.month
+            last_day = calendar.monthrange(year, month)[1]
+            return {
+                'from_date': f"{year:04d}-{month:02d}-01 00:00:00",
+                'to_date': f"{year:04d}-{month:02d}-{last_day:02d} 23:59:59",
+                'month': now.strftime('%b'),
+                'year': year
+            }
 
     def _parse_store_data(self, rows: List[List[str]]) -> List[Dict[str, Any]]:
         """
@@ -197,8 +256,8 @@ class GoogleSheetsService:
         self,
         spreadsheet_id: str,
         store_code: str,
-        from_date: str,
-        to_date: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
         sheet_name: str = 'Sheet1'
     ) -> Dict[str, Any]:
         """
@@ -207,8 +266,10 @@ class GoogleSheetsService:
         Args:
             spreadsheet_id: Google Sheets spreadsheet ID
             store_code: Store code to get data for
-            from_date: Start date for query period (YYYY-MM-DD HH:MI:SS)
-            to_date: End date for query period (YYYY-MM-DD HH:MI:SS)
+            from_date: Start date for query period (YYYY-MM-DD HH:MI:SS).
+                       If None, reads from sheet selector
+            to_date: End date for query period (YYYY-MM-DD HH:MI:SS).
+                     If None, reads from sheet selector
             sheet_name: Name of the sheet/tab to read from
 
         Returns:
@@ -216,6 +277,11 @@ class GoogleSheetsService:
         """
         # Get all data from sheet
         sheet_data = self.get_sheet_data(spreadsheet_id, sheet_name)
+
+        # Use query period from sheet if dates not provided
+        if from_date is None or to_date is None:
+            from_date = sheet_data['query_period']['from_date']
+            to_date = sheet_data['query_period']['to_date']
 
         # Find the store
         store = next((s for s in sheet_data['stores'] if s['store_code'] == store_code), None)
