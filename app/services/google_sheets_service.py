@@ -151,8 +151,14 @@ class GoogleSheetsService:
                 # Parse seniority (years)
                 seniority = int(row[5]) if row[5] and row[5].strip() else 0
 
-                # Parse is_probation (0 or 1 to boolean)
-                is_probation = bool(int(row[6])) if row[6] and row[6].strip() else False
+                # Parse is_probation (0/1 or TRUE/FALSE to boolean)
+                prob_value = row[6].strip().upper() if row[6] else ''
+                if prob_value in ('TRUE', '1'):
+                    is_probation = True
+                elif prob_value in ('FALSE', '0', ''):
+                    is_probation = False
+                else:
+                    is_probation = bool(int(row[6]))
 
                 # Parse personal target
                 target_str = row[8].replace(',', '').replace('.', '').strip() if len(row) > 8 else '0'
@@ -162,8 +168,14 @@ class GoogleSheetsService:
                 except ValueError:
                     personal_target = 0
 
-                # Parse is_manager (0 or 1 to boolean)
-                is_manager = bool(int(row[9])) if len(row) > 9 and row[9] and row[9].strip() else False
+                # Parse is_manager (0/1 or TRUE/FALSE to boolean)
+                manager_value = row[9].strip().upper() if len(row) > 9 and row[9] else ''
+                if manager_value in ('TRUE', '1'):
+                    is_manager = True
+                elif manager_value in ('FALSE', '0', ''):
+                    is_manager = False
+                else:
+                    is_manager = bool(int(row[9]))
 
                 # Parse working day count
                 working_day_count = int(row[10]) if len(row) > 10 and row[10] and row[10].strip() else 0
