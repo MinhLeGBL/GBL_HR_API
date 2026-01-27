@@ -46,25 +46,3 @@ except Exception as e:
     print(f"Error: {e}")
     import traceback
     traceback.print_exc()
-
-print("\n" + "=" * 80)
-print("OPTION 3: Get Store Commission Input (with explicit dates)")
-print("=" * 80)
-
-# Option 3: Get formatted input with explicit dates (overriding sheet selector)
-from_date = "2025-10-01 00:00:00"
-to_date = "2025-10-31 23:59:59"
-
-try:
-    commission_input = sheets_service.get_store_commission_input(
-        spreadsheet_id=spreadsheet_id,
-        store_code=store_code,
-        from_date=from_date,
-        to_date=to_date,
-        sheet_name=sheet_name
-    )
-    print(json.dumps(commission_input, indent=2, ensure_ascii=False))
-except Exception as e:
-    print(f"Error: {e}")
-    import traceback
-    traceback.print_exc()

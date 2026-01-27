@@ -256,8 +256,6 @@ class GoogleSheetsService:
         self,
         spreadsheet_id: str,
         store_code: str,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
         sheet_name: str = 'Sheet1'
     ) -> Dict[str, Any]:
         """
@@ -266,10 +264,6 @@ class GoogleSheetsService:
         Args:
             spreadsheet_id: Google Sheets spreadsheet ID
             store_code: Store code to get data for
-            from_date: Start date for query period (YYYY-MM-DD HH:MI:SS).
-                       If None, reads from sheet selector
-            to_date: End date for query period (YYYY-MM-DD HH:MI:SS).
-                     If None, reads from sheet selector
             sheet_name: Name of the sheet/tab to read from
 
         Returns:
@@ -278,10 +272,9 @@ class GoogleSheetsService:
         # Get all data from sheet
         sheet_data = self.get_sheet_data(spreadsheet_id, sheet_name)
 
-        # Use query period from sheet if dates not provided
-        if from_date is None or to_date is None:
-            from_date = sheet_data['query_period']['from_date']
-            to_date = sheet_data['query_period']['to_date']
+        # Use query period from sheet selector
+        from_date = sheet_data['query_period']['from_date']
+        to_date = sheet_data['query_period']['to_date']
 
         # Find the store
         store = next((s for s in sheet_data['stores'] if s['store_code'] == store_code), None)
