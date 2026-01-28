@@ -11,8 +11,13 @@ def get_oracle_connection():
         elif platform.system() == "Windows":
             d = r"W:\Oracle\instantclient_23_4"
         elif platform.system() == "Linux":
-            # For Linux, use the standard installation path
-            d = "/opt/oracle/instantclient_19_16"
+            # For Linux, check for different Oracle versions
+            if os.path.exists("/opt/oracle/instantclient_19_30"):
+                d = "/opt/oracle/instantclient_19_30"
+            elif os.path.exists("/opt/oracle/instantclient_19_16"):
+                d = "/opt/oracle/instantclient_19_16"
+            else:
+                d = "/opt/oracle/instantclient_19_30"  # Default to 19.30
 
         if d and os.path.exists(d):
             oracledb.init_oracle_client(lib_dir=d)

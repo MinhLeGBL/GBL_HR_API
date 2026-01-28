@@ -132,49 +132,67 @@ install_oracle_client() {
     log_info "Installing Oracle Instant Client..."
 
     ORACLE_DIR="/opt/oracle"
-    ORACLE_VERSION="19.16"
 
-    # Check if already installed
-    if [ -d "$ORACLE_DIR/instantclient_19_16" ]; then
-        log_info "Oracle Instant Client already installed"
-        return 0
+    # Check for different Oracle versions (19.30, 19.16, etc.)
+    # Look for existing installations
+    if [ -d "$ORACLE_DIR/instantclient_19_30" ]; then
+        log_info "Oracle Instant Client 19.30 already installed"
+        ORACLE_IC_DIR="$ORACLE_DIR/instantclient_19_30"
+    elif [ -d "$ORACLE_DIR/instantclient_19_16" ]; then
+        log_info "Oracle Instant Client 19.16 already installed"
+        ORACLE_IC_DIR="$ORACLE_DIR/instantclient_19_16"
+    else
+        # Not installed, check for ZIP files to install
+        ORACLE_IC_DIR=""
+
+        # Check for version 19.30 files first
+        if [ -f "/tmp/instantclient-basic-linux.x64-19.30.0.0.0dbru.zip" ]; then
+            log_info "Found Oracle 19.30 files, installing..."
+            ORACLE_VERSION="19.30"
+            ORACLE_IC_DIR="$ORACLE_DIR/instantclient_19_30"
+
+            mkdir -p $ORACLE_DIR
+            cd $ORACLE_DIR
+            unzip -q /tmp/instantclient-basic-linux.x64-19.30.0.0.0dbru.zip -d $ORACLE_DIR
+            unzip -q /tmp/instantclient-sdk-linux.x64-19.30.0.0.0dbru.zip -d $ORACLE_DIR
+
+        # Check for version 19.16 files
+        elif [ -f "/tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip" ]; then
+            log_info "Found Oracle 19.16 files, installing..."
+            ORACLE_VERSION="19.16"
+            ORACLE_IC_DIR="$ORACLE_DIR/instantclient_19_16"
+
+            mkdir -p $ORACLE_DIR
+            cd $ORACLE_DIR
+            unzip -q /tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip -d $ORACLE_DIR
+            unzip -q /tmp/instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip -d $ORACLE_DIR
+        else
+            # No files found
+            log_warn "Oracle Instant Client ZIP files not found in /tmp/"
+            log_warn ""
+            log_warn "To install Oracle Instant Client, download these files:"
+            log_warn "  https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html"
+            log_warn ""
+            log_warn "Supported versions: 19.30 or 19.16"
+            log_warn "  For 19.30: instantclient-basic-linux.x64-19.30.0.0.0dbru.zip"
+            log_warn "             instantclient-sdk-linux.x64-19.30.0.0.0dbru.zip"
+            log_warn "  For 19.16: instantclient-basic-linux.x64-19.16.0.0.0dbru.zip"
+            log_warn "             instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip"
+            log_warn ""
+            log_warn "Place them in /tmp/ and run this script again to install Oracle Client."
+            log_warn "Continuing setup without Oracle Client (you can add it later)..."
+            echo ""
+            sleep 2
+            return 0
+        fi
     fi
 
-    # Create Oracle directory
-    mkdir -p $ORACLE_DIR
-    cd $ORACLE_DIR
-
-    # Download Oracle Instant Client (Basic + SDK)
-    log_info "Downloading Oracle Instant Client..."
-
-    # Note: You may need to download these manually from Oracle website
-    # and place them in /tmp/ before running this script
-    if [ ! -f "/tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip" ]; then
-        log_warn "Oracle Instant Client ZIP files not found in /tmp/"
-        log_warn ""
-        log_warn "To install Oracle Instant Client, download these files:"
-        log_warn "  https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html"
-        log_warn ""
-        log_warn "Required files (Version 19.16):"
-        log_warn "  - instantclient-basic-linux.x64-19.16.0.0.0dbru.zip"
-        log_warn "  - instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip"
-        log_warn ""
-        log_warn "Place them in /tmp/ and run this script again to install Oracle Client."
-        log_warn "Continuing setup without Oracle Client (you can add it later)..."
-        echo ""
-        sleep 2
-        return 0
+    # Set up library path if we have an installation
+    if [ -n "$ORACLE_IC_DIR" ] && [ -d "$ORACLE_IC_DIR" ]; then
+        echo "$ORACLE_IC_DIR" > /etc/ld.so.conf.d/oracle-instantclient.conf
+        ldconfig
+        log_info "Oracle Instant Client installed successfully at $ORACLE_IC_DIR"
     fi
-
-    # Extract
-    unzip -q /tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip -d $ORACLE_DIR
-    unzip -q /tmp/instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip -d $ORACLE_DIR
-
-    # Set up library path
-    echo "$ORACLE_DIR/instantclient_19_16" > /etc/ld.so.conf.d/oracle-instantclient.conf
-    ldconfig
-
-    log_info "Oracle Instant Client installed successfully"
 }
 
 ################################################################################
