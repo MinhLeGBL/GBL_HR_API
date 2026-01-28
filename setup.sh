@@ -150,17 +150,19 @@ install_oracle_client() {
     # Note: You may need to download these manually from Oracle website
     # and place them in /tmp/ before running this script
     if [ ! -f "/tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip" ]; then
-        log_warn "Oracle Instant Client not found in /tmp/"
-        log_warn "Please download from: https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html"
+        log_warn "Oracle Instant Client ZIP files not found in /tmp/"
+        log_warn ""
+        log_warn "To install Oracle Instant Client, download these files:"
+        log_warn "  https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html"
+        log_warn ""
         log_warn "Required files (Version 19.16):"
         log_warn "  - instantclient-basic-linux.x64-19.16.0.0.0dbru.zip"
         log_warn "  - instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip"
-        log_warn "Place them in /tmp/ and run this script again"
-        read -p "Continue without Oracle Client? (y/n) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
+        log_warn ""
+        log_warn "Place them in /tmp/ and run this script again to install Oracle Client."
+        log_warn "Continuing setup without Oracle Client (you can add it later)..."
+        echo ""
+        sleep 2
         return 0
     fi
 
