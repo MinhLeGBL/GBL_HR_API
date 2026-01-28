@@ -181,12 +181,15 @@ class CommissionQueries:
     """
 
     # Get employee sales data for a specific store
+    # UPDATED: Now uses EMPLOYEE table with CUSTOMER and STORE joins instead of EMPLOYEE_LIST_V
+    # Returns employee_username (emp.USER_NAME) as the primary identifier for matching
     EMPLOYEE_SALES_DATA = """
         SELECT
-            e.UDF4_STRING as EMPLOYEE_CODE,
-            e.SID as EMPLOYEE_SID,
-            e.STORE_CODE as EMPLOYEE_STORE_CODE,
-            e.FULL_NAME as EMPLOYEE_FULL_NAME,
+            cust.UDF4_STRING as EMPLOYEE_CODE,
+            emp.SID as EMPLOYEE_SID,
+            emp.USER_NAME as EMPLOYEE_USERNAME,
+            emp_store.STORE_CODE as EMPLOYEE_STORE_CODE,
+            cust.FIRST_NAME as EMPLOYEE_FULL_NAME,
 
             -- Total revenue by employee (excluding tax, after discount)
             ROUND(SUM(
@@ -202,9 +205,9 @@ class CommissionQueries:
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
                          AND dep.D_LONG_NAME NOT IN ('WJEW')
                          AND (
-                             (e.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
+                             (emp_store.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
                              OR
-                             (e.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = e.STORE_CODE)
+                             (emp_store.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = emp_store.STORE_CODE)
                          )
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
                     ELSE 0
@@ -218,9 +221,9 @@ class CommissionQueries:
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
                          AND dep.D_LONG_NAME NOT IN ('WJEW')
                          AND (
-                             (e.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
+                             (emp_store.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
                              OR
-                             (e.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = e.STORE_CODE)
+                             (emp_store.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = emp_store.STORE_CODE)
                          )
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
                     ELSE 0
@@ -231,19 +234,22 @@ class CommissionQueries:
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
         JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
         JOIN DCS dep ON dep.SID = i.DCS_SID
-        JOIN EMPLOYEE_LIST_V e ON di.EMPLOYEE1_SID = e.SID
+        JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID
+        JOIN CUSTOMER cust ON emp.CUST_SID = cust.SID
+        JOIN STORE emp_store ON emp.BASE_STORE_SID = emp_store.SID
         WHERE d.STATUS = 4
           AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
+          AND emp.USER_NAME IS NOT NULL
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           -- Special handling for RHN and RWP stores: employees can overlap/work in both stores
           -- For RHN/RWP: include both RHN and RWP employees and sales from both stores
-          -- For other stores: filter by employee's assigned store (e.STORE_CODE)
+          -- For other stores: filter by employee's assigned store
           AND (
-              (:store_code IN ('RHN', 'RWP') AND d.STORE_CODE = :store_code AND e.STORE_CODE IN ('RHN', 'RWP'))
+              (:store_code IN ('RHN', 'RWP') AND d.STORE_CODE = :store_code AND emp_store.STORE_CODE IN ('RHN', 'RWP'))
               OR
-              (:store_code NOT IN ('RHN', 'RWP') AND e.STORE_CODE = :store_code)
+              (:store_code NOT IN ('RHN', 'RWP') AND emp_store.STORE_CODE = :store_code)
           )
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
@@ -253,19 +259,23 @@ class CommissionQueries:
                 AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
                 AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           )))
-        GROUP BY e.UDF4_STRING, e.SID, e.STORE_CODE, e.FULL_NAME
+        GROUP BY cust.UDF4_STRING, emp.SID, emp.USER_NAME, emp_store.STORE_CODE, cust.FIRST_NAME
         ORDER BY EMPLOYEE_REVENUE DESC
     """
 
     # Get employee information including tenure
+    # UPDATED: Now uses EMPLOYEE table with CUSTOMER and STORE joins instead of EMPLOYEE_LIST_V
     EMPLOYEE_INFO = """
         SELECT
-            UDF4_STRING as EMPLOYEE_CODE,
-            FULL_NAME,
-            STORE_CODE
-        FROM EMPLOYEE_LIST_V
-        WHERE STORE_CODE = :store_code
-        ORDER BY EMPLOYEE_CODE
+            cust.UDF4_STRING as EMPLOYEE_CODE,
+            cust.FIRST_NAME as FULL_NAME,
+            s.STORE_CODE
+        FROM EMPLOYEE emp
+        JOIN CUSTOMER cust ON emp.CUST_SID = cust.SID
+        JOIN STORE s ON emp.BASE_STORE_SID = s.SID
+        WHERE s.STORE_CODE = :store_code
+          AND emp.USER_NAME IS NOT NULL
+        ORDER BY cust.UDF4_STRING
     """
 
     # Personal commission sales data query
@@ -275,10 +285,11 @@ class CommissionQueries:
         SELECT
             di.SID                                                                as sale_id,
             di.SCAN_UPC                                                           as upc,
-            e.UDF4_STRING                                                         as employee_code,
+            emp.SID                                                               as employee_sid,
+            emp.USER_NAME                                                         as employee_username,
             d.DOC_NO                                                              as bill_number,
-            d.STORE_CODE                                                          as store_code,
-            TRUNC(d.CREATED_DATETIME)                                             as sale_date,
+            s.STORE_CODE                                                          as store_code,
+            TRUNC(d.invc_post_date)                                               as sale_date,
             TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
             ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
                   di.price, 0)                                                    as revenue_with_vat,
@@ -287,8 +298,7 @@ class CommissionQueries:
             ROUND((1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) * 100, 2) / 100
                                                                                   as discount_rate,
             CASE
-                WHEN dep.D_LONG_NAME IN ('WJEW', 'MJEW')
-                     OR di.VEND_CODE IN ('ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'ROM', 'SPK', 'TED', 'BRT')
+                WHEN di.VEND_CODE IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
                 THEN 1
                 ELSE 0
             END                                                                   as is_jewelry,
@@ -299,18 +309,19 @@ class CommissionQueries:
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
         JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
         JOIN DCS dep ON dep.SID = i.DCS_SID
-        JOIN EMPLOYEE_LIST_V e ON di.EMPLOYEE1_SID = e.SID
+        JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID
+        JOIN STORE s ON emp.BASE_STORE_SID = s.SID
         WHERE 1 = 1
           AND d.STATUS = 4
           AND di.ITEM_TYPE in (1, 2)
-          AND e.UDF4_STRING IS NOT NULL
-          AND TO_CHAR(d.CREATED_DATETIME, 'YYYY-MM') = :year_month
+          AND emp.USER_NAME IS NOT NULL
+          AND TO_CHAR(d.invc_post_date, 'YYYY-MM') = :year_month
           -- Exclude returns that reference sales from outside the query period
           AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
               SELECT 1 FROM DOCUMENT d2
               JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
               WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND TO_CHAR(d2.CREATED_DATETIME, 'YYYY-MM') = :year_month
+                AND TO_CHAR(d2.invc_post_date, 'YYYY-MM') = :year_month
           )))
-        ORDER BY e.UDF4_STRING, d.CREATED_DATETIME, d.DOC_NO
+        ORDER BY emp.SID, d.invc_post_date, d.DOC_NO
     """

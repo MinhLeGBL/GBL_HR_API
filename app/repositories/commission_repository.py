@@ -3,7 +3,7 @@ Commission Repository for executing commission-related queries
 """
 from typing import List, Dict, Any, Optional
 import pandas as pd
-from app.database.connection import get_oracle_connection
+from app.database.connection import get_oracle_connection, get_postgres_connection_ssh
 from app.queries.commission_queries import CommissionQueries
 
 
@@ -215,3 +215,56 @@ class CommissionRepository:
             employee_info = self.get_employee_info(store_code)
             results[store_code] = employee_info
         return results
+
+    def get_hand_carry_upcs(self) -> List[str]:
+        """
+        Get list of hand carry item UPCs from PostgreSQL rps.carrier_item table
+
+        Returns:
+            List of UPC strings for hand carry items
+        """
+        tunnel = None
+        conn = None
+        try:
+            # Connect to PostgreSQL through SSH tunnel
+            tunnel, conn = get_postgres_connection_ssh()
+
+            if not conn:
+                print("WARNING: Failed to connect to PostgreSQL. Hand carry commission will not be calculated.")
+                return []
+
+            # Query hand carry UPCs from rps.carrier_item table
+            query = """
+                SELECT DISTINCT scan_upc::TEXT as scan_upc
+                FROM rps.carrier_item
+                WHERE scan_upc IS NOT NULL
+                  AND TRIM(scan_upc::TEXT) != ''
+                ORDER BY scan_upc
+            """
+
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                results = cursor.fetchall()
+
+            # Extract UPCs from results (remove any whitespace)
+            upcs = [str(row[0]).strip() for row in results if row[0]]
+
+            print(f"✓ Retrieved {len(upcs)} hand carry UPCs from PostgreSQL")
+            return upcs
+
+        except Exception as e:
+            print(f"ERROR querying hand carry UPCs: {e}")
+            return []
+
+        finally:
+            # Close connections
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            if tunnel:
+                try:
+                    tunnel.stop()
+                except:
+                    pass
