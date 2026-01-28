@@ -10,6 +10,28 @@ This API provides commission calculation services for GBL retail stores, includi
 - Google Sheets integration for input/output
 - Batch processing for multiple stores
 
+## Quick Deployment
+
+**For Linux servers**, use one of these automated setup scripts:
+
+### Full Setup (Requires sudo/root)
+```bash
+git clone https://github.com/MinhLeGBL/GBL_HR_API.git
+cd GBL_HR_API
+git checkout deployment
+sudo bash setup.sh
+```
+
+### Quick Setup (No root required)
+```bash
+git clone https://github.com/MinhLeGBL/GBL_HR_API.git
+cd GBL_HR_API
+git checkout deployment
+bash quick-setup.sh
+```
+
+📖 **For detailed deployment instructions, see [DEPLOYMENT.md](DEPLOYMENT.md)**
+
 ## Requirements
 
 - Python 3.8+
@@ -17,7 +39,7 @@ This API provides commission calculation services for GBL retail stores, includi
 - PostgreSQL (Hand carry item data)
 - Google Cloud Service Account (for Sheets access)
 
-## Installation
+## Manual Installation
 
 1. Install dependencies:
 ```bash
