@@ -1,1 +1,0 @@
-# Sales Reports SQL queries

@@ -1,7 +1,7 @@
 import platform
 import os
 import oracledb
-from config.database import DATABASE_CONFIG
+from config.database import DATABASE_CONFIG, POSTGRES_CONFIG, SSH_CONFIG
 
 def get_oracle_connection():
     try:
@@ -39,3 +39,129 @@ def get_oracle_connection():
     except Exception as general_error:
         print(f"Unexpected error: {general_error}")
     return None
+
+
+def get_postgres_connection():
+    """
+    Connect to PostgreSQL database directly (without SSH tunnel)
+
+    Returns:
+        connection object if successful, None otherwise
+    """
+    try:
+        # Try to import psycopg2 first, then fall back to psycopg
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host=POSTGRES_CONFIG['host'],
+                port=POSTGRES_CONFIG['port'],
+                database=POSTGRES_CONFIG['database'],
+                user=POSTGRES_CONFIG['username'],
+                password=POSTGRES_CONFIG['password']
+            )
+            print(f"✓ Successfully connected to PostgreSQL at {POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}")
+            print(f"  Database: {POSTGRES_CONFIG['database']}")
+            print(f"  User: {POSTGRES_CONFIG['username']}")
+            return conn
+
+        except ImportError:
+            # Try psycopg (version 3)
+            import psycopg
+
+            conn = psycopg.connect(
+                host=POSTGRES_CONFIG['host'],
+                port=POSTGRES_CONFIG['port'],
+                dbname=POSTGRES_CONFIG['database'],
+                user=POSTGRES_CONFIG['username'],
+                password=POSTGRES_CONFIG['password']
+            )
+            print(f"✓ Successfully connected to PostgreSQL at {POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}")
+            print(f"  Database: {POSTGRES_CONFIG['database']}")
+            print(f"  User: {POSTGRES_CONFIG['username']}")
+            return conn
+
+    except ImportError as import_error:
+        print(f"ImportError: PostgreSQL driver not installed")
+        print(f"  Please install: pip install psycopg2-binary")
+        print(f"  Error details: {import_error}")
+    except Exception as error:
+        print(f"Error connecting to PostgreSQL: {error}")
+        print(f"  Host: {POSTGRES_CONFIG['host']}")
+        print(f"  Port: {POSTGRES_CONFIG['port']}")
+        print(f"  Database: {POSTGRES_CONFIG['database']}")
+        print(f"  User: {POSTGRES_CONFIG['username']}")
+    return None
+
+
+def get_postgres_connection_ssh():
+    """
+    Connect to PostgreSQL database through SSH tunnel
+
+    Returns:
+        tuple: (tunnel, connection) if successful, (None, None) otherwise
+        Both tunnel and connection should be closed when done
+    """
+    try:
+        from sshtunnel import SSHTunnelForwarder
+
+        # Create SSH tunnel
+        tunnel = SSHTunnelForwarder(
+            (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
+            ssh_username=SSH_CONFIG['ssh_username'],
+            ssh_password=SSH_CONFIG['ssh_password'],
+            remote_bind_address=('localhost', SSH_CONFIG['remote_port']),
+            local_bind_address=('localhost', SSH_CONFIG['local_port'])
+        )
+
+        # Start the tunnel
+        tunnel.start()
+        print(f"✓ SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
+        print(f"  Local port: {tunnel.local_bind_port}")
+        print(f"  Remote port: {SSH_CONFIG['remote_port']}")
+
+        # Try to connect to PostgreSQL through the tunnel
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host='localhost',
+                port=tunnel.local_bind_port,
+                database=POSTGRES_CONFIG['database'],
+                user=POSTGRES_CONFIG['username'],
+                password=POSTGRES_CONFIG['password']
+            )
+            print(f"✓ Successfully connected to PostgreSQL through SSH tunnel")
+            print(f"  Database: {POSTGRES_CONFIG['database']}")
+            print(f"  User: {POSTGRES_CONFIG['username']}")
+            return tunnel, conn
+
+        except ImportError:
+            # Try psycopg (version 3)
+            import psycopg
+
+            conn = psycopg.connect(
+                host='localhost',
+                port=tunnel.local_bind_port,
+                dbname=POSTGRES_CONFIG['database'],
+                user=POSTGRES_CONFIG['username'],
+                password=POSTGRES_CONFIG['password']
+            )
+            print(f"✓ Successfully connected to PostgreSQL through SSH tunnel")
+            print(f"  Database: {POSTGRES_CONFIG['database']}")
+            print(f"  User: {POSTGRES_CONFIG['username']}")
+            return tunnel, conn
+
+    except ImportError as import_error:
+        print(f"ImportError: Required library not installed")
+        print(f"  Please install: pip install sshtunnel psycopg2-binary")
+        print(f"  Error details: {import_error}")
+        return None, None
+    except Exception as error:
+        print(f"Error connecting to PostgreSQL through SSH: {error}")
+        print(f"  SSH Host: {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
+        print(f"  SSH User: {SSH_CONFIG['ssh_username']}")
+        print(f"  Database: {POSTGRES_CONFIG['database']}")
+        if 'tunnel' in locals() and tunnel:
+            tunnel.stop()
+        return None, None

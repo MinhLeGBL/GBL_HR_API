@@ -1,32 +1,95 @@
-# Test directory (only on development branch)
+# Deployment-specific ignores
 tests/
-
-# Documentation (only deployment-related docs allowed)
-docs/
 document/
+docs/
 !docs/deployment/
+debug_endpoint.py
+server.log
 
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
+
+# Distribution / packaging
 .Python
-.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+.env
+.venv
+env/
 venv/
 ENV/
+env.bak/
+venv.bak/
 
-# IDE
-.idea/
+# IDEs
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
 
-# Environment
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Security - Never commit credentials
+git_token.txt
+*.pem
+*.key
+credentials.json
 .env
-.env.local
 
-# Distribution
-dist/
-build/
-*.egg-info/
+# Temporary files
+temp/
+tmp/
+*.tmp
