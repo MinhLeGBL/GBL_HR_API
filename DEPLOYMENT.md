@@ -125,10 +125,11 @@ sudo yum install -y \
 
 #### Download Files
 
-Download from [Oracle Instant Client Downloads](https://www.oracle.com/database/technologies/instant-client/downloads.html):
+Download from [Oracle Instant Client Downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html):
 
-- `instantclient-basic-linux.x64-21.13.0.0.0dbru.zip`
-- `instantclient-sdk-linux.x64-21.13.0.0.0dbru.zip`
+**Version 19.16** (Required):
+- `instantclient-basic-linux.x64-19.16.0.0.0dbru.zip`
+- `instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip`
 
 #### Install
 
@@ -138,11 +139,11 @@ sudo mkdir -p /opt/oracle
 cd /opt/oracle
 
 # Extract files
-sudo unzip /path/to/instantclient-basic-linux.x64-21.13.0.0.0dbru.zip
-sudo unzip /path/to/instantclient-sdk-linux.x64-21.13.0.0.0dbru.zip
+sudo unzip /path/to/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip
+sudo unzip /path/to/instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip
 
 # Configure library path
-echo /opt/oracle/instantclient_21_13 | sudo tee /etc/ld.so.conf.d/oracle-instantclient.conf
+echo /opt/oracle/instantclient_19_16 | sudo tee /etc/ld.so.conf.d/oracle-instantclient.conf
 sudo ldconfig
 ```
 
@@ -324,7 +325,7 @@ curl "http://localhost:5000/api/v1/commission/store/calculate-from-sheet?spreads
 **Solution**: Ensure Oracle Instant Client is installed and library path is configured:
 
 ```bash
-export LD_LIBRARY_PATH=/opt/oracle/instantclient_21_13:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/opt/oracle/instantclient_19_16:$LD_LIBRARY_PATH
 sudo ldconfig
 ```
 

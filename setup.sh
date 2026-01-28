@@ -132,10 +132,10 @@ install_oracle_client() {
     log_info "Installing Oracle Instant Client..."
 
     ORACLE_DIR="/opt/oracle"
-    ORACLE_VERSION="21.13"
+    ORACLE_VERSION="19.16"
 
     # Check if already installed
-    if [ -d "$ORACLE_DIR/instantclient_21_13" ]; then
+    if [ -d "$ORACLE_DIR/instantclient_19_16" ]; then
         log_info "Oracle Instant Client already installed"
         return 0
     fi
@@ -149,12 +149,12 @@ install_oracle_client() {
 
     # Note: You may need to download these manually from Oracle website
     # and place them in /tmp/ before running this script
-    if [ ! -f "/tmp/instantclient-basic-linux.x64-21.13.0.0.0dbru.zip" ]; then
+    if [ ! -f "/tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip" ]; then
         log_warn "Oracle Instant Client not found in /tmp/"
-        log_warn "Please download from: https://www.oracle.com/database/technologies/instant-client/downloads.html"
-        log_warn "Required files:"
-        log_warn "  - instantclient-basic-linux.x64-21.13.0.0.0dbru.zip"
-        log_warn "  - instantclient-sdk-linux.x64-21.13.0.0.0dbru.zip"
+        log_warn "Please download from: https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html"
+        log_warn "Required files (Version 19.16):"
+        log_warn "  - instantclient-basic-linux.x64-19.16.0.0.0dbru.zip"
+        log_warn "  - instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip"
         log_warn "Place them in /tmp/ and run this script again"
         read -p "Continue without Oracle Client? (y/n) " -n 1 -r
         echo
@@ -165,11 +165,11 @@ install_oracle_client() {
     fi
 
     # Extract
-    unzip -q /tmp/instantclient-basic-linux.x64-21.13.0.0.0dbru.zip -d $ORACLE_DIR
-    unzip -q /tmp/instantclient-sdk-linux.x64-21.13.0.0.0dbru.zip -d $ORACLE_DIR
+    unzip -q /tmp/instantclient-basic-linux.x64-19.16.0.0.0dbru.zip -d $ORACLE_DIR
+    unzip -q /tmp/instantclient-sdk-linux.x64-19.16.0.0.0dbru.zip -d $ORACLE_DIR
 
     # Set up library path
-    echo "$ORACLE_DIR/instantclient_21_13" > /etc/ld.so.conf.d/oracle-instantclient.conf
+    echo "$ORACLE_DIR/instantclient_19_16" > /etc/ld.so.conf.d/oracle-instantclient.conf
     ldconfig
 
     log_info "Oracle Instant Client installed successfully"
@@ -252,7 +252,7 @@ User=$APP_USER
 Group=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin"
-Environment="LD_LIBRARY_PATH=/opt/oracle/instantclient_21_13"
+Environment="LD_LIBRARY_PATH=/opt/oracle/instantclient_19_16"
 ExecStart=$VENV_DIR/bin/gunicorn \\
     --bind 0.0.0.0:$SERVICE_PORT \\
     --workers 4 \\

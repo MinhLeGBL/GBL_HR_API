@@ -5,11 +5,14 @@ from config.database import DATABASE_CONFIG, POSTGRES_CONFIG, SSH_CONFIG
 
 def get_oracle_connection():
     try:
-        d = None  # default suitable for Linux
+        d = None
         if platform.system() == "Darwin" and platform.machine() == "x86_64":  # macOS
             d = os.environ.get("HOME") + ("/Downloads/instantclient_19_16")
         elif platform.system() == "Windows":
             d = r"W:\Oracle\instantclient_23_4"
+        elif platform.system() == "Linux":
+            # For Linux, use the standard installation path
+            d = "/opt/oracle/instantclient_19_16"
 
         if d and os.path.exists(d):
             oracledb.init_oracle_client(lib_dir=d)
