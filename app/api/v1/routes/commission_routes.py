@@ -10,304 +10,6 @@ import io
 commission_bp = Blueprint('commission', __name__, url_prefix='/api/v1/commission')
 
 
-@commission_bp.route('/calculate', methods=['POST'])
-def calculate_commission():
-    """
-    Calculate store commission for employees
-
-    Request Body:
-        {
-            "store_code": "string",
-            "store_name": "string",
-            "target_revenue": number,
-            "target_fp_ratio": number (0.0 to 1.0),
-            "year": integer,
-            "month": integer,
-            "start_date": "YYYY-MM-DD HH:MI:SS",
-            "end_date": "YYYY-MM-DD HH:MI:SS"
-        }
-
-    Returns:
-        JSON response with commission calculation results
-    """
-    try:
-        data = request.get_json()
-
-        # Validate required fields
-        required_fields = [
-            'store_code', 'store_name', 'target_revenue', 'target_fp_ratio',
-            'year', 'month', 'start_date', 'end_date'
-        ]
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
-        # Validate target_fp_ratio range
-        if not (0.0 <= data['target_fp_ratio'] <= 1.0):
-            return jsonify({
-                'success': False,
-                'error': 'target_fp_ratio must be between 0.0 and 1.0'
-            }), 400
-
-        # Execute commission calculation
-        service = CommissionService()
-        result = service.calculate_store_commission(
-            store_code=data['store_code'],
-            store_name=data['store_name'],
-            target_revenue=data['target_revenue'],
-            target_fp_ratio=data['target_fp_ratio'],
-            year=data['year'],
-            month=data['month'],
-            start_date=data['start_date'],
-            end_date=data['end_date']
-        )
-
-        return jsonify({
-            'success': True,
-            'data': result
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@commission_bp.route('/dataframe', methods=['POST'])
-def get_commission_dataframe():
-    """
-    Get commission data as a pandas DataFrame (JSON format)
-
-    Request Body:
-        {
-            "store_code": "string",
-            "store_name": "string",
-            "target_revenue": number,
-            "target_fp_ratio": number (0.0 to 1.0),
-            "year": integer,
-            "month": integer,
-            "start_date": "YYYY-MM-DD HH:MI:SS",
-            "end_date": "YYYY-MM-DD HH:MI:SS"
-        }
-
-    Returns:
-        JSON response with DataFrame in records format
-    """
-    try:
-        data = request.get_json()
-
-        # Validate required fields
-        required_fields = [
-            'store_code', 'store_name', 'target_revenue', 'target_fp_ratio',
-            'year', 'month', 'start_date', 'end_date'
-        ]
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
-        # Validate target_fp_ratio range
-        if not (0.0 <= data['target_fp_ratio'] <= 1.0):
-            return jsonify({
-                'success': False,
-                'error': 'target_fp_ratio must be between 0.0 and 1.0'
-            }), 400
-
-        # Get DataFrame
-        service = CommissionService()
-        df = service.get_commission_dataframe(
-            store_code=data['store_code'],
-            store_name=data['store_name'],
-            target_revenue=data['target_revenue'],
-            target_fp_ratio=data['target_fp_ratio'],
-            year=data['year'],
-            month=data['month'],
-            start_date=data['start_date'],
-            end_date=data['end_date']
-        )
-
-        # Convert DataFrame to JSON
-        df_json = df.to_dict(orient='records')
-
-        return jsonify({
-            'success': True,
-            'data': {
-                'records': df_json,
-                'columns': list(df.columns),
-                'row_count': len(df)
-            }
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@commission_bp.route('/export/csv', methods=['POST'])
-def export_commission_csv():
-    """
-    Export commission data as CSV file
-
-    Request Body:
-        {
-            "store_code": "string",
-            "store_name": "string",
-            "target_revenue": number,
-            "target_fp_ratio": number (0.0 to 1.0),
-            "year": integer,
-            "month": integer,
-            "start_date": "YYYY-MM-DD HH:MI:SS",
-            "end_date": "YYYY-MM-DD HH:MI:SS"
-        }
-
-    Returns:
-        CSV file download
-    """
-    try:
-        data = request.get_json()
-
-        # Validate required fields
-        required_fields = [
-            'store_code', 'store_name', 'target_revenue', 'target_fp_ratio',
-            'year', 'month', 'start_date', 'end_date'
-        ]
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
-        # Validate target_fp_ratio range
-        if not (0.0 <= data['target_fp_ratio'] <= 1.0):
-            return jsonify({
-                'success': False,
-                'error': 'target_fp_ratio must be between 0.0 and 1.0'
-            }), 400
-
-        # Get DataFrame
-        service = CommissionService()
-        df = service.get_commission_dataframe(
-            store_code=data['store_code'],
-            store_name=data['store_name'],
-            target_revenue=data['target_revenue'],
-            target_fp_ratio=data['target_fp_ratio'],
-            year=data['year'],
-            month=data['month'],
-            start_date=data['start_date'],
-            end_date=data['end_date']
-        )
-
-        # Convert to CSV
-        output = io.StringIO()
-        df.to_csv(output, index=False)
-        output.seek(0)
-
-        # Create response
-        response = Response(
-            output.getvalue(),
-            mimetype='text/csv',
-            headers={
-                'Content-Disposition': f'attachment; filename=commission_{data["store_code"]}_{data["year"]}_{data["month"]}.csv'
-            }
-        )
-
-        return response
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@commission_bp.route('/export/excel', methods=['POST'])
-def export_commission_excel():
-    """
-    Export commission data as Excel file
-
-    Request Body:
-        {
-            "store_code": "string",
-            "store_name": "string",
-            "target_revenue": number,
-            "target_fp_ratio": number (0.0 to 1.0),
-            "year": integer,
-            "month": integer,
-            "start_date": "YYYY-MM-DD HH:MI:SS",
-            "end_date": "YYYY-MM-DD HH:MI:SS"
-        }
-
-    Returns:
-        Excel file download
-    """
-    try:
-        data = request.get_json()
-
-        # Validate required fields
-        required_fields = [
-            'store_code', 'store_name', 'target_revenue', 'target_fp_ratio',
-            'year', 'month', 'start_date', 'end_date'
-        ]
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
-        # Validate target_fp_ratio range
-        if not (0.0 <= data['target_fp_ratio'] <= 1.0):
-            return jsonify({
-                'success': False,
-                'error': 'target_fp_ratio must be between 0.0 and 1.0'
-            }), 400
-
-        # Get DataFrame
-        service = CommissionService()
-        df = service.get_commission_dataframe(
-            store_code=data['store_code'],
-            store_name=data['store_name'],
-            target_revenue=data['target_revenue'],
-            target_fp_ratio=data['target_fp_ratio'],
-            year=data['year'],
-            month=data['month'],
-            start_date=data['start_date'],
-            end_date=data['end_date']
-        )
-
-        # Convert to Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Commission')
-        output.seek(0)
-
-        # Create response
-        response = Response(
-            output.getvalue(),
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            headers={
-                'Content-Disposition': f'attachment; filename=commission_{data["store_code"]}_{data["year"]}_{data["month"]}.xlsx'
-            }
-        )
-
-        return response
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
 @commission_bp.route('/personal/calculate', methods=['POST'])
 def calculate_personal_commission():
     """
@@ -635,76 +337,161 @@ def calculate_store_commission_v2():
 @commission_bp.route('/store/calculate-from-sheet', methods=['GET'])
 def calculate_store_commission_from_sheet():
     """
-    Calculate store commission by reading input data from Google Sheets
+    Calculate store and personal commissions for ALL stores by reading input data from Google Sheets,
+    then upload results back to the sheet
 
     Query Parameters:
-        - spreadsheet_id: Google Sheets spreadsheet ID (required)
-        - store_code: Store code to calculate commission for (required)
-        - from_date: Start date in YYYY-MM-DD HH:MI:SS format (required)
-        - to_date: End date in YYYY-MM-DD HH:MI:SS format (required)
+        - spreadsheet_title: Google Sheets spreadsheet title/name (optional - if provided, will search for sheet by name)
+        - spreadsheet_id: Google Sheets spreadsheet ID (optional - direct ID access)
         - sheet_name: Name of the sheet/tab (optional, default: 'Sheet1')
 
+    Note: Provide either spreadsheet_title OR spreadsheet_id (title takes precedence)
+
     Returns:
-        JSON response with commission calculation results
+        JSON response with commission calculation results and upload status for all stores
     """
     try:
         # Get query parameters
+        spreadsheet_title = request.args.get('spreadsheet_title')
         spreadsheet_id = request.args.get('spreadsheet_id')
-        store_code = request.args.get('store_code')
-        from_date = request.args.get('from_date')
-        to_date = request.args.get('to_date')
         sheet_name = request.args.get('sheet_name', 'Sheet1')
 
-        # Validate required parameters
+        # Initialize services
+        sheets_service = GoogleSheetsService()
+        commission_service = CommissionService()
+
+        # Find spreadsheet ID if title is provided
+        if spreadsheet_title:
+            try:
+                spreadsheet_id = sheets_service.find_spreadsheet_by_title(spreadsheet_title)
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': f'Could not find spreadsheet: {str(e)}'
+                }), 404
+
+        # Validate that we have a spreadsheet ID
         if not spreadsheet_id:
             return jsonify({
                 'success': False,
-                'error': 'Missing required parameter: spreadsheet_id'
+                'error': 'Missing required parameter: spreadsheet_title or spreadsheet_id'
             }), 400
 
-        if not store_code:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required parameter: store_code'
-            }), 400
-
-        if not from_date:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required parameter: from_date'
-            }), 400
-
-        if not to_date:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required parameter: to_date'
-            }), 400
-
-        # Initialize Google Sheets service
-        sheets_service = GoogleSheetsService()
-
-        # Get commission input data from Google Sheets
-        commission_input = sheets_service.get_store_commission_input(
+        # Step 1: Clear output ranges
+        sheets_service.clear_output_ranges(
             spreadsheet_id=spreadsheet_id,
-            store_code=store_code,
-            from_date=from_date,
-            to_date=to_date,
             sheet_name=sheet_name
         )
 
-        # Calculate commission using the v2 method
-        commission_service = CommissionService()
-        result = commission_service.calculate_store_commission_v2(
-            store_code=commission_input['store_code'],
-            store_target=commission_input['store_target'],
-            store_fp_ratio_target=commission_input['store_fp_ratio_target'],
-            query_date=commission_input['query_date'],
-            employees=commission_input['employees']
+        # Step 2: Get input data from Google Sheets
+        sheet_data = sheets_service.get_sheet_data(spreadsheet_id, sheet_name)
+
+        # Extract query period from sheet selector
+        from_date = sheet_data['query_period']['from_date']
+        to_date = sheet_data['query_period']['to_date']
+        month = sheet_data['query_period'].get('month')
+        year = sheet_data['query_period'].get('year')
+
+        # Parse month and year from selector
+        month_map = {
+            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+            'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6,
+            'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12
+        }
+        month_num = month_map.get(month, 1) if isinstance(month, str) else month
+        year_num = year if isinstance(year, int) else int(year)
+
+        # Step 3: Process all stores
+        all_store_results = []
+        all_combined_dfs = []
+
+        for store_data in sheet_data['stores']:
+            store_code = store_data['store_code']
+
+            # Filter employees for this store
+            store_employees = [emp for emp in sheet_data['employees'] if emp['store_code'] == store_code]
+
+            if not store_employees:
+                # Skip stores with no employees
+                continue
+
+            # Calculate store commission
+            store_commission_result = commission_service.calculate_store_commission_v2(
+                store_code=store_code,
+                store_target=store_data['store_target'],
+                store_fp_ratio_target=store_data['store_fp_ratio_target'],
+                query_date={'from_date': from_date, 'to_date': to_date},
+                employees=store_employees
+            )
+
+            # Calculate personal commission
+            personal_commission_df = commission_service.calculate_personal_commissions(
+                month=month_num,
+                year=year_num,
+                employees=store_employees,
+                store_code=store_code
+            )
+
+            # Combine both commissions
+            combined_commission_df = commission_service.calculate_combined_commission(
+                store_commission_result=store_commission_result,
+                personal_commission_df=personal_commission_df
+            )
+
+            # Collect results
+            all_store_results.append(store_commission_result)
+            all_combined_dfs.append(combined_commission_df)
+
+        # Step 4: Concatenate all employee DataFrames
+        if not all_combined_dfs:
+            return jsonify({
+                'success': False,
+                'error': 'No employees found in any store'
+            }), 400
+
+        final_combined_df = pd.concat(all_combined_dfs, ignore_index=True)
+
+        # Step 5: Upload results back to Google Sheets
+        sheets_service.upload_commission_results(
+            spreadsheet_id=spreadsheet_id,
+            store_commission_results=all_store_results,
+            combined_commission_df=final_combined_df,
+            sheet_name=sheet_name
         )
+
+        # Step 6: Prepare summary for all stores
+        total_employees = len(final_combined_df)
+        total_commission = float(final_combined_df['total_handout_commission'].sum())
+
+        store_summaries = []
+        for store_result in all_store_results:
+            store_code = store_result['store_code']
+            store_df = final_combined_df[final_combined_df['store_code'] == store_code]
+            store_summaries.append({
+                'store_code': store_code,
+                'achievement_pct': store_result.get('achievement_pct', 0),
+                'actual_fp_ratio': store_result.get('actual_fp_ratio', 0),
+                'eligible': store_result.get('eligible', False),
+                'employee_count': len(store_df),
+                'total_commission': float(store_df['total_handout_commission'].sum())
+            })
 
         return jsonify({
             'success': True,
-            'data': result
+            'message': 'Commission calculated and uploaded to sheet successfully for all stores',
+            'data': {
+                'total_stores': len(all_store_results),
+                'total_employees': total_employees,
+                'total_commission': total_commission,
+                'stores': store_summaries,
+                'period': {
+                    'from_date': from_date,
+                    'to_date': to_date,
+                    'month': month,
+                    'year': year
+                }
+            }
         }), 200
 
     except ValueError as e:

@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 import os
 from datetime import datetime
 import calendar
+import pandas as pd
 
 
 class GoogleSheetsService:
@@ -39,8 +40,9 @@ class GoogleSheetsService:
                         credentials_file = 'config/credentials.json'  # Will fail with proper error
 
         # Define the scopes
+        # Note: Using full spreadsheets scope for both read and write operations
         scopes = [
-            'https://www.googleapis.com/auth/spreadsheets.readonly',
+            'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive.readonly'
         ]
 
@@ -54,6 +56,32 @@ class GoogleSheetsService:
         except Exception as e:
             print(f"Failed to initialize Google Sheets client: {e}")
             self.client = None
+
+    def find_spreadsheet_by_title(self, title: str) -> str:
+        """
+        Find spreadsheet by title and return its ID
+
+        Args:
+            title: Title of the spreadsheet to find
+
+        Returns:
+            Spreadsheet ID
+
+        Raises:
+            Exception if spreadsheet not found
+        """
+        if not self.client:
+            raise Exception("Google Sheets client not initialized")
+
+        # Get all spreadsheets accessible to this service account
+        spreadsheets = self.client.openall()
+
+        # Find matching spreadsheet
+        for spreadsheet in spreadsheets:
+            if spreadsheet.title == title:
+                return spreadsheet.id
+
+        raise Exception(f"Spreadsheet with title '{title}' not found. Available sheets: {[s.title for s in spreadsheets]}")
 
     def get_sheet_data(self, spreadsheet_id: str, sheet_name: str = 'Sheet1') -> Dict[str, Any]:
         """
@@ -104,10 +132,10 @@ class GoogleSheetsService:
             Dictionary with from_date and to_date
         """
         try:
-            # Month is in row 2, column F (index [1][5])
-            month_str = all_values[1][5].strip()
-            # Year is in row 3, column F (index [2][5])
-            year_str = all_values[2][5].strip()
+            # Month is in row 2, column H (index [1][7])
+            month_str = all_values[1][7].strip()
+            # Year is in row 3, column H (index [2][7])
+            year_str = all_values[2][7].strip()
 
             # Convert month name to number
             month_map = {
@@ -181,18 +209,19 @@ class GoogleSheetsService:
         """
         Parse employee data from sheet rows
 
-        Expected columns:
+        Expected columns (updated with Employee Acc inserted at column 2):
         0: No (skip)
         1: Store Code
-        2: Employee Code
-        3: Fullname
-        4: Join year
-        5: Seniority (years)
-        6: is_probation (0 or 1)
-        7: Contract
-        8: Personal target
-        9: is_manager (0 or 1)
-        10: Working day count
+        2: Employee Acc (username) - MAPS TO EMPLOYEE.USER_NAME
+        3: Employee Code
+        4: Fullname
+        5: Join year
+        6: Seniority (years)
+        7: is_probation (0 or 1)
+        8: Contract
+        9: Personal target
+        10: is_manager (0 or 1)
+        11: Working day count
 
         Args:
             rows: List of rows containing employee data
@@ -204,23 +233,36 @@ class GoogleSheetsService:
         for row in rows:
             if len(row) >= 11 and row[1]:  # Ensure row has store code
                 store_code = row[1].strip()
-                employee_code = row[2].strip()
-                full_name = row[3].strip()
+
+                # Parse employee username (Employee Acc) - NOW AT COLUMN 2
+                # This maps to EMPLOYEE.USER_NAME in Oracle database
+                # Some employees may not have username (can't sell but get store commission share)
+                employee_username = row[2].strip() if len(row) > 2 and row[2] else None
+
+                employee_code = row[3].strip() if len(row) > 3 else ''
+                full_name = row[4].strip() if len(row) > 4 else ''
 
                 # Parse seniority (years)
-                seniority = int(row[5]) if row[5] and row[5].strip() else 0
+                # Handle cases where seniority might be a date or non-integer value
+                try:
+                    seniority = int(row[6]) if len(row) > 6 and row[6] and row[6].strip() else 0
+                except (ValueError, AttributeError):
+                    seniority = 0
 
                 # Parse is_probation (0/1 or TRUE/FALSE to boolean)
-                prob_value = row[6].strip().upper() if row[6] else ''
+                prob_value = row[7].strip().upper() if len(row) > 7 and row[7] else ''
                 if prob_value in ('TRUE', '1'):
                     is_probation = True
-                elif prob_value in ('FALSE', '0', ''):
+                elif prob_value in ('FALSE', '0', '', '-'):
                     is_probation = False
                 else:
-                    is_probation = bool(int(row[6]))
+                    try:
+                        is_probation = bool(int(row[7]))
+                    except (ValueError, AttributeError):
+                        is_probation = False
 
                 # Parse personal target
-                target_str = row[8].replace(',', '').replace('.', '').strip() if len(row) > 8 else '0'
+                target_str = row[9].replace(',', '').replace('.', '').strip() if len(row) > 9 else '0'
                 # Handle empty, dash, or invalid values
                 try:
                     personal_target = float(target_str) if target_str and target_str != '-' else 0
@@ -228,20 +270,27 @@ class GoogleSheetsService:
                     personal_target = 0
 
                 # Parse is_manager (0/1 or TRUE/FALSE to boolean)
-                manager_value = row[9].strip().upper() if len(row) > 9 and row[9] else ''
+                manager_value = row[10].strip().upper() if len(row) > 10 and row[10] else ''
                 if manager_value in ('TRUE', '1'):
                     is_manager = True
-                elif manager_value in ('FALSE', '0', ''):
+                elif manager_value in ('FALSE', '0', '', '-'):
                     is_manager = False
                 else:
-                    is_manager = bool(int(row[9]))
+                    try:
+                        is_manager = bool(int(row[10]))
+                    except (ValueError, AttributeError):
+                        is_manager = False
 
                 # Parse working day count
-                working_day_count = int(row[10]) if len(row) > 10 and row[10] and row[10].strip() else 0
+                try:
+                    working_day_count = int(row[11]) if len(row) > 11 and row[11] and row[11].strip() else 0
+                except (ValueError, AttributeError):
+                    working_day_count = 0
 
                 employees.append({
                     'store_code': store_code,
                     'employee_code': employee_code,
+                    'employee_username': employee_username,
                     'full_name': full_name,
                     'seniority': seniority,
                     'is_probation': is_probation,
@@ -309,3 +358,166 @@ class GoogleSheetsService:
                 for emp in store_employees
             ]
         }
+
+    def clear_output_ranges(self, spreadsheet_id: str, sheet_name: str = 'Sheet1') -> None:
+        """
+        Clear output value ranges in the Google Sheet (preserves formatting)
+
+        Clears the following ranges:
+        - D3:E7: Store output data (revenue, achievement, etc.)
+        - N8: Summary cell
+        - M11:Z200: Employee commission output data
+
+        Args:
+            spreadsheet_id: Google Sheets spreadsheet ID
+            sheet_name: Name of the sheet/tab to clear ranges from
+        """
+        if not self.client:
+            raise Exception("Google Sheets client not initialized")
+
+        # Open the spreadsheet
+        spreadsheet = self.client.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(sheet_name)
+
+        # Define ranges to clear with their dimensions
+        # D3:E7 = 5 rows x 2 columns
+        # N8 = 1 row x 1 column
+        # M11:Z200 = 190 rows x 14 columns
+
+        ranges_data = [
+            {
+                'range': 'D3:E7',
+                'values': [['' for _ in range(2)] for _ in range(5)]
+            },
+            {
+                'range': 'N8',
+                'values': [['']]
+            },
+            {
+                'range': 'M11:Z200',
+                'values': [['' for _ in range(14)] for _ in range(190)]
+            }
+        ]
+
+        # Batch update all ranges with empty values (preserves formatting)
+        worksheet.batch_update(ranges_data)
+
+    def upload_commission_results(
+        self,
+        spreadsheet_id: str,
+        store_commission_results: List[Dict[str, Any]],
+        combined_commission_df: pd.DataFrame,
+        sheet_name: str = 'Sheet1'
+    ) -> None:
+        """
+        Upload commission calculation results to Google Sheets
+
+        Args:
+            spreadsheet_id: Google Sheets spreadsheet ID
+            store_commission_results: List of dictionaries with store-level results, each containing:
+                - store_code: str
+                - achievement_pct: float
+                - actual_fp_ratio: float
+            combined_commission_df: DataFrame with employee commission data containing columns:
+                - employee_code, store_code, store_achievement_pct,
+                - store_commission_70pct, store_commission_30pct, manager_bonus, total_store_commission,
+                - personal_commission_fp_under_100, personal_commission_discount_under_100,
+                - personal_commission_over_100, personal_commission_jewelry,
+                - personal_commission_vhernier, personal_commission_rosa_maria,
+                - personal_commission_suitcase, personal_commission_hand_carry,
+                - personal_commission_total, total_handout_commission
+            sheet_name: Name of the sheet/tab to update
+        """
+        if not self.client:
+            raise Exception("Google Sheets client not initialized")
+
+        # Open the spreadsheet
+        spreadsheet = self.client.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(sheet_name)
+
+        # Get current sheet data to match store codes and employee codes
+        all_values = worksheet.get_all_values()
+
+        # ==================== UPDATE STORE DATA (Rows 3-7) ====================
+        # Column A contains store codes, Column D for achievement %, Column E for FP ratio %
+        store_updates = []
+
+        for row_idx in range(2, 7):  # Rows 3-7 (indices 2-6)
+            if row_idx < len(all_values):
+                row = all_values[row_idx]
+                if len(row) > 0 and row[0]:  # Column A has store code
+                    sheet_store_code = row[0].strip()
+
+                    # Find matching store in results list
+                    matching_store = next(
+                        (store for store in store_commission_results if store.get('store_code') == sheet_store_code),
+                        None
+                    )
+
+                    if matching_store:
+                        # Update achievement % (Column D)
+                        achievement_pct = matching_store.get('achievement_pct', 0)
+                        store_updates.append({
+                            'range': f'D{row_idx + 1}',
+                            'values': [[achievement_pct / 100]]  # Convert to decimal for percentage format
+                        })
+
+                        # Update FP ratio % (Column E)
+                        actual_fp_ratio = matching_store.get('actual_fp_ratio', 0)
+                        store_updates.append({
+                            'range': f'E{row_idx + 1}',
+                            'values': [[actual_fp_ratio]]  # Already in decimal format
+                        })
+
+        # ==================== UPDATE EMPLOYEE DATA (Row 11 downward) ====================
+        # Column D contains employee codes for matching
+        employee_updates = []
+
+        for row_idx in range(10, len(all_values)):  # Starting from row 11 (index 10)
+            row = all_values[row_idx]
+            if len(row) > 3 and row[3]:  # Column D (index 3) has employee code
+                sheet_employee_code = row[3].strip()
+
+                # Find matching employee in DataFrame
+                matching_rows = combined_commission_df[
+                    combined_commission_df['employee_code'] == sheet_employee_code
+                ]
+
+                if len(matching_rows) > 0:
+                    emp_data = matching_rows.iloc[0]
+                    sheet_row = row_idx + 1  # Convert to 1-indexed row number
+
+                    # Prepare employee commission data
+                    # Convert numpy types to Python native types for JSON serialization
+                    employee_updates.append({
+                        'range': f'M{sheet_row}:Z{sheet_row}',
+                        'values': [[
+                            float(emp_data['store_commission_70pct']),          # M: Individual share
+                            float(emp_data['store_commission_30pct']),          # N: Equal share
+                            float(emp_data['manager_bonus']),                   # O: Manager bonus
+                            float(emp_data['total_store_commission']),          # P: Total store commission
+                            float(emp_data['personal_commission_fp_under_100']), # Q: FP commission ≤100%
+                            float(emp_data['personal_commission_discount_under_100']), # R: Discount commission ≤100%
+                            float(emp_data['personal_commission_over_100']),    # S: Over 100% bonus
+                            float(emp_data['personal_commission_jewelry']),     # T: Jewelry commission
+                            float(emp_data['personal_commission_vhernier']),    # U: Vhernier commission
+                            float(emp_data['personal_commission_rosa_maria']),  # V: Rosa Maria commission
+                            float(emp_data['personal_commission_suitcase']),    # W: Suitcase commission
+                            float(emp_data['personal_commission_hand_carry']),  # X: Hand carry commission
+                            float(emp_data['personal_commission_total']),       # Y: Total personal commission
+                            float(emp_data['total_handout_commission'])         # Z: Total commission
+                        ]]
+                    })
+
+        # ==================== UPDATE TOTAL COMMISSION SUMMARY (N8) ====================
+        total_commission_handout = float(combined_commission_df['total_handout_commission'].sum())
+        summary_update = [{
+            'range': 'N8',
+            'values': [[total_commission_handout]]
+        }]
+
+        # ==================== BATCH UPDATE ALL DATA ====================
+        all_updates = store_updates + employee_updates + summary_update
+
+        if all_updates:
+            worksheet.batch_update(all_updates)
