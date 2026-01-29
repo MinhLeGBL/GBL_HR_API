@@ -149,7 +149,8 @@ class AuthService:
 
     def create_user(self, email: str, password: str,
                     full_name: str, role: str = UserRole.STAFF,
-                    department_id: int = None) -> Dict[str, Any]:
+                    department_id: int = None,
+                    is_active: bool = True) -> Dict[str, Any]:
         """Create a new user with auto-generated SID"""
         conn = None
         try:
@@ -181,10 +182,10 @@ class AuthService:
             password_hash = self.hash_password(password)
 
             cursor.execute('''
-                INSERT INTO users (sid, email, password_hash, full_name, role, department_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO users (sid, email, password_hash, full_name, role, department_id, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING sid, email, full_name, role, is_active, created_at, department_id
-            ''', (sid, email, password_hash, full_name, role, department_id))
+            ''', (sid, email, password_hash, full_name, role, department_id, is_active))
 
             user = cursor.fetchone()
 
