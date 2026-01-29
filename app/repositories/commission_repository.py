@@ -3,7 +3,7 @@ Commission Repository for executing commission-related queries
 """
 from typing import List, Dict, Any, Optional
 import pandas as pd
-from app.database.connection import get_oracle_connection, get_postgres_connection_ssh
+from app.database.connection import get_oracle_connection, get_postgres_connection
 from app.queries.commission_queries import CommissionQueries
 
 
@@ -223,11 +223,10 @@ class CommissionRepository:
         Returns:
             List of UPC strings for hand carry items
         """
-        tunnel = None
         conn = None
         try:
-            # Connect to PostgreSQL through SSH tunnel
-            tunnel, conn = get_postgres_connection_ssh()
+            # Connect to PostgreSQL directly (same server)
+            conn = get_postgres_connection()
 
             if not conn:
                 print("WARNING: Failed to connect to PostgreSQL. Hand carry commission will not be calculated.")
@@ -257,14 +256,9 @@ class CommissionRepository:
             return []
 
         finally:
-            # Close connections
+            # Close connection
             if conn:
                 try:
                     conn.close()
-                except:
-                    pass
-            if tunnel:
-                try:
-                    tunnel.stop()
                 except:
                     pass
