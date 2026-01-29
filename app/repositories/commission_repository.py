@@ -3,7 +3,7 @@ Commission Repository for executing commission-related queries
 """
 from typing import List, Dict, Any, Optional
 import pandas as pd
-from app.database.connection import get_oracle_connection, get_postgres_connection_ssh
+from app.database.connection import get_oracle_connection, get_postgres_connection
 from app.queries.commission_queries import CommissionQueries
 
 
@@ -220,14 +220,16 @@ class CommissionRepository:
         """
         Get list of hand carry item UPCs from PostgreSQL rps.carrier_item table
 
+        Uses SSH tunnel if USE_SSH_TUNNEL=true in environment (for development).
+        Connects directly if USE_SSH_TUNNEL=false (for deployment on same server).
+
         Returns:
             List of UPC strings for hand carry items
         """
-        tunnel = None
         conn = None
         try:
-            # Connect to PostgreSQL through SSH tunnel
-            tunnel, conn = get_postgres_connection_ssh()
+            # Connect to PostgreSQL (uses SSH tunnel based on USE_SSH_TUNNEL env var)
+            conn = get_postgres_connection()
 
             if not conn:
                 print("WARNING: Failed to connect to PostgreSQL. Hand carry commission will not be calculated.")
@@ -257,14 +259,9 @@ class CommissionRepository:
             return []
 
         finally:
-            # Close connections
+            # Close connection (SSH tunnel is managed globally)
             if conn:
                 try:
                     conn.close()
-                except:
-                    pass
-            if tunnel:
-                try:
-                    tunnel.stop()
                 except:
                     pass
