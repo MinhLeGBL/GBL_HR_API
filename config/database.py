@@ -41,3 +41,11 @@ POOL_CONFIG = {
     'max_pool_size': int(os.getenv('DB_MAX_POOL_SIZE', 10)),
     'increment': int(os.getenv('DB_POOL_INCREMENT', 1))
 }
+
+# JWT Configuration
+JWT_CONFIG = {
+    'secret_key': os.getenv('JWT_SECRET_KEY', 'gbl-hr-secret-key-change-in-production'),
+    'algorithm': 'HS256',
+    'access_token_expire_minutes': int(os.getenv('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', 480)),  # 8 hours
+    'refresh_token_expire_days': int(os.getenv('JWT_REFRESH_TOKEN_EXPIRE_DAYS', 7))
+}

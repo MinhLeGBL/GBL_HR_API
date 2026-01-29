@@ -2,10 +2,12 @@
 GBL HR API - Main Application Entry Point
 """
 from flask import Flask, jsonify
+from flask_cors import CORS
 from app.api.v1.routes.employee_routes import employee_bp
 from app.api.v1.routes.sales_routes import sales_bp
 from app.api.v1.routes.health_routes import health_bp
 from app.api.v1.routes.commission_routes import commission_bp
+from app.api.v1.routes.auth_routes import auth_bp
 
 
 def create_app():
@@ -17,6 +19,15 @@ def create_app():
     """
     app = Flask(__name__)
 
+    # Enable CORS for frontend access
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": ["http://localhost:5173", "http://127.0.0.1:5173", "http://192.168.10.39:5173"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
+
     # Load configuration
     # TODO: Add configuration loading from config files
 
@@ -25,6 +36,7 @@ def create_app():
     app.register_blueprint(employee_bp)
     app.register_blueprint(sales_bp)
     app.register_blueprint(commission_bp)
+    app.register_blueprint(auth_bp)
 
     # Root endpoint
     @app.route('/')
@@ -38,7 +50,8 @@ def create_app():
                 'database_health': '/api/v1/health/database',
                 'employees': '/api/v1/employees',
                 'sales_reports': '/api/v1/sales/reports',
-                'commission': '/api/v1/commission'
+                'commission': '/api/v1/commission',
+                'auth': '/api/v1/auth'
             }
         }), 200
 
