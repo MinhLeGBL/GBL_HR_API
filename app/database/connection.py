@@ -41,28 +41,73 @@ def get_oracle_connection():
     return None
 
 
+# Global SSH tunnel for development mode
+_ssh_tunnel = None
+
+
+def _start_ssh_tunnel():
+    """Start SSH tunnel for local development"""
+    global _ssh_tunnel
+    if _ssh_tunnel is not None:
+        return _ssh_tunnel
+
+    try:
+        from sshtunnel import SSHTunnelForwarder
+
+        _ssh_tunnel = SSHTunnelForwarder(
+            (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
+            ssh_username=SSH_CONFIG['ssh_username'],
+            ssh_password=SSH_CONFIG['ssh_password'],
+            remote_bind_address=('localhost', SSH_CONFIG['remote_port']),
+            local_bind_address=('localhost', SSH_CONFIG['local_port'])
+        )
+        _ssh_tunnel.start()
+        print(f"✓ SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
+        print(f"  Local port: {_ssh_tunnel.local_bind_port}")
+        return _ssh_tunnel
+    except Exception as e:
+        print(f"Failed to start SSH tunnel: {e}")
+        return None
+
+
 def get_postgres_connection():
     """
-    Connect to PostgreSQL database directly (without SSH tunnel)
+    Connect to PostgreSQL database.
+    Uses SSH tunnel if USE_SSH_TUNNEL=true in environment.
 
     Returns:
         connection object if successful, None otherwise
     """
+    use_ssh = os.getenv('USE_SSH_TUNNEL', 'false').lower() == 'true'
+
+    host = POSTGRES_CONFIG['host']
+    port = POSTGRES_CONFIG['port']
+
+    # If using SSH tunnel, start it and use local port
+    if use_ssh:
+        tunnel = _start_ssh_tunnel()
+        if tunnel:
+            host = 'localhost'
+            port = tunnel.local_bind_port
+        else:
+            print("Warning: SSH tunnel failed, trying direct connection...")
+
     try:
         # Try to import psycopg2 first, then fall back to psycopg
         try:
             import psycopg2
 
             conn = psycopg2.connect(
-                host=POSTGRES_CONFIG['host'],
-                port=POSTGRES_CONFIG['port'],
+                host=host,
+                port=port,
                 database=POSTGRES_CONFIG['database'],
                 user=POSTGRES_CONFIG['username'],
                 password=POSTGRES_CONFIG['password']
             )
-            print(f"✓ Successfully connected to PostgreSQL at {POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}")
-            print(f"  Database: {POSTGRES_CONFIG['database']}")
-            print(f"  User: {POSTGRES_CONFIG['username']}")
+            if use_ssh:
+                print(f"✓ Connected to PostgreSQL via SSH tunnel (localhost:{port})")
+            else:
+                print(f"✓ Successfully connected to PostgreSQL at {host}:{port}")
             return conn
 
         except ImportError:
@@ -70,15 +115,16 @@ def get_postgres_connection():
             import psycopg
 
             conn = psycopg.connect(
-                host=POSTGRES_CONFIG['host'],
-                port=POSTGRES_CONFIG['port'],
+                host=host,
+                port=port,
                 dbname=POSTGRES_CONFIG['database'],
                 user=POSTGRES_CONFIG['username'],
                 password=POSTGRES_CONFIG['password']
             )
-            print(f"✓ Successfully connected to PostgreSQL at {POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}")
-            print(f"  Database: {POSTGRES_CONFIG['database']}")
-            print(f"  User: {POSTGRES_CONFIG['username']}")
+            if use_ssh:
+                print(f"✓ Connected to PostgreSQL via SSH tunnel (localhost:{port})")
+            else:
+                print(f"✓ Successfully connected to PostgreSQL at {host}:{port}")
             return conn
 
     except ImportError as import_error:
@@ -87,8 +133,8 @@ def get_postgres_connection():
         print(f"  Error details: {import_error}")
     except Exception as error:
         print(f"Error connecting to PostgreSQL: {error}")
-        print(f"  Host: {POSTGRES_CONFIG['host']}")
-        print(f"  Port: {POSTGRES_CONFIG['port']}")
+        print(f"  Host: {host}")
+        print(f"  Port: {port}")
         print(f"  Database: {POSTGRES_CONFIG['database']}")
         print(f"  User: {POSTGRES_CONFIG['username']}")
     return None

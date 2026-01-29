@@ -148,7 +148,8 @@ class AuthService:
     # ==================== User Management ====================
 
     def create_user(self, email: str, password: str,
-                    full_name: str, role: str = UserRole.STAFF) -> Dict[str, Any]:
+                    full_name: str, role: str = UserRole.STAFF,
+                    department_id: int = None) -> Dict[str, Any]:
         """Create a new user with auto-generated SID"""
         conn = None
         try:
@@ -167,6 +168,12 @@ class AuthService:
             if cursor.fetchone():
                 return {'success': False, 'error': 'Email already exists'}
 
+            # Validate department_id if provided
+            if department_id:
+                cursor.execute('SELECT id FROM departments WHERE id = %s', (department_id,))
+                if not cursor.fetchone():
+                    return {'success': False, 'error': 'Invalid department_id'}
+
             # Get next SID from sequence (guaranteed unique)
             sid = self.get_next_sid(cursor)
 
@@ -174,12 +181,21 @@ class AuthService:
             password_hash = self.hash_password(password)
 
             cursor.execute('''
-                INSERT INTO users (sid, email, password_hash, full_name, role)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING sid, email, full_name, role, is_active, created_at
-            ''', (sid, email, password_hash, full_name, role))
+                INSERT INTO users (sid, email, password_hash, full_name, role, department_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING sid, email, full_name, role, is_active, created_at, department_id
+            ''', (sid, email, password_hash, full_name, role, department_id))
 
             user = cursor.fetchone()
+
+            # Get department info if department_id exists
+            department = None
+            if user[6]:
+                cursor.execute('SELECT id, code, name FROM departments WHERE id = %s', (user[6],))
+                dept_row = cursor.fetchone()
+                if dept_row:
+                    department = {'id': dept_row[0], 'code': dept_row[1], 'name': dept_row[2]}
+
             conn.commit()
             cursor.close()
 
@@ -191,7 +207,9 @@ class AuthService:
                     'full_name': user[2],
                     'role': user[3],
                     'is_active': user[4],
-                    'created_at': user[5].isoformat() if user[5] else None
+                    'created_at': user[5].isoformat() if user[5] else None,
+                    'department_id': user[6],
+                    'department': department
                 }
             }
 
@@ -204,7 +222,7 @@ class AuthService:
                 conn.close()
 
     def authenticate(self, email: str, password: str) -> Dict[str, Any]:
-        """Authenticate a user by email and return tokens"""
+        """Authenticate a user by email and return tokens with department and permissions"""
         conn = None
         try:
             conn = get_postgres_connection()
@@ -213,10 +231,13 @@ class AuthService:
 
             cursor = conn.cursor()
 
-            # Get user by email
+            # Get user by email with department
             cursor.execute('''
-                SELECT sid, email, password_hash, full_name, role, is_active
-                FROM users WHERE email = %s
+                SELECT u.sid, u.email, u.password_hash, u.full_name, u.role, u.is_active,
+                       u.department_id, d.id as dept_id, d.code as dept_code, d.name as dept_name
+                FROM users u
+                LEFT JOIN departments d ON u.department_id = d.id
+                WHERE u.email = %s
             ''', (email,))
 
             user = cursor.fetchone()
@@ -224,7 +245,7 @@ class AuthService:
             if not user:
                 return {'success': False, 'error': 'Invalid email or password'}
 
-            sid, email, password_hash, full_name, role, is_active = user
+            sid, email, password_hash, full_name, role, is_active, department_id, dept_id, dept_code, dept_name = user
 
             # Check if user is active
             if not is_active:
@@ -244,6 +265,16 @@ class AuthService:
             access_token = self.create_access_token(sid, email, role)
             refresh_token = self.create_refresh_token(sid)
 
+            # Build department object
+            department = None
+            if dept_id:
+                department = {'id': dept_id, 'code': dept_code, 'name': dept_name}
+
+            # Get permissions
+            from app.services.permission_service import PermissionService
+            permission_service = PermissionService()
+            permissions = permission_service.get_user_permissions(role, department_id)
+
             return {
                 'success': True,
                 'access_token': access_token,
@@ -253,8 +284,12 @@ class AuthService:
                     'sid': sid,
                     'email': email,
                     'full_name': full_name,
-                    'role': role
-                }
+                    'role': role,
+                    'department_id': department_id,
+                    'department': department,
+                    'is_active': is_active
+                },
+                'permissions': permissions
             }
 
         except Exception as e:
@@ -316,7 +351,7 @@ class AuthService:
                 conn.close()
 
     def get_user_by_sid(self, sid: int) -> Optional[Dict[str, Any]]:
-        """Get user by SID"""
+        """Get user by SID with department info"""
         conn = None
         try:
             conn = get_postgres_connection()
@@ -325,8 +360,11 @@ class AuthService:
 
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT sid, email, full_name, role, is_active, created_at, last_login
-                FROM users WHERE sid = %s
+                SELECT u.sid, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login,
+                       u.department_id, d.id as dept_id, d.code as dept_code, d.name as dept_name
+                FROM users u
+                LEFT JOIN departments d ON u.department_id = d.id
+                WHERE u.sid = %s
             ''', (sid,))
 
             user = cursor.fetchone()
@@ -335,6 +373,11 @@ class AuthService:
             if not user:
                 return None
 
+            # Build department object
+            department = None
+            if user[8]:
+                department = {'id': user[8], 'code': user[9], 'name': user[10]}
+
             return {
                 'sid': user[0],
                 'email': user[1],
@@ -342,7 +385,9 @@ class AuthService:
                 'role': user[3],
                 'is_active': user[4],
                 'created_at': user[5].isoformat() if user[5] else None,
-                'last_login': user[6].isoformat() if user[6] else None
+                'last_login': user[6].isoformat() if user[6] else None,
+                'department_id': user[7],
+                'department': department
             }
 
         except Exception as e:
@@ -353,7 +398,7 @@ class AuthService:
                 conn.close()
 
     def get_all_users(self) -> Dict[str, Any]:
-        """Get all users (admin only)"""
+        """Get all users with department info (admin only)"""
         conn = None
         try:
             conn = get_postgres_connection()
@@ -362,8 +407,11 @@ class AuthService:
 
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT sid, email, full_name, role, is_active, created_at, last_login
-                FROM users ORDER BY created_at DESC
+                SELECT u.sid, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login,
+                       u.department_id, d.id as dept_id, d.code as dept_code, d.name as dept_name
+                FROM users u
+                LEFT JOIN departments d ON u.department_id = d.id
+                ORDER BY u.created_at DESC
             ''')
 
             users = cursor.fetchall()
@@ -371,6 +419,10 @@ class AuthService:
 
             user_list = []
             for user in users:
+                department = None
+                if user[8]:
+                    department = {'id': user[8], 'code': user[9], 'name': user[10]}
+
                 user_list.append({
                     'sid': user[0],
                     'email': user[1],
@@ -378,7 +430,9 @@ class AuthService:
                     'role': user[3],
                     'is_active': user[4],
                     'created_at': user[5].isoformat() if user[5] else None,
-                    'last_login': user[6].isoformat() if user[6] else None
+                    'last_login': user[6].isoformat() if user[6] else None,
+                    'department_id': user[7],
+                    'department': department
                 })
 
             return {'success': True, 'users': user_list}
@@ -400,7 +454,7 @@ class AuthService:
             cursor = conn.cursor()
 
             # Build update query dynamically
-            allowed_fields = ['email', 'full_name', 'role', 'is_active']
+            allowed_fields = ['email', 'full_name', 'role', 'is_active', 'department_id']
             update_parts = []
             values = []
 

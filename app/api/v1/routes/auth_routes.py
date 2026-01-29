@@ -48,6 +48,11 @@ def token_required(f):
         g.email = payload.get('email')
         g.role = payload.get('role')
 
+        # Get department_id from database for permission checks
+        user = auth_service.get_user_by_sid(g.sid)
+        if user:
+            g.department_id = user.get('department_id')
+
         return f(*args, **kwargs)
 
     return decorated
@@ -327,7 +332,8 @@ def register_user():
         email=data['email'],
         password=data['password'],
         full_name=data['full_name'],
-        role=role
+        role=role,
+        department_id=data.get('department_id')
     )
 
     if result['success']:

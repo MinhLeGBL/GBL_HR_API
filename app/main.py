@@ -8,6 +8,9 @@ from app.api.v1.routes.sales_routes import sales_bp
 from app.api.v1.routes.health_routes import health_bp
 from app.api.v1.routes.commission_routes import commission_bp
 from app.api.v1.routes.auth_routes import auth_bp
+from app.api.v1.routes.permission_routes import permission_bp
+from app.api.v1.routes.dashboard_routes import dashboard_bp
+from app.api.v1.routes.user_routes import user_bp
 
 
 def create_app():
@@ -37,6 +40,9 @@ def create_app():
     app.register_blueprint(sales_bp)
     app.register_blueprint(commission_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(permission_bp)
+    app.register_blueprint(dashboard_bp)
+    app.register_blueprint(user_bp)
 
     # Root endpoint
     @app.route('/')
@@ -51,7 +57,13 @@ def create_app():
                 'employees': '/api/v1/employees',
                 'sales_reports': '/api/v1/sales/reports',
                 'commission': '/api/v1/commission',
-                'auth': '/api/v1/auth'
+                'auth': '/api/v1/auth',
+                'departments': '/api/v1/departments',
+                'sections': '/api/v1/sections',
+                'section_groups': '/api/v1/section-groups',
+                'permissions': '/api/v1/permissions',
+                'dashboard': '/api/v1/dashboard',
+                'users': '/api/v1/users'
             }
         }), 200
 
@@ -79,4 +91,4 @@ def create_app():
 app = create_app()
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5120)

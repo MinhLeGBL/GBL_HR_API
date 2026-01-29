@@ -85,3 +85,12 @@ credentials.json
 temp/
 tmp/
 *.tmp
+
+# Development documentation (not for deployment)
+document/
+README.md
+docs/
+
+# Development scripts
+deploy-*.sh
+debug_*.py
