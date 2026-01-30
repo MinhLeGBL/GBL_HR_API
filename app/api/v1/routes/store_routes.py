@@ -79,12 +79,16 @@ def get_all_stores():
 @store_bp.route('/init', methods=['POST'])
 @token_required
 def init_stores_table():
-    """Initialize stores table (admin only)"""
+    """Initialize stores table (admin or HR/IT manager)"""
     if g.role != UserRole.ADMIN:
-        return jsonify({
-            'success': False,
-            'error': 'Admin access required'
-        }), 403
+        # Also allow HR/IT managers
+        user = auth_service.get_user_by_sid(g.sid)
+        dept_code = user.get('department', {}).get('code') if user and user.get('department') else None
+        if not (g.role == UserRole.MANAGER and dept_code in ['HR', 'IT']):
+            return jsonify({
+                'success': False,
+                'error': 'Admin or HR/IT manager access required'
+            }), 403
 
     result = store_service.init_database()
 

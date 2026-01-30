@@ -273,15 +273,9 @@ def delete_employee(sid):
 
 
 @hr_employee_bp.route('/init', methods=['POST'])
-@token_required
+@admin_or_hr_it_manager_required
 def init_employees_table():
-    """Initialize employees table (admin only)"""
-    if g.role != UserRole.ADMIN:
-        return jsonify({
-            'success': False,
-            'error': 'Admin access required'
-        }), 403
-
+    """Initialize employees table (admin or HR/IT manager)"""
     result = hr_employee_service.init_database()
 
     if result['success']:

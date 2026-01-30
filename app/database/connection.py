@@ -59,7 +59,9 @@ def _start_ssh_tunnel():
             ssh_username=SSH_CONFIG['ssh_username'],
             ssh_password=SSH_CONFIG['ssh_password'],
             remote_bind_address=('localhost', SSH_CONFIG['remote_port']),
-            local_bind_address=('localhost', SSH_CONFIG['local_port'])
+            local_bind_address=('localhost', SSH_CONFIG['local_port']),
+            allow_agent=False,
+            host_pkey_directories=[]
         )
         _ssh_tunnel.start()
         print(f"✓ SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
