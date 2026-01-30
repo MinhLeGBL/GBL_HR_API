@@ -3,7 +3,9 @@ GBL HR API - Main Application Entry Point
 """
 from flask import Flask, jsonify
 from flask_cors import CORS
-from app.api.v1.routes.employee_routes import employee_bp
+from app.api.v1.routes.employee_routes import employee_bp  # Oracle/RetailPro employees
+from app.api.v1.routes.hr_employee_routes import hr_employee_bp  # PostgreSQL HR employees
+from app.api.v1.routes.store_routes import store_bp
 from app.api.v1.routes.sales_routes import sales_bp
 from app.api.v1.routes.health_routes import health_bp
 from app.api.v1.routes.commission_routes import commission_bp
@@ -36,7 +38,9 @@ def create_app():
 
     # Register blueprints (API routes)
     app.register_blueprint(health_bp)
-    app.register_blueprint(employee_bp)
+    app.register_blueprint(employee_bp)  # RetailPro employees (Oracle) - /api/v1/rp-employees
+    app.register_blueprint(hr_employee_bp)  # HR employees (PostgreSQL) - /api/v1/employees
+    app.register_blueprint(store_bp)  # Stores (PostgreSQL) - /api/v1/stores
     app.register_blueprint(sales_bp)
     app.register_blueprint(commission_bp)
     app.register_blueprint(auth_bp)
@@ -55,6 +59,8 @@ def create_app():
                 'health': '/api/v1/health',
                 'database_health': '/api/v1/health/database',
                 'employees': '/api/v1/employees',
+                'rp_employees': '/api/v1/rp-employees',
+                'stores': '/api/v1/stores',
                 'sales_reports': '/api/v1/sales/reports',
                 'commission': '/api/v1/commission',
                 'auth': '/api/v1/auth',
