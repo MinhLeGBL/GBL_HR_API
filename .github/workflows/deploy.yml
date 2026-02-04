@@ -1,0 +1,27 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [deployment]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          script: |
+            cd /home/gbladmin/GBL_HR_API
+            git pull origin deployment
+            source .venv/bin/activate
+            pip install -r requirements.txt
+            sudo systemctl restart gbl-hr-api
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -f http://${{ secrets.DEPLOY_HOST }}:5000/api/v1/health || echo "WARNING: Health check failed"
