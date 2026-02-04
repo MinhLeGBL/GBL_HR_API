@@ -163,12 +163,8 @@ def create_user():
             "role": "staff",
             "department_id": 1,
             "is_active": true,
-            "employee_code": "EMP001"  # Optional, ignored for now (future: employee mapping)
+            "employee_sid": 300000001  # Optional - link to employee record
         }
-
-    Note:
-        - employee_code is accepted but ignored for now
-        - Future: will be used to map user to employee record during creation
 
     Response:
         {
@@ -200,15 +196,8 @@ def create_user():
                 'error': f'Missing required field: {field}'
             }), 400
 
-    # Validate role
-    if data['role'] not in [UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF]:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid role. Must be: admin, manager, or staff'
-        }), 400
-
     # Only admin can create admin users
-    if data['role'] == UserRole.ADMIN and g.role != UserRole.ADMIN:
+    if data['role'].lower() == UserRole.ADMIN and g.role != UserRole.ADMIN:
         return jsonify({
             'success': False,
             'error': 'Only admin can create admin users'
@@ -220,6 +209,7 @@ def create_user():
         full_name=data['full_name'],
         role=data['role'],
         department_id=data.get('department_id'),
+        employee_sid=data.get('employee_sid'),
         is_active=data.get('is_active', True)
     )
 
@@ -255,13 +245,6 @@ def update_user(sid):
             'error': 'Request body is required'
         }), 400
 
-    # Validate role if provided
-    if 'role' in data and data['role'] not in [UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF]:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid role. Must be: admin, manager, or staff'
-        }), 400
-
     # Only allow updating specific fields
     allowed_updates = {}
     if 'role' in data:
@@ -270,11 +253,13 @@ def update_user(sid):
         allowed_updates['department_id'] = data['department_id']
     if 'is_active' in data:
         allowed_updates['is_active'] = data['is_active']
+    if 'employee_sid' in data:
+        allowed_updates['employee_sid'] = data['employee_sid']
 
     if not allowed_updates:
         return jsonify({
             'success': False,
-            'error': 'No valid fields to update. Allowed: role, department_id, is_active'
+            'error': 'No valid fields to update. Allowed: role, department_id, is_active, employee_sid'
         }), 400
 
     result = auth_service.update_user(sid, allowed_updates)

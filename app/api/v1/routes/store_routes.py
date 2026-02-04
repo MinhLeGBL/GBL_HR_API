@@ -76,6 +76,29 @@ def get_all_stores():
     return jsonify(result), 500
 
 
+@store_bp.route('', methods=['POST'])
+@token_required
+def create_store():
+    """Create a new store"""
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'success': False, 'error': 'Request body is required'}), 400
+
+    if not data.get('store_code') or not data.get('store_name'):
+        return jsonify({'success': False, 'error': 'store_code and store_name are required'}), 400
+
+    result = store_service.create_store(
+        store_code=data['store_code'],
+        store_name=data['store_name'],
+        store_rp_sid=data.get('store_rp_sid')
+    )
+
+    if result['success']:
+        return jsonify(result), 201
+    return jsonify(result), 400
+
+
 @store_bp.route('/init', methods=['POST'])
 @token_required
 def init_stores_table():

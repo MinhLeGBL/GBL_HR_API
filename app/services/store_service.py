@@ -18,9 +18,18 @@ class StoreService:
 
             cursor = conn.cursor()
 
+            # Store IDs: 9-digit starting with 2 (200000001+)
+            cursor.execute('''
+                CREATE SEQUENCE IF NOT EXISTS store_id_seq
+                START WITH 200000001
+                INCREMENT BY 1
+                NO MAXVALUE
+                NO CYCLE
+            ''')
+
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS stores (
-                    id SERIAL PRIMARY KEY,
+                    id BIGINT PRIMARY KEY DEFAULT nextval('store_id_seq'),
                     store_code VARCHAR(50) UNIQUE NOT NULL,
                     store_name VARCHAR(255) NOT NULL,
                     store_rp_sid VARCHAR(100),

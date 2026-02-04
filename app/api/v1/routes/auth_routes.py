@@ -48,10 +48,11 @@ def token_required(f):
         g.email = payload.get('email')
         g.role = payload.get('role')
 
-        # Get department_id from database for permission checks
+        # Get department info from database for permission checks
         user = auth_service.get_user_by_sid(g.sid)
         if user:
             g.department_id = user.get('department_id')
+            g.department_code = user.get('department', {}).get('code') if user.get('department') else None
 
         return f(*args, **kwargs)
 
@@ -320,13 +321,7 @@ def register_user():
             'error': 'Password must be at least 6 characters'
         }), 400
 
-    # Validate role if provided
     role = data.get('role', UserRole.STAFF)
-    if role not in [UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF]:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid role. Must be: admin, manager, or staff'
-        }), 400
 
     result = auth_service.create_user(
         email=data['email'],
@@ -400,13 +395,6 @@ def update_user(sid):
         return jsonify({
             'success': False,
             'error': 'Request body is required'
-        }), 400
-
-    # Validate role if provided
-    if 'role' in data and data['role'] not in [UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF]:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid role. Must be: admin, manager, or staff'
         }), 400
 
     result = auth_service.update_user(sid, data)
@@ -517,3 +505,28 @@ def setup_first_admin():
             'user': result['user']
         }), 201
     return jsonify(result), 400
+
+
+# ==================== Lookup Endpoints ====================
+
+@auth_bp.route('/roles', methods=['GET'])
+@token_required
+def get_roles():
+    """
+    Get all roles (lookup data)
+
+    Response:
+        {
+            "success": true,
+            "roles": [
+                {"id": 30001, "code": "ADMIN", "name": "Admin", "is_active": true},
+                {"id": 30002, "code": "MANAGER", "name": "Manager", "is_active": true},
+                {"id": 30003, "code": "STAFF", "name": "Staff", "is_active": true}
+            ]
+        }
+    """
+    result = auth_service.get_roles()
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 500

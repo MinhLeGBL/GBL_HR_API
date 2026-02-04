@@ -80,13 +80,23 @@ def get_all_employees():
     """
     Get all employees
 
+    Query Params (optional):
+        department_code: Filter by department code (e.g. "HR", "IT")
+        role: Filter by user role (e.g. "staff", "manager")
+
     Response:
         {
             "success": true,
             "employees": [...]
         }
     """
-    result = hr_employee_service.get_all_employees()
+    department_code = request.args.get('department_code')
+    role = request.args.get('role')
+
+    result = hr_employee_service.get_all_employees(
+        department_code=department_code,
+        role=role
+    )
 
     if result['success']:
         return jsonify(result), 200
@@ -162,20 +172,6 @@ def create_employee():
                 'error': f'Missing required field: {field}'
             }), 400
 
-    # Validate employee_type
-    if data['employee_type'] not in ['store', 'office']:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid employee_type. Must be: store or office'
-        }), 400
-
-    # Validate contract
-    if data['contract'] not in ['probation', 'intern', 'permanent']:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid contract. Must be: probation, intern, or permanent'
-        }), 400
-
     result = hr_employee_service.create_employee(
         employee_code=data['employee_code'],
         full_name=data['full_name'],
@@ -216,20 +212,6 @@ def update_employee(sid):
         return jsonify({
             'success': False,
             'error': 'Request body is required'
-        }), 400
-
-    # Validate employee_type if provided
-    if 'employee_type' in data and data['employee_type'] not in ['store', 'office']:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid employee_type. Must be: store or office'
-        }), 400
-
-    # Validate contract if provided
-    if 'contract' in data and data['contract'] not in ['probation', 'intern', 'permanent']:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid contract. Must be: probation, intern, or permanent'
         }), 400
 
     # Build updates dict (exclude employee_code as it cannot be changed)
@@ -277,6 +259,53 @@ def delete_employee(sid):
 def init_employees_table():
     """Initialize employees table (admin or HR/IT manager)"""
     result = hr_employee_service.init_database()
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 500
+
+
+# ==================== Lookup Endpoints ====================
+
+@hr_employee_bp.route('/types', methods=['GET'])
+@token_required
+def get_employee_types():
+    """
+    Get all employee types (lookup data)
+
+    Response:
+        {
+            "success": true,
+            "employee_types": [
+                {"id": 10001, "code": "OFFICE", "name": "Office", "is_active": true},
+                {"id": 10002, "code": "STORE", "name": "Store", "is_active": true}
+            ]
+        }
+    """
+    result = hr_employee_service.get_employee_types()
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 500
+
+
+@hr_employee_bp.route('/contracts', methods=['GET'])
+@token_required
+def get_contract_types():
+    """
+    Get all contract types (lookup data)
+
+    Response:
+        {
+            "success": true,
+            "contract_types": [
+                {"id": 20001, "code": "PERMANENT", "name": "Permanent", "is_active": true},
+                {"id": 20002, "code": "INTERN", "name": "Intern", "is_active": true},
+                {"id": 20003, "code": "PROBATION", "name": "Probation", "is_active": true}
+            ]
+        }
+    """
+    result = hr_employee_service.get_contract_types()
 
     if result['success']:
         return jsonify(result), 200

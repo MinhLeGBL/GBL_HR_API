@@ -1,21 +1,39 @@
 """
 Permission and Department API Routes
+
+Permission Model:
+  Layer 1 (Group): section_groups → section_group_permissions (department-based)
+  Layer 2 (Item):  sections → section_permissions (role-based)
 """
 from flask import Blueprint, jsonify, request, g
 from app.services.permission_service import PermissionService
+from app.services.auth_service import UserRole
 from app.api.v1.routes.auth_routes import token_required, admin_required
 
 permission_bp = Blueprint('permissions', __name__, url_prefix='/api/v1')
 permission_service = PermissionService()
 
 
-# ==================== Permission Tables Initialization ====================
+# ==================== Initialization ====================
 
 @permission_bp.route('/permissions/init-db', methods=['POST'])
 def init_permission_tables():
     """
-    Initialize departments, sections, and permissions tables
-    Run this once to set up the permission system
+    Initialize all permission tables:
+    departments, section_groups, sections, section_group_permissions, section_permissions.
+    Run this once as the first step of deployment.
+    """
+    result = permission_service.init_permission_tables()
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 500
+
+
+@permission_bp.route('/section-groups/init-db', methods=['POST'])
+def init_section_groups():
+    """
+    Deprecated: section_groups are now created by /permissions/init-db.
+    Kept for backwards compatibility — calls the same init method.
     """
     result = permission_service.init_permission_tables()
     if result['success']:
@@ -135,12 +153,63 @@ def delete_department(dept_id):
 @admin_required
 def get_sections():
     """
-    Get all sections with permissions (admin only)
+    Get all sections with their group and role access (admin only)
+
+    Response:
+        {
+            "success": true,
+            "sections": [
+                {
+                    "id": 1,
+                    "code": "DASHBOARD",
+                    "name": "Dashboard",
+                    "group_code": "MAIN",
+                    "group_name": "Main",
+                    "allowed_roles": ["admin", "manager", "staff"]
+                }
+            ]
+        }
     """
     result = permission_service.get_all_sections()
     if result['success']:
         return jsonify(result), 200
     return jsonify(result), 500
+
+
+@permission_bp.route('/sections/<section_code>/roles', methods=['PUT'])
+@admin_required
+def update_section_roles(section_code):
+    """
+    Update which roles can access a section item (admin only)
+
+    Request Body:
+        {
+            "roles": ["admin", "manager", "staff"]
+        }
+
+    Response:
+        {
+            "success": true,
+            "message": "Section roles updated successfully"
+        }
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'success': False, 'error': 'Request body is required'}), 400
+
+    roles = data.get('roles')
+    if roles is None or not isinstance(roles, list):
+        return jsonify({'success': False, 'error': 'roles must be an array'}), 400
+
+    result = permission_service.update_section_roles(
+        section_code=section_code.upper(),
+        roles=roles
+    )
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 400
 
 
 # ==================== Permission Routes ====================
@@ -149,136 +218,10 @@ def get_sections():
 @token_required
 def get_my_permissions():
     """
-    Get current user's permissions
+    Get current user's accessible section groups and items.
 
-    Returns sections the user can access based on role and department.
-    """
-    permissions = permission_service.get_user_permissions(g.role, getattr(g, 'department_id', None))
-    return jsonify({'success': True, 'permissions': permissions}), 200
-
-
-@permission_bp.route('/sections/<int:section_id>/permissions', methods=['PUT'])
-@admin_required
-def update_section_permission(section_id):
-    """
-    Update section permission (admin only)
-
-    Request Body:
-        {
-            "department_id": 1,
-            "role": "manager",
-            "can_view": true,
-            "can_edit": true,
-            "can_delete": false
-        }
-    """
-    data = request.get_json()
-
-    if not data:
-        return jsonify({'success': False, 'error': 'Request body is required'}), 400
-
-    required = ['department_id', 'role']
-    for field in required:
-        if field not in data:
-            return jsonify({'success': False, 'error': f'{field} is required'}), 400
-
-    if data['role'] not in ['admin', 'manager', 'staff']:
-        return jsonify({'success': False, 'error': 'Invalid role'}), 400
-
-    result = permission_service.update_section_permission(
-        section_id=section_id,
-        department_id=data['department_id'],
-        role=data['role'],
-        can_view=data.get('can_view', True),
-        can_edit=data.get('can_edit', False),
-        can_delete=data.get('can_delete', False),
-        created_by=g.sid
-    )
-
-    if result['success']:
-        return jsonify(result), 200
-    return jsonify(result), 400
-
-
-@permission_bp.route('/sections/<int:section_id>/departments', methods=['POST'])
-@admin_required
-def assign_section_to_department(section_id):
-    """
-    Assign section to department with roles (admin only)
-
-    Request Body:
-        {
-            "department_id": 1,
-            "roles": ["manager", "staff"],
-            "can_view": true,
-            "can_edit": false,
-            "can_delete": false
-        }
-    """
-    data = request.get_json()
-
-    if not data:
-        return jsonify({'success': False, 'error': 'Request body is required'}), 400
-
-    department_id = data.get('department_id')
-    roles = data.get('roles', ['staff'])
-
-    if not department_id:
-        return jsonify({'success': False, 'error': 'department_id is required'}), 400
-
-    # Create permission for each role
-    for role in roles:
-        if role not in ['admin', 'manager', 'staff']:
-            continue
-        permission_service.update_section_permission(
-            section_id=section_id,
-            department_id=department_id,
-            role=role,
-            can_view=data.get('can_view', True),
-            can_edit=data.get('can_edit', False),
-            can_delete=data.get('can_delete', False),
-            created_by=g.sid
-        )
-
-    return jsonify({'success': True, 'message': 'Permissions assigned successfully'}), 200
-
-
-@permission_bp.route('/sections/<int:section_id>/departments/<int:department_id>', methods=['DELETE'])
-@admin_required
-def remove_department_from_section(section_id, department_id):
-    """
-    Remove department from section (admin only)
-    """
-    result = permission_service.delete_section_permission(section_id, department_id)
-
-    if result['success']:
-        return jsonify(result), 200
-    return jsonify(result), 400
-
-
-# ==================== Section Groups Routes ====================
-
-@permission_bp.route('/section-groups/init-db', methods=['POST'])
-def init_section_groups():
-    """
-    Initialize section_groups and section_group_permissions tables
-    Run this once to set up the section groups system
-    """
-    result = permission_service.init_section_groups()
-    if result['success']:
-        return jsonify(result), 200
-    return jsonify(result), 500
-
-
-@permission_bp.route('/section-groups/permissions', methods=['GET'])
-@token_required
-def get_section_group_permissions():
-    """
-    Get all section group permissions
-
-    Returns sections groups with their allowed_departments.
-    Empty allowed_departments means all departments have access.
-    ADMINISTRATION group is not returned (hardcoded to IT in frontend).
+    Returns groups filtered by department (Layer 1) and
+    items filtered by role (Layer 2). Admin sees everything.
 
     Response:
         {
@@ -287,12 +230,45 @@ def get_section_group_permissions():
                 {
                     "group_code": "MAIN",
                     "group_name": "Main",
-                    "allowed_departments": []
-                },
+                    "sections": [
+                        {"section_code": "DASHBOARD", "section_name": "Dashboard"}
+                    ]
+                }
+            ]
+        }
+    """
+    permissions = permission_service.get_user_permissions(
+        user_role=g.role,
+        department_id=getattr(g, 'department_id', None),
+        department_code=getattr(g, 'department_code', None)
+    )
+    return jsonify({'success': True, 'permissions': permissions}), 200
+
+
+# ==================== Section Groups Routes ====================
+
+@permission_bp.route('/section-groups/permissions', methods=['GET'])
+@token_required
+def get_section_group_permissions():
+    """
+    Get all section group permissions with sections and role access.
+    ADMINISTRATION group is excluded (hardcoded to IT in frontend).
+
+    Response:
+        {
+            "success": true,
+            "permissions": [
                 {
-                    "group_code": "COMMISSION",
-                    "group_name": "Commission",
-                    "allowed_departments": ["HR", "SALES"]
+                    "group_code": "MAIN",
+                    "group_name": "Main",
+                    "allowed_departments": ["HR", "ACC", "IT", ...],
+                    "sections": [
+                        {
+                            "code": "DASHBOARD",
+                            "name": "Dashboard",
+                            "allowed_roles": ["admin", "manager", "staff"]
+                        }
+                    ]
                 }
             ]
         }
@@ -311,10 +287,10 @@ def update_section_group_access(group_code):
 
     Request Body:
         {
-            "allowed_departments": ["HR", "SALES", "FINANCE"]
+            "allowed_departments": ["HR", "SALES", "ACC"]
         }
 
-    Empty array means all departments have access.
+    Empty array means admin-only access (no departments selected).
     """
     data = request.get_json()
 
@@ -328,8 +304,176 @@ def update_section_group_access(group_code):
 
     result = permission_service.update_section_group_departments(
         group_code=group_code.upper(),
-        allowed_departments=allowed_departments,
-        created_by=g.sid
+        allowed_departments=allowed_departments
+    )
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
+# ==================== Per-Department Access Routes ====================
+
+def _is_admin_or_department_manager(department_code):
+    """Check if current user is admin or manager of the target department."""
+    if g.role == UserRole.ADMIN:
+        return True
+    if g.role == UserRole.MANAGER and getattr(g, 'department_code', None) == department_code:
+        return True
+    return False
+
+
+@permission_bp.route('/section-groups/permissions/department/<department_code>', methods=['GET'])
+@token_required
+def get_department_permissions(department_code):
+    """
+    Get all section groups and sections accessible by a department,
+    with staff_allowed toggle and excluded employees per section.
+
+    Response:
+        {
+            "success": true,
+            "department_code": "HR",
+            "permissions": [
+                {
+                    "group_code": "MAIN",
+                    "group_name": "Main",
+                    "sections": [
+                        {
+                            "section_code": "DASHBOARD",
+                            "section_name": "Dashboard",
+                            "staff_allowed": true,
+                            "excluded_employees": [
+                                {"sid": 300000001, "employee_code": "EMP001", "full_name": "Nguyen Van A"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    """
+    result = permission_service.get_department_permissions(department_code.upper())
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 500
+
+
+@permission_bp.route('/sections/<section_code>/department-access', methods=['PUT'])
+@token_required
+def update_department_staff_access(section_code):
+    """
+    Toggle staff access for a section within a department.
+
+    Requires: Admin or manager of the target department.
+
+    Request Body:
+        {
+            "department_code": "HR",
+            "staff_allowed": false
+        }
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'success': False, 'error': 'Request body is required'}), 400
+
+    department_code = data.get('department_code')
+    staff_allowed = data.get('staff_allowed')
+
+    if not department_code or staff_allowed is None:
+        return jsonify({'success': False, 'error': 'department_code and staff_allowed are required'}), 400
+
+    if not isinstance(staff_allowed, bool):
+        return jsonify({'success': False, 'error': 'staff_allowed must be a boolean'}), 400
+
+    department_code = department_code.upper()
+
+    if not _is_admin_or_department_manager(department_code):
+        return jsonify({'success': False, 'error': 'Admin or department manager access required'}), 403
+
+    result = permission_service.update_department_staff_access(
+        section_code=section_code.upper(),
+        department_code=department_code,
+        staff_allowed=staff_allowed
+    )
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
+@permission_bp.route('/sections/<section_code>/exclusions', methods=['GET'])
+@token_required
+def get_section_exclusions(section_code):
+    """
+    Get excluded employees for a section within a department.
+
+    Query Params:
+        department_code (required): e.g. "HR"
+
+    Response:
+        {
+            "success": true,
+            "excluded_employees": [
+                {"sid": 300000001, "employee_code": "EMP001", "full_name": "Nguyen Van A"}
+            ]
+        }
+    """
+    department_code = request.args.get('department_code')
+
+    if not department_code:
+        return jsonify({'success': False, 'error': 'department_code query parameter is required'}), 400
+
+    result = permission_service.get_section_exclusions(
+        section_code=section_code.upper(),
+        department_code=department_code.upper()
+    )
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
+@permission_bp.route('/sections/<section_code>/exclusions', methods=['PUT'])
+@token_required
+def update_section_exclusions(section_code):
+    """
+    Update excluded employees for a section within a department.
+
+    Requires: Admin or manager of the target department.
+
+    Request Body:
+        {
+            "department_code": "HR",
+            "excluded_employee_sids": [300000001, 300000002]
+        }
+
+    Empty array clears all exclusions.
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'success': False, 'error': 'Request body is required'}), 400
+
+    department_code = data.get('department_code')
+    excluded_employee_sids = data.get('excluded_employee_sids')
+
+    if not department_code or excluded_employee_sids is None:
+        return jsonify({'success': False, 'error': 'department_code and excluded_employee_sids are required'}), 400
+
+    if not isinstance(excluded_employee_sids, list):
+        return jsonify({'success': False, 'error': 'excluded_employee_sids must be an array'}), 400
+
+    department_code = department_code.upper()
+
+    if not _is_admin_or_department_manager(department_code):
+        return jsonify({'success': False, 'error': 'Admin or department manager access required'}), 403
+
+    result = permission_service.update_section_exclusions(
+        section_code=section_code.upper(),
+        department_code=department_code,
+        excluded_employee_sids=excluded_employee_sids
     )
 
     if result['success']:

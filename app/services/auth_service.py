@@ -37,12 +37,20 @@ class AuthService:
         cursor.execute("SELECT nextval('user_sid_seq')")
         return cursor.fetchone()[0]
 
+    # ==================== Lookup Helpers ====================
+
+    def _resolve_role_id(self, cursor, code: str) -> Optional[int]:
+        """Resolve role code to ID"""
+        cursor.execute('SELECT id FROM roles WHERE code = %s', (code.upper(),))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
     # ==================== Database Schema ====================
 
     def init_database(self) -> Dict[str, Any]:
         """
-        Initialize the users table in PostgreSQL
-        Run this once to create the necessary tables
+        Initialize roles and users tables in PostgreSQL.
+        Requires: departments and employees tables must exist first.
         """
         conn = None
         try:
@@ -52,11 +60,32 @@ class AuthService:
 
             cursor = conn.cursor()
 
-            # Drop existing table if needed for schema changes (comment out in production)
-            # cursor.execute('DROP TABLE IF EXISTS users')
-            # cursor.execute('DROP SEQUENCE IF EXISTS user_sid_seq')
+            # ── Lookup: Roles (5-digit IDs, prefix 3) ──
+            cursor.execute('''
+                CREATE SEQUENCE IF NOT EXISTS role_id_seq
+                START WITH 30001
+                INCREMENT BY 1
+                NO MAXVALUE
+                NO CYCLE
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS roles (
+                    id INTEGER PRIMARY KEY DEFAULT nextval('role_id_seq'),
+                    code VARCHAR(20) UNIQUE NOT NULL,
+                    name VARCHAR(100) NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE
+                )
+            ''')
+            cursor.execute('SELECT COUNT(*) FROM roles')
+            if cursor.fetchone()[0] == 0:
+                cursor.execute('''
+                    INSERT INTO roles (code, name) VALUES
+                    ('ADMIN', 'Admin'),
+                    ('MANAGER', 'Manager'),
+                    ('STAFF', 'Staff')
+                ''')
 
-            # Create SID sequence starting at 100,000,001 (9 digits, guaranteed unique)
+            # ── User SIDs: 9-digit starting with 1 (100000001+) ──
             cursor.execute('''
                 CREATE SEQUENCE IF NOT EXISTS user_sid_seq
                 START WITH 100000001
@@ -65,26 +94,46 @@ class AuthService:
                 NO CYCLE
             ''')
 
-            # Create users table with SID as primary key
+            # ── Users table ──
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     sid BIGINT PRIMARY KEY,
                     email VARCHAR(100) UNIQUE NOT NULL,
                     password_hash VARCHAR(255) NOT NULL,
                     full_name VARCHAR(100) NOT NULL,
-                    role VARCHAR(20) NOT NULL DEFAULT 'staff',
+                    role_id INTEGER NOT NULL REFERENCES roles(id),
+                    department_id BIGINT REFERENCES departments(id),
+                    employee_sid BIGINT REFERENCES employees(sid),
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_login TIMESTAMP,
-                    CONSTRAINT valid_role CHECK (role IN ('admin', 'manager', 'staff'))
+                    last_login TIMESTAMP
                 )
             ''')
 
-            # Create index on email for faster lookups
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)
-            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)')
+
+            # ── Seed default admin user from employee MQ027 ──
+            cursor.execute('SELECT COUNT(*) FROM users')
+            if cursor.fetchone()[0] == 0:
+                cursor.execute('''
+                    SELECT sid, employee_code, full_name, email, department_id
+                    FROM employees WHERE employee_code = %s
+                ''', ('MQ027',))
+                emp = cursor.fetchone()
+                if emp:
+                    emp_sid, emp_code, emp_name, emp_email, emp_dept_id = emp
+
+                    admin_role_id = self._resolve_role_id(cursor, 'ADMIN')
+                    user_sid = self.get_next_sid(cursor)
+                    password_hash = self.hash_password('##*OCobc1bmV%&dc')
+
+                    cursor.execute('''
+                        INSERT INTO users (sid, email, password_hash, full_name, role_id,
+                                           department_id, employee_sid, is_active)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ''', (user_sid, emp_email, password_hash, emp_name, admin_role_id,
+                          emp_dept_id, emp_sid, True))
 
             conn.commit()
             cursor.close()
@@ -150,19 +199,21 @@ class AuthService:
     def create_user(self, email: str, password: str,
                     full_name: str, role: str = UserRole.STAFF,
                     department_id: int = None,
+                    employee_sid: int = None,
                     is_active: bool = True) -> Dict[str, Any]:
-        """Create a new user with auto-generated SID"""
+        """Create a new user. Accepts role as code string (e.g. 'ADMIN'), resolves to FK."""
         conn = None
         try:
-            # Validate role
-            if role not in [UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF]:
-                return {'success': False, 'error': 'Invalid role'}
-
             conn = get_postgres_connection()
             if not conn:
                 return {'success': False, 'error': 'Failed to connect to database'}
 
             cursor = conn.cursor()
+
+            # Resolve role code to FK ID
+            role_id = self._resolve_role_id(cursor, role)
+            if not role_id:
+                return {'success': False, 'error': f'Invalid role: {role}'}
 
             # Check if email already exists
             cursor.execute('SELECT sid FROM users WHERE email = %s', (email,))
@@ -175,6 +226,12 @@ class AuthService:
                 if not cursor.fetchone():
                     return {'success': False, 'error': 'Invalid department_id'}
 
+            # Validate employee_sid if provided
+            if employee_sid:
+                cursor.execute('SELECT sid FROM employees WHERE sid = %s', (employee_sid,))
+                if not cursor.fetchone():
+                    return {'success': False, 'error': 'Invalid employee_sid - employee not found'}
+
             # Get next SID from sequence (guaranteed unique)
             sid = self.get_next_sid(cursor)
 
@@ -182,37 +239,16 @@ class AuthService:
             password_hash = self.hash_password(password)
 
             cursor.execute('''
-                INSERT INTO users (sid, email, password_hash, full_name, role, department_id, is_active)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING sid, email, full_name, role, is_active, created_at, department_id
-            ''', (sid, email, password_hash, full_name, role, department_id, is_active))
-
-            user = cursor.fetchone()
-
-            # Get department info if department_id exists
-            department = None
-            if user[6]:
-                cursor.execute('SELECT id, code, name FROM departments WHERE id = %s', (user[6],))
-                dept_row = cursor.fetchone()
-                if dept_row:
-                    department = {'id': dept_row[0], 'code': dept_row[1], 'name': dept_row[2]}
+                INSERT INTO users (sid, email, password_hash, full_name, role_id,
+                                   department_id, employee_sid, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (sid, email, password_hash, full_name, role_id,
+                  department_id, employee_sid, is_active))
 
             conn.commit()
-            cursor.close()
 
-            return {
-                'success': True,
-                'user': {
-                    'sid': user[0],
-                    'email': user[1],
-                    'full_name': user[2],
-                    'role': user[3],
-                    'is_active': user[4],
-                    'created_at': user[5].isoformat() if user[5] else None,
-                    'department_id': user[6],
-                    'department': department
-                }
-            }
+            # Fetch full user with JOINs
+            return self.get_user_by_sid_result(cursor, sid)
 
         except Exception as e:
             if conn:
@@ -232,12 +268,16 @@ class AuthService:
 
             cursor = conn.cursor()
 
-            # Get user by email with department
+            # Get user by email with role, department and employee
             cursor.execute('''
-                SELECT u.sid, u.email, u.password_hash, u.full_name, u.role, u.is_active,
-                       u.department_id, d.id as dept_id, d.code as dept_code, d.name as dept_name
+                SELECT u.sid, u.email, u.password_hash, u.full_name, r.code AS role,
+                       u.is_active, u.department_id,
+                       d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
+                       u.employee_sid, e.employee_code, e.join_date
                 FROM users u
+                JOIN roles r ON u.role_id = r.id
                 LEFT JOIN departments d ON u.department_id = d.id
+                LEFT JOIN employees e ON u.employee_sid = e.sid
                 WHERE u.email = %s
             ''', (email,))
 
@@ -246,7 +286,7 @@ class AuthService:
             if not user:
                 return {'success': False, 'error': 'Invalid email or password'}
 
-            sid, email, password_hash, full_name, role, is_active, department_id, dept_id, dept_code, dept_name = user
+            sid, email, password_hash, full_name, role, is_active, department_id, dept_id, dept_code, dept_name, employee_sid, employee_code, join_date = user
 
             # Check if user is active
             if not is_active:
@@ -261,6 +301,9 @@ class AuthService:
                           (sid,))
             conn.commit()
             cursor.close()
+
+            # role code is uppercase from DB, lowercase for API compatibility
+            role = role.lower()
 
             # Generate tokens
             access_token = self.create_access_token(sid, email, role)
@@ -283,6 +326,9 @@ class AuthService:
                 'token_type': 'bearer',
                 'user': {
                     'sid': sid,
+                    'employee_sid': employee_sid,
+                    'employee_code': employee_code,
+                    'join_date': join_date.isoformat() if join_date else None,
                     'email': email,
                     'full_name': full_name,
                     'role': role,
@@ -322,7 +368,10 @@ class AuthService:
 
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT sid, email, role, is_active FROM users WHERE sid = %s
+                SELECT u.sid, u.email, r.code AS role, u.is_active
+                FROM users u
+                JOIN roles r ON u.role_id = r.id
+                WHERE u.sid = %s
             ''', (sid,))
 
             user = cursor.fetchone()
@@ -332,6 +381,7 @@ class AuthService:
                 return {'success': False, 'error': 'User not found'}
 
             sid, email, role, is_active = user
+            role = role.lower()
 
             if not is_active:
                 return {'success': False, 'error': 'Account is deactivated'}
@@ -351,8 +401,48 @@ class AuthService:
             if conn:
                 conn.close()
 
+    _USER_SELECT = '''
+        SELECT u.sid, u.email, u.full_name, r.code AS role, u.is_active,
+               u.created_at, u.last_login,
+               u.department_id, d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
+               u.employee_sid, e.employee_code, e.join_date
+        FROM users u
+        JOIN roles r ON u.role_id = r.id
+        LEFT JOIN departments d ON u.department_id = d.id
+        LEFT JOIN employees e ON u.employee_sid = e.sid
+    '''
+
+    def _build_user_dict(self, user) -> Dict[str, Any]:
+        """Build user dict from a JOIN query row"""
+        department = None
+        if user[8]:
+            department = {'id': user[8], 'code': user[9], 'name': user[10]}
+
+        return {
+            'sid': user[0],
+            'email': user[1],
+            'full_name': user[2],
+            'role': user[3].lower(),
+            'is_active': user[4],
+            'created_at': user[5].isoformat() if user[5] else None,
+            'last_login': user[6].isoformat() if user[6] else None,
+            'department_id': user[7],
+            'department': department,
+            'employee_sid': user[11],
+            'employee_code': user[12],
+            'join_date': user[13].isoformat() if user[13] else None
+        }
+
+    def get_user_by_sid_result(self, cursor, sid: int) -> Dict[str, Any]:
+        """Get user by SID using an existing cursor, returns success dict"""
+        cursor.execute(self._USER_SELECT + ' WHERE u.sid = %s', (sid,))
+        user = cursor.fetchone()
+        if not user:
+            return {'success': False, 'error': 'User not found'}
+        return {'success': True, 'user': self._build_user_dict(user)}
+
     def get_user_by_sid(self, sid: int) -> Optional[Dict[str, Any]]:
-        """Get user by SID with department info"""
+        """Get user by SID with role, department and employee info"""
         conn = None
         try:
             conn = get_postgres_connection()
@@ -360,13 +450,7 @@ class AuthService:
                 return None
 
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT u.sid, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login,
-                       u.department_id, d.id as dept_id, d.code as dept_code, d.name as dept_name
-                FROM users u
-                LEFT JOIN departments d ON u.department_id = d.id
-                WHERE u.sid = %s
-            ''', (sid,))
+            cursor.execute(self._USER_SELECT + ' WHERE u.sid = %s', (sid,))
 
             user = cursor.fetchone()
             cursor.close()
@@ -374,22 +458,7 @@ class AuthService:
             if not user:
                 return None
 
-            # Build department object
-            department = None
-            if user[8]:
-                department = {'id': user[8], 'code': user[9], 'name': user[10]}
-
-            return {
-                'sid': user[0],
-                'email': user[1],
-                'full_name': user[2],
-                'role': user[3],
-                'is_active': user[4],
-                'created_at': user[5].isoformat() if user[5] else None,
-                'last_login': user[6].isoformat() if user[6] else None,
-                'department_id': user[7],
-                'department': department
-            }
+            return self._build_user_dict(user)
 
         except Exception as e:
             print(f"Error getting user: {e}")
@@ -399,7 +468,7 @@ class AuthService:
                 conn.close()
 
     def get_all_users(self) -> Dict[str, Any]:
-        """Get all users with department info (admin only)"""
+        """Get all users with role, department and employee info"""
         conn = None
         try:
             conn = get_postgres_connection()
@@ -407,34 +476,12 @@ class AuthService:
                 return {'success': False, 'error': 'Failed to connect to database'}
 
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT u.sid, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login,
-                       u.department_id, d.id as dept_id, d.code as dept_code, d.name as dept_name
-                FROM users u
-                LEFT JOIN departments d ON u.department_id = d.id
-                ORDER BY u.created_at DESC
-            ''')
+            cursor.execute(self._USER_SELECT + ' ORDER BY u.created_at DESC')
 
             users = cursor.fetchall()
             cursor.close()
 
-            user_list = []
-            for user in users:
-                department = None
-                if user[8]:
-                    department = {'id': user[8], 'code': user[9], 'name': user[10]}
-
-                user_list.append({
-                    'sid': user[0],
-                    'email': user[1],
-                    'full_name': user[2],
-                    'role': user[3],
-                    'is_active': user[4],
-                    'created_at': user[5].isoformat() if user[5] else None,
-                    'last_login': user[6].isoformat() if user[6] else None,
-                    'department_id': user[7],
-                    'department': department
-                })
+            user_list = [self._build_user_dict(user) for user in users]
 
             return {'success': True, 'users': user_list}
 
@@ -445,7 +492,7 @@ class AuthService:
                 conn.close()
 
     def update_user(self, sid: int, updates: Dict[str, Any]) -> Dict[str, Any]:
-        """Update user details"""
+        """Update user details. Accepts role as code string, resolves to FK."""
         conn = None
         try:
             conn = get_postgres_connection()
@@ -454,8 +501,16 @@ class AuthService:
 
             cursor = conn.cursor()
 
+            # Resolve role code to FK ID if provided
+            if 'role' in updates:
+                role_id = self._resolve_role_id(cursor, updates['role'])
+                if not role_id:
+                    return {'success': False, 'error': f"Invalid role: {updates['role']}"}
+                updates['role_id'] = role_id
+                del updates['role']
+
             # Build update query dynamically
-            allowed_fields = ['email', 'full_name', 'role', 'is_active', 'department_id']
+            allowed_fields = ['email', 'full_name', 'role_id', 'is_active', 'department_id', 'employee_sid']
             update_parts = []
             values = []
 
@@ -532,6 +587,28 @@ class AuthService:
         except Exception as e:
             if conn:
                 conn.rollback()
+            return {'success': False, 'error': str(e)}
+        finally:
+            if conn:
+                conn.close()
+
+    # ==================== Lookup Endpoints ====================
+
+    def get_roles(self) -> Dict[str, Any]:
+        """Get all roles"""
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to database'}
+
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, code, name, is_active FROM roles ORDER BY id')
+            roles = [{'id': r[0], 'code': r[1], 'name': r[2], 'is_active': r[3]} for r in cursor.fetchall()]
+            cursor.close()
+            return {'success': True, 'roles': roles}
+
+        except Exception as e:
             return {'success': False, 'error': str(e)}
         finally:
             if conn:
