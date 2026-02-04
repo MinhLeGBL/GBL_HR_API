@@ -6,22 +6,23 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          password: ${{ secrets.DEPLOY_PASSWORD }}
-          script: |
-            cd /home/gbladmin/GBL_HR_API
-            git pull origin deployment
-            source .venv/bin/activate
-            pip install -r requirements.txt
-            sudo systemctl restart gbl-hr-api
+      - name: Pull latest code
+        run: |
+          cd /home/gbladmin/GBL_HR_API
+          git pull origin deployment
+
+      - name: Install dependencies
+        run: |
+          cd /home/gbladmin/GBL_HR_API
+          source .venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Restart service
+        run: sudo systemctl restart gbl-hr-api
 
       - name: Health check
         run: |
           sleep 5
-          curl -f http://${{ secrets.DEPLOY_HOST }}:5000/api/v1/health || echo "WARNING: Health check failed"
+          curl -f http://localhost:5000/api/v1/health || echo "WARNING: Health check failed"
