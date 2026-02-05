@@ -1,3 +1,11 @@
+# Deployment-specific ignores
+tests/
+document/
+docs/
+!docs/deployment/
+debug_endpoint.py
+server.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

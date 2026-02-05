@@ -5,11 +5,19 @@ from config.database import DATABASE_CONFIG, POSTGRES_CONFIG, SSH_CONFIG
 
 def get_oracle_connection():
     try:
-        d = None  # default suitable for Linux
+        d = None
         if platform.system() == "Darwin" and platform.machine() == "x86_64":  # macOS
             d = os.environ.get("HOME") + ("/Downloads/instantclient_19_16")
         elif platform.system() == "Windows":
             d = r"W:\Oracle\instantclient_23_4"
+        elif platform.system() == "Linux":
+            # For Linux, check for different Oracle versions
+            if os.path.exists("/opt/oracle/instantclient_19_30"):
+                d = "/opt/oracle/instantclient_19_30"
+            elif os.path.exists("/opt/oracle/instantclient_19_16"):
+                d = "/opt/oracle/instantclient_19_16"
+            else:
+                d = "/opt/oracle/instantclient_19_30"  # Default to 19.30
 
         if d and os.path.exists(d):
             oracledb.init_oracle_client(lib_dir=d)
