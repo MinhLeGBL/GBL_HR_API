@@ -1,7 +1,3 @@
 """
-Data Access Layer - Repository pattern for Oracle database operations
+Data Access Layer - Repository pattern for database operations
 """
-from .employee_repository import EmployeeRepository
-from .sales_repository import RetailSalesRepository
-
-__all__ = ['EmployeeRepository', 'RetailSalesRepository']
