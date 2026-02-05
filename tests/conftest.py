@@ -20,7 +20,7 @@ def client(app):
 @pytest.fixture
 def mock_pg_connection():
     """Mock PostgreSQL connection and cursor."""
-    with patch('app.database.connection.get_postgres_connection') as mock_get_conn:
+    with patch('app.core.database.connection.get_postgres_connection') as mock_get_conn:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
@@ -31,7 +31,7 @@ def mock_pg_connection():
 @pytest.fixture
 def mock_oracle_connection():
     """Mock Oracle database connection and cursor."""
-    with patch('app.database.connection.get_oracle_connection') as mock_get_conn:
+    with patch('app.core.database.connection.get_oracle_connection') as mock_get_conn:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
@@ -52,6 +52,6 @@ def mock_auth_token():
         'department_id': 1,
         'department_code': 'IT'
     }
-    with patch('app.services.auth_service.AuthService.verify_token') as mock_verify:
+    with patch('app.core.auth.service.AuthService.verify_token') as mock_verify:
         mock_verify.return_value = user_data
         yield user_data

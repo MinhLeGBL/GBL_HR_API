@@ -23,11 +23,11 @@ if os.path.exists(env_file):
 else:
     load_dotenv()
 
-from app.services.permission_service import PermissionService
-from app.services.store_service import StoreService
-from app.services.hr_employee_service import HREmployeeService
-from app.services.auth_service import AuthService
-from app.services.dashboard_service import DashboardService
+from app.modules.permissions.service import PermissionService
+from app.modules.stores.service import StoreService
+from app.modules.employees.service import HREmployeeService
+from app.core.auth.service import AuthService
+from app.modules.dashboard.service import DashboardService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
