@@ -15,6 +15,9 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Run all tests (full regression)
         run: pytest tests/ -x --ignore=tests/integration -v
+        env:
+          FLASK_ENV: testing
+          PYTHONPATH: .
 
   promote:
     needs: test
@@ -32,3 +35,7 @@ jobs:
           git checkout deployment
           git merge origin/staging --ff-only -m "Auto-promote: staging tests passed"
           git push origin deployment
+      - name: Trigger deploy workflow
+        run: gh workflow run deploy.yml --ref deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
