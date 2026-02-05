@@ -2,8 +2,8 @@
 Integration tests for Store Commission Service using Google Sheets input
 """
 import pytest
-from app.services.google_sheets_service import GoogleSheetsService
-from app.services.commission_service import CommissionService
+from app.modules.commission.sheets_service import GoogleSheetsService
+from app.modules.commission.service import CommissionService
 
 
 class TestStoreCommissionServiceIntegration:

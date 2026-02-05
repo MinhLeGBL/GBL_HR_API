@@ -3,14 +3,14 @@ GBL HR API - Main Application Entry Point
 """
 from flask import Flask, jsonify
 from flask_cors import CORS
-from app.api.v1.routes.hr_employee_routes import hr_employee_bp
-from app.api.v1.routes.store_routes import store_bp
-from app.api.v1.routes.health_routes import health_bp
-from app.api.v1.routes.commission_routes import commission_bp
-from app.api.v1.routes.auth_routes import auth_bp
-from app.api.v1.routes.permission_routes import permission_bp
-from app.api.v1.routes.dashboard_routes import dashboard_bp
-from app.api.v1.routes.user_routes import user_bp
+from app.modules.employees.routes import hr_employee_bp
+from app.modules.stores.routes import store_bp
+from app.modules.health.routes import health_bp
+from app.modules.commission.routes import commission_bp
+from app.modules.auth.routes import auth_bp
+from app.modules.permissions.routes import permission_bp
+from app.modules.dashboard.routes import dashboard_bp
+from app.modules.auth.user_routes import user_bp
 
 
 def create_app():
