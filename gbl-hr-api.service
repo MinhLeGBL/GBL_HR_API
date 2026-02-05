@@ -1,0 +1,19 @@
+[Unit]
+Description=GBL HR API
+After=network.target postgresql.service
+
+[Service]
+User=gbladmin
+WorkingDirectory=/home/gbladmin/GBL_HR_API
+Environment="PATH=/home/gbladmin/GBL_HR_API/.venv/bin"
+EnvironmentFile=/home/gbladmin/GBL_HR_API/.env
+ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/gunicorn \
+    --bind 0.0.0.0:5000 \
+    --workers 3 \
+    --timeout 120 \
+    app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

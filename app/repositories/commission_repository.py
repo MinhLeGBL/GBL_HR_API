@@ -220,12 +220,15 @@ class CommissionRepository:
         """
         Get list of hand carry item UPCs from PostgreSQL rps.carrier_item table
 
+        Uses SSH tunnel if USE_SSH_TUNNEL=true in environment (for development).
+        Connects directly if USE_SSH_TUNNEL=false (for deployment on same server).
+
         Returns:
             List of UPC strings for hand carry items
         """
         conn = None
         try:
-            # Connect to PostgreSQL directly (same server)
+            # Connect to PostgreSQL (uses SSH tunnel based on USE_SSH_TUNNEL env var)
             conn = get_postgres_connection()
 
             if not conn:
@@ -256,7 +259,7 @@ class CommissionRepository:
             return []
 
         finally:
-            # Close connection
+            # Close connection (SSH tunnel is managed globally)
             if conn:
                 try:
                     conn.close()

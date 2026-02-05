@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request
 from app.services.employee_service import EmployeeService
 from app.api.v1.schemas.employee_schemas import EmployeeListResponse
 
-employee_bp = Blueprint('employee', __name__, url_prefix='/api/v1/employees')
+employee_bp = Blueprint('employee', __name__, url_prefix='/api/v1/rp-employees')  # RetailPro employees (Oracle)
 
 
 @employee_bp.route('/', methods=['GET'])

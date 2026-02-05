@@ -31,7 +31,7 @@ class EmployeeService:
         Returns:
             Employee dictionary or None if not found
         """
-        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE e.UDF4_STRING = :employee_code"
+        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE cust.UDF4_STRING = :employee_code"
         results = self.repository.execute(query, {'employee_code': employee_code})
 
         return results[0] if results else None
@@ -46,7 +46,7 @@ class EmployeeService:
         Returns:
             List of employee dictionaries
         """
-        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE e.STORE_CODE = :store_code"
+        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE s.STORE_CODE = :store_code"
         return self.repository.execute(query, {'store_code': store_code})
 
     def get_active_employees(self) -> List[Dict[str, Any]]:
@@ -56,7 +56,7 @@ class EmployeeService:
         Returns:
             List of active employee dictionaries
         """
-        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE e.ACTIVE = 1"
+        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE emp.USER_ACTIVE = 1"
         return self.repository.execute(query)
 
     def get_inactive_employees(self) -> List[Dict[str, Any]]:
@@ -66,5 +66,5 @@ class EmployeeService:
         Returns:
             List of inactive employee dictionaries
         """
-        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE e.ACTIVE = 0"
+        query = f"{self.repository.queries.EMPLOYEE_INFO} WHERE emp.USER_ACTIVE = 0"
         return self.repository.execute(query)

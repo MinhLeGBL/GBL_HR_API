@@ -88,8 +88,19 @@ git_token.txt
 *.key
 credentials.json
 .env
+.env.development
+.env.production
 
 # Temporary files
 temp/
 tmp/
 *.tmp
+
+# Development documentation (not for deployment)
+document/
+README.md
+docs/
+
+# Development scripts
+deploy-*.sh
+debug_*.py

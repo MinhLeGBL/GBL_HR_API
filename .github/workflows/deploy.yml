@@ -1,0 +1,28 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [deployment]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Pull latest code
+        run: |
+          cd /home/gbladmin/GBL_HR_API
+          git pull origin deployment
+
+      - name: Install dependencies
+        run: |
+          cd /home/gbladmin/GBL_HR_API
+          source .venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Restart service
+        run: sudo systemctl restart gbl-hr-api
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -f http://localhost:5000/api/v1/health || echo "WARNING: Health check failed"
