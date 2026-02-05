@@ -19,9 +19,15 @@ else:
 
 
 def _require(key: str) -> str:
-    """Return an env var or raise if missing."""
+    """Return an env var or raise if missing.
+
+    In testing mode, returns a placeholder so unit tests (which mock all
+    DB access) can import the app without real credentials.
+    """
     value = os.getenv(key)
     if not value:
+        if _env == 'testing':
+            return 'test-placeholder'
         raise ValueError(f'Missing required environment variable: {key}')
     return value
 
