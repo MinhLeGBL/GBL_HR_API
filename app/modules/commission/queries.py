@@ -287,6 +287,7 @@ class CommissionQueries:
             di.SCAN_UPC                                                           as upc,
             emp.SID                                                               as employee_sid,
             emp.USER_NAME                                                         as employee_username,
+            d.BT_CUID                                                             as customer_sid,
             d.DOC_NO                                                              as bill_number,
             s.STORE_CODE                                                          as store_code,
             TRUNC(d.invc_post_date)                                               as sale_date,

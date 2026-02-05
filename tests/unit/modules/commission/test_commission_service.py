@@ -1718,3 +1718,175 @@ class TestCalculatePersonalCommissions:
 
         emp2 = result[result['employee_code'] == 'EMP002'].iloc[0]
         assert emp2['total'] == 0
+
+
+class TestEmployeeCommissionException:
+    """Tests for EMPLOYEE_COMMISSION_EXCEPTIONS — flat rate on non-jewelry
+    sold to a qualifying customer only."""
+
+    EXCEPTION_EMP_SID = 690036963000170943
+    QUALIFYING_CUSTOMER = 690837303000121462
+    OTHER_CUSTOMER = 999999999999999999
+
+    @pytest.fixture
+    def mock_repo(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def service(self, mock_repo):
+        return CommissionService(repository=mock_repo)
+
+    def _make_sales_df(self, rows):
+        """Sales DataFrame with customer_sid column for exception tests."""
+        columns = [
+            'SALE_ID', 'UPC', 'EMPLOYEE_CODE', 'EMPLOYEE_USERNAME', 'EMPLOYEE_SID',
+            'CUSTOMER_SID', 'BILL_NUMBER', 'STORE_CODE', 'SALE_DATE', 'SALE_TIME',
+            'REVENUE_WITH_VAT', 'REVENUE_BEFORE_VAT', 'DISCOUNT_RATE',
+            'IS_JEWELRY', 'VENDOR_CODE', 'CATEGORY', 'DEPARTMENT',
+        ]
+        df = pd.DataFrame(rows, columns=columns)
+        return df
+
+    def test_flat_rate_qualifying_customer(self, service, mock_repo):
+        """Non-jewelry sales to qualifying customer earn 0.7% flat in FP bucket."""
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.QUALIFYING_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             11_000_000, 10_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+        ])
+        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        assert row['commission_100_and_below_fp'] == 10_000_000 * 0.007  # 70,000
+        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_over_100'] == 0
+        assert row['total'] == 10_000_000 * 0.007
+
+    def test_non_qualifying_customer_no_commission(self, service, mock_repo):
+        """Non-jewelry sales to other customers earn zero FP/discount commission."""
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.OTHER_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             11_000_000, 10_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+        ])
+        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        assert row['commission_100_and_below_fp'] == 0
+        assert row['commission_100_and_below_discount'] == 0
+        assert row['total'] == 0
+
+    def test_jewelry_still_earned_regardless_of_customer(self, service, mock_repo):
+        """Jewelry commission is calculated normally, no customer filter."""
+        sales_df = self._make_sales_df([
+            # VHN jewelry sale to a NON-qualifying customer — should still earn commission
+            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.OTHER_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             5_500_000, 5_000_000, 0.0, 1, 'VHN', 'NECKLACE', 'WJEW'],
+        ])
+        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        assert row['commission_vhernier'] == 5_000_000 * 0.01  # 50,000
+        assert row['commission_jewelry'] == 5_000_000 * 0.01
+        assert row['commission_100_and_below_fp'] == 0  # No qualifying non-jewelry
+        assert row['total'] == 5_000_000 * 0.01
+
+    def test_hand_carry_still_earned_regardless_of_customer(self, service, mock_repo):
+        """Hand carry commission is calculated normally, no customer filter."""
+        sales_df = self._make_sales_df([
+            # Hand carry item (ATQ, 1% vendor) sold to non-qualifying customer
+            [1, 'HC_UPC', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.OTHER_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             2_200_000, 2_000_000, 0.0, 0, 'ATQ', 'BAGS', 'RTW'],
+        ])
+        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = ['HC_UPC']
+
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        # Hand carry uses revenue_with_vat, ATQ = 1%
+        assert row['commission_hand_carry'] == 2_200_000 * 0.01  # 22,000
+        assert row['commission_100_and_below_fp'] == 0  # No qualifying non-jewelry
+        assert row['total'] == 2_200_000 * 0.01
+
+    def test_mixed_customers(self, service, mock_repo):
+        """Only non-jewelry sales to qualifying customer earn flat rate;
+        sales to other customers are excluded from FP commission."""
+        sales_df = self._make_sales_df([
+            # Non-jewelry to qualifying customer — should earn commission
+            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.QUALIFYING_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             11_000_000, 10_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            # Non-jewelry to OTHER customer — should NOT earn commission
+            [2, 'UPC002', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.OTHER_CUSTOMER, 'BILL2', 'HBT', '2025-01-15', '11:00:00',
+             5_500_000, 5_000_000, 0.0, 0, 'DEF', 'PANTS', 'RTW'],
+            # Jewelry to OTHER customer — should still earn commission (no customer filter)
+            [3, 'UPC003', 'E1', 'user1', self.EXCEPTION_EMP_SID,
+             self.OTHER_CUSTOMER, 'BILL3', 'HBT', '2025-01-15', '12:00:00',
+             3_300_000, 3_000_000, 0.0, 1, 'VHN', 'RING', 'WJEW'],
+        ])
+        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        # Only 10M qualifying non-jewelry earns flat 0.7%, 5M excluded
+        assert row['commission_100_and_below_fp'] == 10_000_000 * 0.007  # 70,000
+        assert row['commission_100_and_below_discount'] == 0
+        # VHN jewelry (1%)
+        assert row['commission_vhernier'] == 3_000_000 * 0.01  # 30,000
+        assert row['commission_jewelry'] == 3_000_000 * 0.01
+        assert row['total'] == (10_000_000 * 0.007) + (3_000_000 * 0.01)  # 100,000
