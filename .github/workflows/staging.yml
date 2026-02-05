@@ -33,7 +33,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin deployment
           git checkout deployment
-          git merge origin/staging --ff-only -m "Auto-promote: staging tests passed"
+          git merge origin/staging --no-ff -m "Auto-promote: staging tests passed"
           git push origin deployment
       - name: Trigger deploy workflow
         run: gh workflow run deploy.yml --ref deployment
