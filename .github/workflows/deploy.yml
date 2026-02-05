@@ -14,6 +14,9 @@ jobs:
           cd /home/gbladmin/GBL_HR_API
           git pull origin deployment
 
+      - name: Clean test files from server
+        run: rm -rf /home/gbladmin/GBL_HR_API/tests/
+
       - name: Install dependencies
         run: |
           cd /home/gbladmin/GBL_HR_API
