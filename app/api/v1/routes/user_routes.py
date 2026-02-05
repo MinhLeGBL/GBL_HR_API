@@ -1,79 +1,13 @@
 """
 User Management API Routes
 """
-from functools import wraps
 from flask import Blueprint, jsonify, request, g
-from app.services.auth_service import AuthService, UserRole
+from app.services.auth_service import UserRole
+from app.api.v1.routes.auth_middleware import (
+    token_required, admin_or_it_manager_required, auth_service
+)
 
 user_bp = Blueprint('users', __name__, url_prefix='/api/v1/users')
-auth_service = AuthService()
-
-
-# ==================== Access Control ====================
-
-def token_required(f):
-    """Decorator to require a valid JWT token"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            if auth_header.startswith('Bearer '):
-                token = auth_header[7:]
-
-        if not token:
-            return jsonify({
-                'success': False,
-                'error': 'Authorization token is missing'
-            }), 401
-
-        payload = auth_service.verify_token(token)
-        if not payload:
-            return jsonify({
-                'success': False,
-                'error': 'Invalid or expired token'
-            }), 401
-
-        if payload.get('type') != 'access':
-            return jsonify({
-                'success': False,
-                'error': 'Invalid token type'
-            }), 401
-
-        g.sid = payload.get('sid')
-        g.email = payload.get('email')
-        g.role = payload.get('role')
-
-        user = auth_service.get_user_by_sid(g.sid)
-        if user:
-            g.department_id = user.get('department_id')
-            g.department_code = user.get('department', {}).get('code') if user.get('department') else None
-
-        return f(*args, **kwargs)
-
-    return decorated
-
-
-def admin_or_it_manager_required(f):
-    """Decorator to require admin role OR IT department manager"""
-    @wraps(f)
-    @token_required
-    def decorated(*args, **kwargs):
-        # Admin always has access
-        if g.role == UserRole.ADMIN:
-            return f(*args, **kwargs)
-
-        # IT department manager has access
-        if g.role == UserRole.MANAGER and g.department_code == 'IT':
-            return f(*args, **kwargs)
-
-        return jsonify({
-            'success': False,
-            'error': 'Admin or IT department manager access required'
-        }), 403
-
-    return decorated
 
 
 # ==================== User Management Routes ====================

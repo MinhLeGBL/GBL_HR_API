@@ -3,24 +3,10 @@ Dashboard API Routes
 """
 from flask import Blueprint, jsonify, request, g
 from app.services.dashboard_service import DashboardService
-from app.api.v1.routes.auth_routes import token_required, manager_required
+from app.api.v1.routes.auth_middleware import token_required, manager_required
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/v1/dashboard')
 dashboard_service = DashboardService()
-
-
-# ==================== Database Initialization ====================
-
-@dashboard_bp.route('/init-db', methods=['POST'])
-def init_dashboard_tables():
-    """
-    Initialize dashboard_configs and dashboard_widgets tables
-    Run this once to set up the dashboard system
-    """
-    result = dashboard_service.init_dashboard_tables()
-    if result['success']:
-        return jsonify(result), 200
-    return jsonify(result), 500
 
 
 # ==================== Configuration Routes ====================

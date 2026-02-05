@@ -80,6 +80,8 @@ git_token.txt
 *.key
 credentials.json
 .env
+.env.development
+.env.production
 
 # Temporary files
 temp/

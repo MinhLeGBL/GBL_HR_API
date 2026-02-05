@@ -42,25 +42,6 @@ def _setup_staff_auth(mock_verify, mock_get_user):
     }
 
 
-# ==================== POST /api/v1/permissions/init-db ====================
-
-class TestInitPermissionTables:
-
-    @patch('app.api.v1.routes.permission_routes.permission_service.init_permission_tables')
-    def test_init_success(self, mock_init, client):
-        mock_init.return_value = {'success': True, 'message': 'Tables created'}
-        resp = client.post('/api/v1/permissions/init-db')
-        assert resp.status_code == 200
-        body = resp.get_json()
-        assert body['success'] is True
-
-    @patch('app.api.v1.routes.permission_routes.permission_service.init_permission_tables')
-    def test_init_failure(self, mock_init, client):
-        mock_init.return_value = {'success': False, 'error': 'DB error'}
-        resp = client.post('/api/v1/permissions/init-db')
-        assert resp.status_code == 500
-
-
 # ==================== GET /api/v1/departments ====================
 
 class TestGetDepartments:

@@ -144,27 +144,6 @@ class TestRefreshToken:
         assert body['success'] is False
 
 
-# ==================== POST /init-db ====================
-
-class TestInitDB:
-
-    @patch('app.api.v1.routes.auth_routes.auth_service.init_database')
-    def test_init_db_success(self, mock_init, client):
-        mock_init.return_value = {'success': True, 'message': 'Tables created'}
-        resp = client.post('/api/v1/auth/init-db')
-        assert resp.status_code == 200
-        body = resp.get_json()
-        assert body['success'] is True
-
-    @patch('app.api.v1.routes.auth_routes.auth_service.init_database')
-    def test_init_db_failure(self, mock_init, client):
-        mock_init.return_value = {'success': False, 'error': 'DB error'}
-        resp = client.post('/api/v1/auth/init-db')
-        assert resp.status_code == 500
-        body = resp.get_json()
-        assert body['success'] is False
-
-
 # ==================== GET /me ====================
 
 class TestGetMe:

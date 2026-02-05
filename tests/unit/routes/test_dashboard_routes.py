@@ -54,27 +54,6 @@ def _setup_staff_auth(mock_verify, mock_get_user):
     }
 
 
-# ==================== POST /api/v1/dashboard/init-db ====================
-
-class TestInitDashboardTables:
-
-    @patch('app.api.v1.routes.dashboard_routes.dashboard_service.init_dashboard_tables')
-    def test_init_success(self, mock_init, client):
-        mock_init.return_value = {'success': True, 'message': 'Dashboard tables created'}
-        resp = client.post('/api/v1/dashboard/init-db')
-        assert resp.status_code == 200
-        body = resp.get_json()
-        assert body['success'] is True
-
-    @patch('app.api.v1.routes.dashboard_routes.dashboard_service.init_dashboard_tables')
-    def test_init_failure(self, mock_init, client):
-        mock_init.return_value = {'success': False, 'error': 'DB error'}
-        resp = client.post('/api/v1/dashboard/init-db')
-        assert resp.status_code == 500
-        body = resp.get_json()
-        assert body['success'] is False
-
-
 # ==================== GET /api/v1/dashboard/config/<dept_code> ====================
 
 class TestGetDashboardConfig:

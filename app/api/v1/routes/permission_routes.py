@@ -8,37 +8,10 @@ Permission Model:
 from flask import Blueprint, jsonify, request, g
 from app.services.permission_service import PermissionService
 from app.services.auth_service import UserRole
-from app.api.v1.routes.auth_routes import token_required, admin_required
+from app.api.v1.routes.auth_middleware import token_required, admin_required
 
 permission_bp = Blueprint('permissions', __name__, url_prefix='/api/v1')
 permission_service = PermissionService()
-
-
-# ==================== Initialization ====================
-
-@permission_bp.route('/permissions/init-db', methods=['POST'])
-def init_permission_tables():
-    """
-    Initialize all permission tables:
-    departments, section_groups, sections, section_group_permissions, section_permissions.
-    Run this once as the first step of deployment.
-    """
-    result = permission_service.init_permission_tables()
-    if result['success']:
-        return jsonify(result), 200
-    return jsonify(result), 500
-
-
-@permission_bp.route('/section-groups/init-db', methods=['POST'])
-def init_section_groups():
-    """
-    Deprecated: section_groups are now created by /permissions/init-db.
-    Kept for backwards compatibility — calls the same init method.
-    """
-    result = permission_service.init_permission_tables()
-    if result['success']:
-        return jsonify(result), 200
-    return jsonify(result), 500
 
 
 # ==================== Department Routes ====================

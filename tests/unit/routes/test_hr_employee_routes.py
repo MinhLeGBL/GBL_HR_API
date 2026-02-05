@@ -1,5 +1,8 @@
 """
 Unit tests for HR Employee API Routes
+
+hr_employee_routes imports decorators from auth_middleware, so the auth_service
+instance to patch is on auth_middleware, NOT hr_employee_routes.
 """
 import json
 import pytest
@@ -56,8 +59,8 @@ def _setup_staff_auth(mock_verify, mock_get_user):
 class TestGetAllEmployees:
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.get_all_employees')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_all_employees_success(self, mock_verify, mock_get_user, mock_get_all, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_get_all.return_value = {
@@ -73,8 +76,8 @@ class TestGetAllEmployees:
         assert len(body['employees']) == 1
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.get_all_employees')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_all_employees_with_filters(self, mock_verify, mock_get_user, mock_get_all, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_get_all.return_value = {'success': True, 'employees': []}
@@ -82,8 +85,8 @@ class TestGetAllEmployees:
         assert resp.status_code == 200
         mock_get_all.assert_called_once_with(department_code='HR', role='staff')
 
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_all_employees_staff_forbidden(self, mock_verify, mock_get_user, client):
         _setup_staff_auth(mock_verify, mock_get_user)
         resp = client.get('/api/v1/employees', headers=_auth_headers())
@@ -101,8 +104,8 @@ class TestGetAllEmployees:
 class TestGetEmployeeBySid:
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.get_employee_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_employee_success(self, mock_verify, mock_get_user, mock_get_emp, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_get_emp.return_value = {
@@ -116,8 +119,8 @@ class TestGetEmployeeBySid:
         assert body['employee']['sid'] == 300000001
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.get_employee_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_employee_not_found(self, mock_verify, mock_get_user, mock_get_emp, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_get_emp.return_value = {'success': False, 'error': 'Employee not found'}
@@ -142,8 +145,8 @@ class TestCreateEmployee:
         }
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.create_employee')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_create_employee_success(self, mock_verify, mock_get_user, mock_create, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_create.return_value = {
@@ -157,15 +160,15 @@ class TestCreateEmployee:
         body = resp.get_json()
         assert body['success'] is True
 
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_create_employee_missing_body(self, mock_verify, mock_get_user, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         resp = client.post('/api/v1/employees', headers=_auth_headers())
         assert resp.status_code == 400
 
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_create_employee_missing_required_field(self, mock_verify, mock_get_user, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         data = {'employee_code': 'EMP010', 'full_name': 'Test'}
@@ -182,8 +185,8 @@ class TestCreateEmployee:
 class TestUpdateEmployee:
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.update_employee')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_update_employee_success(self, mock_verify, mock_get_user, mock_update, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_update.return_value = {
@@ -197,8 +200,8 @@ class TestUpdateEmployee:
         body = resp.get_json()
         assert body['success'] is True
 
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_update_employee_no_valid_fields(self, mock_verify, mock_get_user, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         resp = client.put('/api/v1/employees/300000001',
@@ -209,8 +212,8 @@ class TestUpdateEmployee:
         assert 'No valid fields' in body['error']
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.update_employee')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_update_employee_not_found(self, mock_verify, mock_get_user, mock_update, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_update.return_value = {'success': False, 'error': 'Employee not found'}
@@ -225,8 +228,8 @@ class TestUpdateEmployee:
 class TestDeleteEmployee:
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.delete_employee')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_delete_employee_success(self, mock_verify, mock_get_user, mock_delete, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_delete.return_value = {'success': True}
@@ -236,8 +239,8 @@ class TestDeleteEmployee:
         assert body['success'] is True
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.delete_employee')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_delete_employee_not_found(self, mock_verify, mock_get_user, mock_delete, client):
         _setup_admin_auth(mock_verify, mock_get_user)
         mock_delete.return_value = {'success': False, 'error': 'Employee not found'}
@@ -245,38 +248,13 @@ class TestDeleteEmployee:
         assert resp.status_code == 404
 
 
-# ==================== POST /api/v1/employees/init ====================
-
-class TestInitEmployeesTable:
-
-    @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.init_database')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
-    def test_init_employees_success(self, mock_verify, mock_get_user, mock_init, client):
-        _setup_admin_auth(mock_verify, mock_get_user)
-        mock_init.return_value = {'success': True, 'message': 'Table created'}
-        resp = client.post('/api/v1/employees/init', headers=_auth_headers())
-        assert resp.status_code == 200
-        body = resp.get_json()
-        assert body['success'] is True
-
-    @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.init_database')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
-    def test_init_employees_failure(self, mock_verify, mock_get_user, mock_init, client):
-        _setup_admin_auth(mock_verify, mock_get_user)
-        mock_init.return_value = {'success': False, 'error': 'DB error'}
-        resp = client.post('/api/v1/employees/init', headers=_auth_headers())
-        assert resp.status_code == 500
-
-
 # ==================== GET /api/v1/employees/types ====================
 
 class TestGetEmployeeTypes:
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.get_employee_types')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_employee_types_success(self, mock_verify, mock_get_user, mock_types, client):
         # token_required only -- staff can access
         mock_verify.return_value = {
@@ -302,8 +280,8 @@ class TestGetEmployeeTypes:
 class TestGetContractTypes:
 
     @patch('app.api.v1.routes.hr_employee_routes.hr_employee_service.get_contract_types')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.get_user_by_sid')
-    @patch('app.api.v1.routes.hr_employee_routes.auth_service.verify_token')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.get_user_by_sid')
+    @patch('app.api.v1.routes.auth_middleware.auth_service.verify_token')
     def test_get_contract_types_success(self, mock_verify, mock_get_user, mock_contracts, client):
         mock_verify.return_value = {
             'sid': 2, 'email': 'staff@test.com', 'role': 'staff', 'type': 'access'
