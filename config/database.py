@@ -43,11 +43,13 @@ DATABASE_CONFIG = {
 }
 
 # SSH Tunnel Configuration for PostgreSQL
+# Only required when USE_SSH_TUNNEL=true (development); skipped in production.
+_use_ssh = os.getenv('USE_SSH_TUNNEL', 'false').lower() == 'true'
 SSH_CONFIG = {
-    'ssh_host': _require('SSH_HOST'),
+    'ssh_host': _require('SSH_HOST') if _use_ssh else os.getenv('SSH_HOST', ''),
     'ssh_port': int(os.getenv('SSH_PORT', 22)),
-    'ssh_username': _require('SSH_USERNAME'),
-    'ssh_password': _require('SSH_PASSWORD'),
+    'ssh_username': _require('SSH_USERNAME') if _use_ssh else os.getenv('SSH_USERNAME', ''),
+    'ssh_password': _require('SSH_PASSWORD') if _use_ssh else os.getenv('SSH_PASSWORD', ''),
     'local_port': int(os.getenv('SSH_LOCAL_PORT', 6543)),
     'remote_port': int(os.getenv('SSH_REMOTE_PORT', 5432))
 }
