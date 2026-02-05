@@ -11,7 +11,7 @@ ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/gunicorn \
     --bind 0.0.0.0:5000 \
     --workers 3 \
     --timeout 120 \
-    app:app
+    app.main:app
 Restart=always
 RestartSec=5
 
