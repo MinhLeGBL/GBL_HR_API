@@ -19,3 +19,4 @@ jobs:
         run: pytest tests/ -x --ignore=tests/integration -v
         env:
           FLASK_ENV: testing
+          PYTHONPATH: .
