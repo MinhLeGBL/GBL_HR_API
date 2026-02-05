@@ -91,14 +91,34 @@ from .service import <Name>Service
 
 ## Testing
 
+### Branch-Test Strategy
+
+Each branch only carries tests relevant to its scope:
+
+| Branch | Tests included | Purpose |
+|--------|---------------|---------|
+| `feature/<name>` | `tests/unit/core/` + `tests/unit/modules/<name>/` only | Feature-specific tests + shared core |
+| `staging` | All tests from all feature branches | Full regression suite |
+| `deployment` | Tests in git but removed from server by deploy.yml | Production has no test files |
+
+**When creating a new feature branch from staging:**
+1. Remove test directories for modules you're NOT working on
+2. Keep `tests/conftest.py`, `tests/unit/core/`, and `tests/unit/modules/__init__.py`
+3. Create `tests/unit/modules/<your-module>/` for your new tests
+
+**CI behavior:**
+- `feature.yml` — runs only the tests present on the feature branch
+- `staging.yml` — runs full regression (all module tests merged together)
+- `deploy.yml` — no tests run; `tests/` removed from server after pull
+
 ### Structure
 ```
 tests/
   unit/
-    core/                          # Core service tests
-    modules/<name>/                # Module tests (routes + service)
+    core/                          # Core tests (kept on all feature branches)
+    modules/<name>/                # Module tests (only on owning feature branch)
   integration/                     # Integration tests (real DB)
-  conftest.py                      # Shared fixtures
+  conftest.py                      # Shared fixtures (kept on all branches)
 ```
 
 ### Mock targets
