@@ -29,6 +29,19 @@ STANDARD_RATES = {
 }
 # ============================================================================
 
+# ============================================================================
+# EMPLOYEE-SPECIFIC COMMISSION EXCEPTIONS
+# ============================================================================
+# Employee who receives a flat rate on non-jewelry sales only when
+# selling to a specific customer. No personal target, no achievement tiers.
+EMPLOYEE_COMMISSION_EXCEPTIONS = {
+    690036963000170943: {                               # employee SID
+        'qualifying_customer_sid': 690837303000121462,
+        'flat_rate': 0.007,                             # 0.7% on all non-jewelry
+    }
+}
+# ============================================================================
+
 
 class CommissionService:
     """Business logic layer for commission calculations"""
@@ -383,6 +396,122 @@ class CommissionService:
                     'total': 0
                 })
                 continue
+
+            # ================================================================
+            # EMPLOYEE-SPECIFIC COMMISSION EXCEPTION PATH
+            # ================================================================
+            # Check if this employee has a special flat-rate commission rule.
+            # Exception employees: no personal target, no achievement tiers,
+            # flat rate on non-jewelry sold to a qualifying customer only.
+            # Jewelry, hand carry, and suitcase commissions use normal rules.
+            if employee_sid in EMPLOYEE_COMMISSION_EXCEPTIONS:
+                exception = EMPLOYEE_COMMISSION_EXCEPTIONS[employee_sid]
+                qualifying_customer = exception['qualifying_customer_sid']
+                flat_rate = exception['flat_rate']
+
+                # COSM exclusion still applies
+                exc_sales_df = employee_sales_df[employee_sales_df['department'] != 'COSM'].copy()
+                exc_sales_df['upc_clean'] = exc_sales_df['upc'].astype(str).str.strip()
+
+                # === SAME PRIORITY CHAIN AS MAIN PATH ===
+                # Non-jewelry is the REMAINDER after removing hand carry → suitcase → jewelry.
+                # The customer filter applies ONLY to this remainder.
+
+                # 1. FIRST: Hand carry (highest priority) — by UPC match
+                exc_hand_carry_df = exc_sales_df[exc_sales_df['upc_clean'].isin(hand_carry_upcs)].copy()
+                exc_non_hand_carry_df = exc_sales_df[~exc_sales_df['upc_clean'].isin(hand_carry_upcs)].copy()
+
+                # 2. SECOND: Suitcase (TVL/TIT)
+                exc_suitcase_df = exc_non_hand_carry_df[exc_non_hand_carry_df['vendor_code'].isin(['TVL', 'TIT'])].copy()
+
+                # 3. THIRD: Jewelry (is_jewelry == 1)
+                exc_jewelry_df = exc_non_hand_carry_df[exc_non_hand_carry_df['is_jewelry'] == 1].copy()
+
+                # 4. FOURTH: Non-jewelry = everything else
+                exc_non_jewelry_df = exc_non_hand_carry_df[
+                    (exc_non_hand_carry_df['is_jewelry'] == 0) &
+                    (~exc_non_hand_carry_df['vendor_code'].isin(['TVL', 'TIT']))
+                ].copy()
+
+                # Apply customer filter ONLY to non-jewelry
+                qualifying_sales = exc_non_jewelry_df[exc_non_jewelry_df['customer_sid'] == qualifying_customer]
+                qualifying_revenue = qualifying_sales['revenue_before_vat'].sum()
+                exc_flat_commission = qualifying_revenue * flat_rate
+
+                # HAND CARRY COMMISSION — normal rules, no customer filter
+                exc_hand_carry_commission = 0
+                if len(exc_hand_carry_df) > 0:
+                    rom_earrings_hc = exc_hand_carry_df[
+                        (exc_hand_carry_df['vendor_code'] == 'ROM') & (exc_hand_carry_df['category'] == 'EARRINGS')
+                    ]
+                    if len(rom_earrings_hc) > 0:
+                        exc_hand_carry_commission += rom_earrings_hc['revenue_with_vat'].sum() * 0.03
+
+                    hc_1pct = exc_hand_carry_df[
+                        exc_hand_carry_df['vendor_code'].isin(['ATQ', 'AQU', 'ERE', 'GEO', 'GDC', 'BDA', 'SKY', 'CHI', 'MNC', 'DAP'])
+                    ]
+                    if len(hc_1pct) > 0:
+                        exc_hand_carry_commission += hc_1pct['revenue_with_vat'].sum() * 0.01
+
+                    hc_2pct = exc_hand_carry_df[
+                        (exc_hand_carry_df['vendor_code'].isin(['CGI', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'ROM', 'SPK', 'TED', 'BRT'])) &
+                        ~((exc_hand_carry_df['vendor_code'] == 'ROM') & (exc_hand_carry_df['category'] == 'EARRINGS'))
+                    ]
+                    if len(hc_2pct) > 0:
+                        exc_hand_carry_commission += hc_2pct['revenue_with_vat'].sum() * 0.02
+
+                # SUITCASE COMMISSION — normal rules, no customer filter
+                exc_suitcase_commission = 0
+                if len(exc_suitcase_df) > 0:
+                    exc_suitcase_commission = len(exc_suitcase_df) * 500000
+
+                # JEWELRY COMMISSION — normal rules, no customer filter
+                exc_jewelry_commission = 0
+                exc_commission_rosa_maria = 0
+                exc_commission_vhernier = 0
+                if len(exc_jewelry_df) > 0:
+                    rom_earrings = exc_jewelry_df[
+                        (exc_jewelry_df['vendor_code'] == 'ROM') & (exc_jewelry_df['category'] == 'EARRINGS')
+                    ]
+                    if len(rom_earrings) > 0:
+                        exc_commission_rosa_maria = rom_earrings['revenue_before_vat'].sum() * 0.03
+                        exc_jewelry_commission += exc_commission_rosa_maria
+
+                    vhn = exc_jewelry_df[exc_jewelry_df['vendor_code'] == 'VHN']
+                    if len(vhn) > 0:
+                        exc_commission_vhernier = vhn['revenue_before_vat'].sum() * 0.01
+                        exc_jewelry_commission += exc_commission_vhernier
+
+                    rom_other = exc_jewelry_df[
+                        (exc_jewelry_df['vendor_code'] == 'ROM') & (exc_jewelry_df['category'] != 'EARRINGS')
+                    ]
+                    if len(rom_other) > 0:
+                        exc_jewelry_commission += rom_other['revenue_before_vat'].sum() * 0.02
+
+                    other_jewelry = exc_jewelry_df[
+                        exc_jewelry_df['vendor_code'].isin(['ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT'])
+                    ]
+                    if len(other_jewelry) > 0:
+                        exc_jewelry_commission += other_jewelry['revenue_before_vat'].sum() * 0.02
+
+                exc_total = exc_flat_commission + exc_jewelry_commission + exc_suitcase_commission + exc_hand_carry_commission
+
+                results.append({
+                    'employee_code': employee_code,
+                    'fullname': employee_name,
+                    'store_code': emp_store_code,
+                    'commission_100_and_below_fp': exc_flat_commission,
+                    'commission_100_and_below_discount': 0,
+                    'commission_over_100': 0,
+                    'commission_jewelry': exc_jewelry_commission,
+                    'commission_vhernier': exc_commission_vhernier,
+                    'commission_rosa_maria': exc_commission_rosa_maria,
+                    'commission_suitcase': exc_suitcase_commission,
+                    'commission_hand_carry': exc_hand_carry_commission,
+                    'total': exc_total
+                })
+                continue
+            # ================================================================
 
             # Calculate TOTAL revenue WITH VAT from ALL sources for eligibility check
             # IMPORTANT: COSM items are INCLUDED in total revenue for achievement calculation
