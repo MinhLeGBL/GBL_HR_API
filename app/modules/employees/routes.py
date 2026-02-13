@@ -189,6 +189,36 @@ def delete_employee(sid):
     return jsonify(result), 400
 
 
+@hr_employee_bp.route('/<int:sid>/sync-retailpro', methods=['POST'])
+@admin_or_hr_it_manager_required
+def sync_retailpro(sid):
+    """
+    Sync RetailPro account data for an employee.
+
+    Looks up the employee's RetailPro account by employee_code and updates
+    retailpro_username and retailpro_sid fields.
+
+    Response (success):
+        {
+            "success": true,
+            "employee": {...}
+        }
+
+    Response (no RetailPro account):
+        {
+            "success": false,
+            "error": "No RetailPro account found for employee code EMP001"
+        }
+    """
+    result = hr_employee_service.sync_retailpro_data(sid)
+
+    if result['success']:
+        return jsonify(result), 200
+    if 'not found' in result.get('error', '').lower():
+        return jsonify(result), 404
+    return jsonify(result), 400
+
+
 # ==================== Lookup Endpoints ====================
 
 @hr_employee_bp.route('/types', methods=['GET'])

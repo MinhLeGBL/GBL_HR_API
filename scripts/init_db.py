@@ -34,6 +34,8 @@ INIT_STEPS = [
      PermissionService().init_permission_tables),
     ('Stores',
      StoreService().init_database),
+    ('Stores sync from RetailPro',
+     StoreService().sync_stores_from_retailpro),
     ('Employees (employee_types, contract_types, employees)',
      HREmployeeService().init_database),
     ('Auth (roles, users)',
