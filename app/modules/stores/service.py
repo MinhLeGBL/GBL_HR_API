@@ -2,7 +2,7 @@
 Store Service - PostgreSQL-based store management for HR frontend
 """
 from typing import Dict, Any, List, Optional
-from app.core.database.connection import get_postgres_connection
+from app.core.database.connection import get_postgres_connection, get_oracle_connection
 
 
 class StoreService:
@@ -157,3 +157,91 @@ class StoreService:
         finally:
             if conn:
                 conn.close()
+
+    def sync_stores_from_retailpro(self) -> Dict[str, Any]:
+        """
+        Sync stores from Oracle RetailPro to PostgreSQL.
+
+        Fetches all active stores from RetailPro and upserts them into PostgreSQL.
+        Uses store_code as the unique key for upsert.
+
+        Returns:
+            Dict with success status, counts of inserted/updated stores
+        """
+        pg_conn = None
+        oracle_conn = None
+        try:
+            # Step 1: Connect to Oracle RetailPro
+            oracle_conn = get_oracle_connection()
+            if not oracle_conn:
+                return {'success': False, 'error': 'Failed to connect to RetailPro database'}
+
+            oracle_cursor = oracle_conn.cursor()
+            oracle_cursor.execute("""
+                SELECT
+                    s.SID as STORE_SID,
+                    s.STORE_CODE,
+                    s.STORE_NAME
+                FROM STORE s
+                WHERE s.ACTIVE = 1
+                ORDER BY s.STORE_CODE
+            """)
+
+            stores = oracle_cursor.fetchall()
+            oracle_cursor.close()
+            oracle_conn.close()
+            oracle_conn = None
+
+            if not stores:
+                return {'success': True, 'message': 'No stores found in RetailPro', 'inserted': 0, 'updated': 0}
+
+            # Step 2: Connect to PostgreSQL and upsert stores
+            pg_conn = get_postgres_connection()
+            if not pg_conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = pg_conn.cursor()
+
+            inserted = 0
+            updated = 0
+
+            for store_sid, store_code, store_name in stores:
+                # Check if store exists
+                cursor.execute('SELECT id FROM stores WHERE store_code = %s', (store_code,))
+                existing = cursor.fetchone()
+
+                if existing:
+                    # Update existing store
+                    cursor.execute('''
+                        UPDATE stores
+                        SET store_name = %s, store_rp_sid = %s
+                        WHERE store_code = %s
+                    ''', (store_name, str(store_sid), store_code))
+                    updated += 1
+                else:
+                    # Insert new store
+                    cursor.execute('''
+                        INSERT INTO stores (store_code, store_name, store_rp_sid)
+                        VALUES (%s, %s, %s)
+                    ''', (store_code, store_name, str(store_sid)))
+                    inserted += 1
+
+            pg_conn.commit()
+            cursor.close()
+
+            return {
+                'success': True,
+                'message': f'Synced {inserted + updated} stores from RetailPro',
+                'inserted': inserted,
+                'updated': updated
+            }
+
+        except Exception as e:
+            if pg_conn:
+                pg_conn.rollback()
+            return {'success': False, 'error': str(e)}
+        finally:
+            if oracle_conn:
+                oracle_conn.close()
+            if pg_conn:
+                pg_conn.close()

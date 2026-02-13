@@ -2,7 +2,7 @@
 HR Employee Service - PostgreSQL-based employee management for HR frontend
 """
 from typing import Dict, Any, List, Optional
-from app.core.database.connection import get_postgres_connection
+from app.core.database.connection import get_postgres_connection, get_oracle_connection
 
 
 class HREmployeeService:
@@ -485,3 +485,86 @@ class HREmployeeService:
         finally:
             if conn:
                 conn.close()
+
+    # ── RetailPro Sync ──
+
+    def sync_retailpro_data(self, sid: int) -> Dict[str, Any]:
+        """
+        Sync RetailPro account data for an employee using their employee code.
+
+        1. Look up employee by SID to get employee_code
+        2. Query Oracle RetailPro to find matching user by employee code
+        3. Update retailpro_username and retailpro_sid in PostgreSQL
+        4. Return full updated employee object
+        """
+        pg_conn = None
+        oracle_conn = None
+        try:
+            # Step 1: Get employee from PostgreSQL
+            pg_conn = get_postgres_connection()
+            if not pg_conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = pg_conn.cursor()
+            cursor.execute('SELECT employee_code FROM employees WHERE sid = %s', (sid,))
+            row = cursor.fetchone()
+
+            if not row:
+                cursor.close()
+                return {'success': False, 'error': 'Employee not found'}
+
+            employee_code = row[0]
+
+            # Step 2: Query Oracle RetailPro for matching employee
+            oracle_conn = get_oracle_connection()
+            if not oracle_conn:
+                cursor.close()
+                return {'success': False, 'error': 'Failed to connect to RetailPro database'}
+
+            oracle_cursor = oracle_conn.cursor()
+            oracle_cursor.execute("""
+                SELECT
+                    emp.SID as RETAILPRO_SID,
+                    emp.USER_NAME as RETAILPRO_USERNAME
+                FROM EMPLOYEE emp
+                JOIN CUSTOMER cust ON emp.CUST_SID = cust.SID
+                WHERE cust.UDF4_STRING = :employee_code
+                  AND emp.USER_NAME IS NOT NULL
+            """, {'employee_code': employee_code})
+
+            rp_row = oracle_cursor.fetchone()
+            oracle_cursor.close()
+            oracle_conn.close()
+            oracle_conn = None
+
+            if not rp_row:
+                cursor.close()
+                return {'success': False, 'error': f'No RetailPro account found for employee code {employee_code}'}
+
+            retailpro_sid = str(rp_row[0])
+            retailpro_username = rp_row[1]
+
+            # Step 3: Update PostgreSQL employee record
+            cursor.execute('''
+                UPDATE employees
+                SET retailpro_sid = %s,
+                    retailpro_username = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE sid = %s
+            ''', (retailpro_sid, retailpro_username, sid))
+
+            pg_conn.commit()
+            cursor.close()
+
+            # Step 4: Return full updated employee
+            return self.get_employee_by_sid(sid)
+
+        except Exception as e:
+            if pg_conn:
+                pg_conn.rollback()
+            return {'success': False, 'error': str(e)}
+        finally:
+            if oracle_conn:
+                oracle_conn.close()
+            if pg_conn:
+                pg_conn.close()
