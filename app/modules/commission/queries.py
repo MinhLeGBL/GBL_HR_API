@@ -241,6 +241,7 @@ class CommissionQueries:
           AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
           AND emp.USER_NAME IS NOT NULL
+          AND di.EMPLOYEE1_LOGIN_NAME IS NOT NULL
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           -- Special handling for RHN and RWP stores: employees can overlap/work in both stores
@@ -251,14 +252,6 @@ class CommissionQueries:
               OR
               (:store_code NOT IN ('RHN', 'RWP') AND emp_store.STORE_CODE = :store_code)
           )
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-                AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          )))
         GROUP BY cust.UDF4_STRING, emp.SID, emp.USER_NAME, emp_store.STORE_CODE, cust.FIRST_NAME
         ORDER BY EMPLOYEE_REVENUE DESC
     """
@@ -287,6 +280,7 @@ class CommissionQueries:
             di.SCAN_UPC                                                           as upc,
             emp.SID                                                               as employee_sid,
             emp.USER_NAME                                                         as employee_username,
+            d.BT_CUID                                                             as customer_sid,
             d.DOC_NO                                                              as bill_number,
             s.STORE_CODE                                                          as store_code,
             TRUNC(d.invc_post_date)                                               as sale_date,
@@ -315,13 +309,7 @@ class CommissionQueries:
           AND d.STATUS = 4
           AND di.ITEM_TYPE in (1, 2)
           AND emp.USER_NAME IS NOT NULL
+          AND di.EMPLOYEE1_LOGIN_NAME IS NOT NULL
           AND TO_CHAR(d.invc_post_date, 'YYYY-MM') = :year_month
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND TO_CHAR(d2.invc_post_date, 'YYYY-MM') = :year_month
-          )))
         ORDER BY emp.SID, d.invc_post_date, d.DOC_NO
     """
