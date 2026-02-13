@@ -146,3 +146,4 @@ FLASK_ENV=testing python -c "from app.main import app; print('OK')"
 # Init database tables
 python scripts/init_db.py
 ```
+
