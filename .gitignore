@@ -1,6 +1,6 @@
-# Deployment-specific ignores
-tests/
-document/
+# Deployment-specific ignores (removed from server via deploy.yml)
+# tests/ - tracked in git, removed on deploy
+# document/ - tracked in git, removed on deploy
 docs/
 !docs/deployment/
 debug_endpoint.py
@@ -96,8 +96,12 @@ temp/
 tmp/
 *.tmp
 
-# Development documentation (not for deployment)
-document/
+# Development documentation (tracked in git, removed on deploy via deploy.yml)
+# document/guides, document/policies, document/pseudocode - tracked
+# document/reports, document/samples, document/screenshots - local only
+document/reports/
+document/samples/
+document/screenshots/
 README.md
 docs/
 
