@@ -9,7 +9,7 @@ def get_oracle_connection():
         if platform.system() == "Darwin" and platform.machine() == "x86_64":  # macOS
             d = os.environ.get("HOME") + ("/Downloads/instantclient_19_16")
         elif platform.system() == "Windows":
-            d = r"W:\Oracle\instantclient_23_4"
+            d = r"E:\Oracle\instantclient_23_4"
         elif platform.system() == "Linux":
             # For Linux, check for different Oracle versions
             if os.path.exists("/opt/oracle/instantclient_19_30"):
@@ -72,7 +72,7 @@ def _start_ssh_tunnel():
             host_pkey_directories=[]
         )
         _ssh_tunnel.start()
-        print(f"✓ SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
+        print(f"[OK] SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
         print(f"  Local port: {_ssh_tunnel.local_bind_port}")
         return _ssh_tunnel
     except Exception as e:
@@ -115,9 +115,9 @@ def get_postgres_connection():
                 password=POSTGRES_CONFIG['password']
             )
             if use_ssh:
-                print(f"✓ Connected to PostgreSQL via SSH tunnel (localhost:{port})")
+                print(f"[OK] Connected to PostgreSQL via SSH tunnel (localhost:{port})")
             else:
-                print(f"✓ Successfully connected to PostgreSQL at {host}:{port}")
+                print(f"[OK] Successfully connected to PostgreSQL at {host}:{port}")
             return conn
 
         except ImportError:
@@ -132,9 +132,9 @@ def get_postgres_connection():
                 password=POSTGRES_CONFIG['password']
             )
             if use_ssh:
-                print(f"✓ Connected to PostgreSQL via SSH tunnel (localhost:{port})")
+                print(f"[OK] Connected to PostgreSQL via SSH tunnel (localhost:{port})")
             else:
-                print(f"✓ Successfully connected to PostgreSQL at {host}:{port}")
+                print(f"[OK] Successfully connected to PostgreSQL at {host}:{port}")
             return conn
 
     except ImportError as import_error:
@@ -172,7 +172,7 @@ def get_postgres_connection_ssh():
 
         # Start the tunnel
         tunnel.start()
-        print(f"✓ SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
+        print(f"[OK] SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
         print(f"  Local port: {tunnel.local_bind_port}")
         print(f"  Remote port: {SSH_CONFIG['remote_port']}")
 
@@ -187,7 +187,7 @@ def get_postgres_connection_ssh():
                 user=POSTGRES_CONFIG['username'],
                 password=POSTGRES_CONFIG['password']
             )
-            print(f"✓ Successfully connected to PostgreSQL through SSH tunnel")
+            print(f"[OK] Successfully connected to PostgreSQL through SSH tunnel")
             print(f"  Database: {POSTGRES_CONFIG['database']}")
             print(f"  User: {POSTGRES_CONFIG['username']}")
             return tunnel, conn
@@ -203,7 +203,7 @@ def get_postgres_connection_ssh():
                 user=POSTGRES_CONFIG['username'],
                 password=POSTGRES_CONFIG['password']
             )
-            print(f"✓ Successfully connected to PostgreSQL through SSH tunnel")
+            print(f"[OK] Successfully connected to PostgreSQL through SSH tunnel")
             print(f"  Database: {POSTGRES_CONFIG['database']}")
             print(f"  User: {POSTGRES_CONFIG['username']}")
             return tunnel, conn
