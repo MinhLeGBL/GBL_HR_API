@@ -251,7 +251,7 @@ class CommissionRepository:
             # Extract UPCs from results (remove any whitespace)
             upcs = [str(row[0]).strip() for row in results if row[0]]
 
-            print(f"✓ Retrieved {len(upcs)} hand carry UPCs from PostgreSQL")
+            print(f"[OK] Retrieved {len(upcs)} hand carry UPCs from PostgreSQL")
             return upcs
 
         except Exception as e:

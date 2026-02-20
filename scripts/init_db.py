@@ -28,6 +28,7 @@ from app.modules.stores.service import StoreService
 from app.modules.employees.service import HREmployeeService
 from app.core.auth.service import AuthService
 from app.modules.dashboard.service import DashboardService
+from app.modules.commission.service import CommissionSettingsService, CommissionStoreSettingsService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -42,6 +43,10 @@ INIT_STEPS = [
      AuthService().init_database),
     ('Dashboard (dashboard_configs, dashboard_widgets)',
      DashboardService().init_dashboard_tables),
+    ('Commission settings',
+     CommissionSettingsService().init_database),
+    ('Commission store settings',
+     CommissionStoreSettingsService().init_database),
 ]
 
 

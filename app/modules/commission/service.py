@@ -3,7 +3,9 @@ Commission Service - Business logic for store commission calculations
 Based on the pseudocode algorithm with 4 main steps
 """
 from typing import Dict, List, Any, Optional
+import calendar
 import pandas as pd
+from app.core.database.connection import get_postgres_connection
 
 # ============================================================================
 # TEMPORARY SPECIAL COMMISSION RATES FOR RWD STORE
@@ -1455,3 +1457,397 @@ class CommissionService:
         ])
 
         return result_df
+
+
+class CommissionSettingsService:
+    """Service for managing per-employee commission settings in PostgreSQL"""
+
+    def init_database(self) -> Dict[str, Any]:
+        """Create commission_settings table if it does not exist"""
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS commission_settings (
+                    id SERIAL PRIMARY KEY,
+                    employee_code VARCHAR(50) NOT NULL,
+                    month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+                    year INTEGER NOT NULL,
+                    is_manager BOOLEAN DEFAULT FALSE,
+                    personal_target BIGINT,
+                    working_day INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (employee_code, month, year)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_commission_settings_period
+                ON commission_settings (month, year)
+            ''')
+            conn.commit()
+            cursor.close()
+            return {'success': True}
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            if conn:
+                conn.close()
+
+    def get_commission_employees(self, month: int, year: int) -> Dict[str, Any]:
+        """
+        Get active store employees grouped by store, with commission settings for the given period.
+
+        Store grouping and is_manager are resolved from history tables for period accuracy:
+        - Store: most recent employee_store_history row where effective_from <= last day of period,
+                 falls back to employees.store_id if no history exists.
+        - is_manager: commission_settings.is_manager takes precedence (per-period override);
+                      otherwise falls back to most recent employee_manager_history row where
+                      effective_from <= last day of period.
+
+        Args:
+            month: Commission month (1-12)
+            year:  Commission year
+
+        Returns:
+            Dict with keys 'month', 'year', 'stores' (list of store dicts with nested employees)
+        """
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            # Compute the last calendar day of the period (e.g. 2025-02-28 for Feb 2025)
+            last_day_num = calendar.monthrange(year, month)[1]
+            last_day_of_period = f"{year:04d}-{month:02d}-{last_day_num:02d}"
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT
+                    COALESCE(esh_store.store_code, s.store_code) AS store_code,
+                    COALESCE(esh_store.store_name, s.store_name) AS store_name,
+                    e.employee_code,
+                    e.full_name,
+                    e.join_date,
+                    ct.code AS contract,
+                    COALESCE(cs.is_manager, emh.is_manager) AS is_manager,
+                    cs.personal_target,
+                    cs.working_day
+                FROM employees e
+                JOIN employee_types et  ON e.employee_type_id = et.id
+                JOIN contract_types ct  ON e.contract_type_id = ct.id
+                LEFT JOIN stores s      ON e.store_id = s.id
+                -- period-accurate store: most recent history row <= last day of period
+                LEFT JOIN LATERAL (
+                    SELECT esh.store_id
+                    FROM employee_store_history esh
+                    WHERE esh.employee_sid   = e.sid
+                      AND esh.effective_from <= %(last_day)s
+                    ORDER BY esh.effective_from DESC, esh.id DESC
+                    LIMIT 1
+                ) esh_latest ON TRUE
+                LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
+                -- period-accurate is_manager from history (overridden by commission_settings)
+                LEFT JOIN LATERAL (
+                    SELECT emh.is_manager
+                    FROM employee_manager_history emh
+                    WHERE emh.employee_sid   = e.sid
+                      AND emh.effective_from <= %(last_day)s
+                    ORDER BY emh.effective_from DESC, emh.id DESC
+                    LIMIT 1
+                ) emh ON TRUE
+                LEFT JOIN commission_settings cs
+                    ON cs.employee_code = e.employee_code
+                   AND cs.month = %(month)s
+                   AND cs.year  = %(year)s
+                WHERE et.code = 'STORE'
+                  AND e.is_active = TRUE
+                  AND COALESCE(esh_latest.store_id, e.store_id) IS NOT NULL
+                ORDER BY COALESCE(esh_store.store_code, s.store_code), e.employee_code
+            ''', {'month': month, 'year': year, 'last_day': last_day_of_period})
+
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            cursor.close()
+
+            # Group rows by store
+            stores_map: Dict[str, Any] = {}
+            for row in rows:
+                record = dict(zip(columns, row))
+                store_code = record['store_code']
+
+                if store_code not in stores_map:
+                    stores_map[store_code] = {
+                        'store_code': store_code,
+                        'store_name': record['store_name'],
+                        'employees': []
+                    }
+
+                join_date = record['join_date']
+                stores_map[store_code]['employees'].append({
+                    'employee_code': record['employee_code'],
+                    'full_name': record['full_name'],
+                    'join_date': join_date.isoformat() if join_date else None,
+                    'contract': record['contract'].lower() if record['contract'] else None,
+                    'is_manager': record['is_manager'],
+                    'personal_target': record['personal_target'],
+                    'working_day': record['working_day']
+                })
+
+            return {
+                'success': True,
+                'month': month,
+                'year': year,
+                'stores': list(stores_map.values())
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            if conn:
+                conn.close()
+
+    def update_commission_settings(
+        self,
+        employee_code: str,
+        month: int,
+        year: int,
+        is_manager: bool,
+        personal_target: int,
+        working_day: int
+    ) -> Dict[str, Any]:
+        """
+        Upsert commission settings for one employee for a given period.
+
+        Args:
+            employee_code:   Employee code (e.g. "GL013")
+            month:           Commission month (1-12)
+            year:            Commission year
+            is_manager:      Whether the employee is a manager this period
+            personal_target: Personal sales target (VND)
+            working_day:     Number of working days in the period
+
+        Returns:
+            Dict with 'success' bool and updated settings on success
+        """
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO commission_settings
+                    (employee_code, month, year, is_manager, personal_target, working_day, updated_at)
+                VALUES
+                    (%(employee_code)s, %(month)s, %(year)s,
+                     %(is_manager)s, %(personal_target)s, %(working_day)s,
+                     CURRENT_TIMESTAMP)
+                ON CONFLICT (employee_code, month, year) DO UPDATE SET
+                    is_manager      = EXCLUDED.is_manager,
+                    personal_target = EXCLUDED.personal_target,
+                    working_day     = EXCLUDED.working_day,
+                    updated_at      = CURRENT_TIMESTAMP
+                RETURNING employee_code, month, year, is_manager, personal_target, working_day
+            ''', {
+                'employee_code': employee_code,
+                'month': month,
+                'year': year,
+                'is_manager': is_manager,
+                'personal_target': personal_target,
+                'working_day': working_day
+            })
+
+            row = cursor.fetchone()
+            columns = [desc[0] for desc in cursor.description]
+            conn.commit()
+            cursor.close()
+
+            result = dict(zip(columns, row))
+            return {'success': True, 'data': result}
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            if conn:
+                conn.close()
+
+
+class CommissionStoreSettingsService:
+    """
+    Manages per-period store-level commission settings:
+    store_target (VND) and fp_ratio_target (integer percent, e.g. 60 for 60%).
+    """
+
+    def init_database(self) -> Dict[str, Any]:
+        """
+        Create commission_store_settings table (idempotent).
+
+        fp_ratio_target is stored as INTEGER percent (e.g. 60 = 60%).
+        """
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS commission_store_settings (
+                    id SERIAL PRIMARY KEY,
+                    store_code VARCHAR(50) NOT NULL,
+                    month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+                    year INTEGER NOT NULL,
+                    store_target BIGINT,
+                    fp_ratio_target INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (store_code, month, year)
+                )
+            ''')
+            conn.commit()
+            cursor.close()
+            return {'success': True}
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            if conn:
+                conn.close()
+
+    def get_commission_stores(self, month: int, year: int) -> Dict[str, Any]:
+        """
+        Return all stores LEFT JOINed with their commission settings for month/year.
+        Every store is included; stores without a settings row return nulls for editable fields.
+        """
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT
+                    s.store_code,
+                    s.store_name,
+                    css.store_target,
+                    css.fp_ratio_target
+                FROM stores s
+                LEFT JOIN commission_store_settings css
+                    ON css.store_code = s.store_code
+                   AND css.month = %(month)s
+                   AND css.year  = %(year)s
+                ORDER BY s.store_code
+            ''', {'month': month, 'year': year})
+
+            rows = cursor.fetchall()
+            cursor.close()
+
+            stores = [
+                {
+                    'store_code': row[0],
+                    'store_name': row[1],
+                    'store_target': row[2],
+                    'fp_ratio_target': row[3]
+                }
+                for row in rows
+            ]
+
+            return {'success': True, 'month': month, 'year': year, 'stores': stores}
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            if conn:
+                conn.close()
+
+    def update_commission_store_settings(
+        self,
+        store_code: str,
+        month: int,
+        year: int,
+        store_target,
+        fp_ratio_target
+    ) -> Dict[str, Any]:
+        """
+        Upsert commission settings for one store for a given period.
+
+        Args:
+            store_code:       Store code (e.g. "RWT") — must exist in stores table
+            month:            Commission month (1-12)
+            year:             Commission year
+            store_target:     Store revenue target (VND integer or None)
+            fp_ratio_target:  FP ratio target as integer percent (e.g. 60 for 60%) or None
+
+        Returns:
+            Dict with 'success' bool and saved record on success, or error message.
+        """
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+
+            cursor = conn.cursor()
+
+            # Validate store_code exists
+            cursor.execute('SELECT 1 FROM stores WHERE store_code = %s', (store_code,))
+            if not cursor.fetchone():
+                cursor.close()
+                return {'success': False, 'error': f'Store not found: {store_code}'}
+
+            cursor.execute('''
+                INSERT INTO commission_store_settings
+                    (store_code, month, year, store_target, fp_ratio_target, updated_at)
+                VALUES
+                    (%(store_code)s, %(month)s, %(year)s,
+                     %(store_target)s, %(fp_ratio_target)s,
+                     CURRENT_TIMESTAMP)
+                ON CONFLICT (store_code, month, year) DO UPDATE SET
+                    store_target     = EXCLUDED.store_target,
+                    fp_ratio_target  = EXCLUDED.fp_ratio_target,
+                    updated_at       = CURRENT_TIMESTAMP
+                RETURNING store_code, month, year, store_target, fp_ratio_target
+            ''', {
+                'store_code': store_code,
+                'month': month,
+                'year': year,
+                'store_target': store_target,
+                'fp_ratio_target': fp_ratio_target
+            })
+
+            row = cursor.fetchone()
+            columns = [desc[0] for desc in cursor.description]
+            conn.commit()
+            cursor.close()
+
+            result = dict(zip(columns, row))
+            return {'success': True, 'data': result}
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            if conn:
+                conn.close()

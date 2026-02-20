@@ -136,14 +136,18 @@ Mock where the object is **looked up**, not where it's defined:
 ```
 
 ### Commands
+
+**Windows (dev machine):** Always activate the venv first — `python`, `python3`, and `py` are unreliable on this machine. Use:
 ```bash
-# Run all unit tests
+source venv/Scripts/activate && FLASK_ENV=testing pytest tests/ -x --ignore=tests/integration -v
+source venv/Scripts/activate && FLASK_ENV=testing python -c "from app.main import app; print('OK')"
+source venv/Scripts/activate && python scripts/init_db.py
+```
+
+**Linux/CI (deployment server):** Standard commands work as-is:
+```bash
 FLASK_ENV=testing pytest tests/ -x --ignore=tests/integration -v
-
-# Import check
 FLASK_ENV=testing python -c "from app.main import app; print('OK')"
-
-# Init database tables
 python scripts/init_db.py
 ```
 
