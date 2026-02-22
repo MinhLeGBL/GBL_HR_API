@@ -151,3 +151,43 @@ FLASK_ENV=testing python -c "from app.main import app; print('OK')"
 python scripts/init_db.py
 ```
 
+## Running the API Locally (dev/staging/feature branches)
+
+### Kill stale processes first
+
+Before starting or restarting the API locally, **always kill all existing python processes** to release port 5200 and the SSH tunnel port (6543). Stale processes cause the SSH tunnel to fail with "Server is not started. Please .start() first!".
+
+```bash
+# Kill all python processes (Windows)
+taskkill //F //IM python.exe
+
+# Verify ports are free before starting
+netstat -ano | grep ":5200\|:6543" | grep LISTEN
+```
+
+### Start the API
+
+```bash
+cd "e:/Git Project/GBL_HR_API" && source venv/Scripts/activate && FLASK_ENV=development python app.py
+```
+
+Run in background if needed; the SSH tunnel starts lazily on the first PostgreSQL request.
+
+### Verify SSH tunnel health after startup
+
+On `staging` and `feature/*` branches, `USE_SSH_TUNNEL=true` is required for PostgreSQL. After starting the API, verify the tunnel is working by hitting a DB-backed endpoint:
+
+```bash
+# Should return "Invalid email or password" (not an SSH/tunnel error)
+curl -s -X POST http://127.0.0.1:5200/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@test.com","password":"test"}'
+```
+
+A tunnel error looks like: `{"error": "Server is not started. Please .start() first!", "success": false}`
+
+If you see the tunnel error:
+1. Kill all python processes (`taskkill //F //IM python.exe`)
+2. Confirm port 6543 is free (`netstat -ano | grep ":6543"`)
+3. Restart the API
+

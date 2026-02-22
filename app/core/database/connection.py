@@ -57,7 +57,10 @@ def _start_ssh_tunnel():
     """Start SSH tunnel for local development"""
     global _ssh_tunnel
     if _ssh_tunnel is not None:
-        return _ssh_tunnel
+        if _ssh_tunnel.is_active:
+            return _ssh_tunnel
+        # Tunnel dropped — reset and restart
+        _ssh_tunnel = None
 
     try:
         from sshtunnel import SSHTunnelForwarder
@@ -77,6 +80,7 @@ def _start_ssh_tunnel():
         return _ssh_tunnel
     except Exception as e:
         print(f"Failed to start SSH tunnel: {e}")
+        _ssh_tunnel = None
         return None
 
 

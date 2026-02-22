@@ -2,7 +2,7 @@
 Commission API Routes
 """
 from flask import Blueprint, jsonify, request, Response
-from app.modules.commission.service import CommissionService, CommissionSettingsService, CommissionStoreSettingsService
+from app.modules.commission.service import CommissionService, CommissionSettingsService, CommissionStoreSettingsService, CommissionRevenueService
 from app.modules.commission.sheets_service import GoogleSheetsService
 from app.core.auth.middleware import token_required, manager_required
 import pandas as pd
@@ -808,6 +808,204 @@ def update_commission_store(store_code):
         if not result.get('success', False):
             if 'not found' in result.get('error', '').lower():
                 return jsonify(result), 404
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/revenue', methods=['GET'])
+@token_required
+def get_commission_revenue():
+    """
+    Get live Oracle revenue breakdown per employee per 7 revenue types,
+    with stored adjustment deltas applied, for a given period.
+
+    Query Parameters:
+        - month: integer (1-12), required
+        - year:  integer, required
+    """
+    try:
+        month_str = request.args.get('month')
+        year_str = request.args.get('year')
+
+        if not month_str or not year_str:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required query parameters: month, year'
+            }), 400
+
+        try:
+            month = int(month_str)
+            year = int(year_str)
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'month and year must be integers'
+            }), 400
+
+        if not (1 <= month <= 12):
+            return jsonify({
+                'success': False,
+                'error': 'month must be between 1 and 12'
+            }), 400
+
+        service = CommissionRevenueService()
+        result = service.get_revenue_breakdown(month, year)
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/revenue/adjustments/<employee_code>', methods=['PUT'])
+@manager_required
+def update_revenue_adjustments(employee_code):
+    """
+    Create or update revenue adjustment deltas for an employee for a given period.
+
+    URL Parameter:
+        - employee_code: string (e.g. "GL013")
+
+    Request Body:
+        {
+            "month": 3,
+            "year": 2026,
+            "adjustments": [
+                {"revenue_type": "full_price", "adjustment": 50000000},
+                {"revenue_type": "markdown",   "adjustment": -10000000}
+            ]
+        }
+
+    Valid revenue_type values: full_price, markdown, jewelry, vhernier, rosa_maria,
+                               hand_carry, suitcase
+    """
+    try:
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'Request body is required'
+            }), 400
+
+        for field in ['month', 'year', 'adjustments']:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        try:
+            month = int(data['month'])
+            year = int(data['year'])
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'month and year must be integers'
+            }), 400
+
+        if not (1 <= month <= 12):
+            return jsonify({
+                'success': False,
+                'error': 'month must be between 1 and 12'
+            }), 400
+
+        if not isinstance(data['adjustments'], list):
+            return jsonify({
+                'success': False,
+                'error': 'adjustments must be an array'
+            }), 400
+
+        service = CommissionRevenueService()
+        result = service.save_revenue_adjustments(
+            employee_code=employee_code,
+            month=month,
+            year=year,
+            adjustments=data['adjustments']
+        )
+
+        if not result.get('success', False):
+            if result.get('not_found'):
+                return jsonify(result), 404
+            return jsonify(result), 400
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/calculate', methods=['POST'])
+@manager_required
+def calculate_commission():
+    """
+    Trigger full commission calculation pipeline for a given month/year.
+
+    Reads settings from PostgreSQL, fetches Oracle sales, applies revenue adjustments,
+    calculates all commission components, and optionally writes results to Google Sheets.
+
+    Request Body:
+        {
+            "month": 3,
+            "year": 2026,
+            "spreadsheet_id": "..." (optional — if provided, results are written to Sheets),
+            "sheet_name": "Sheet1" (optional, default "Sheet1")
+        }
+    """
+    try:
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'Request body is required'
+            }), 400
+
+        for field in ['month', 'year']:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        try:
+            month = int(data['month'])
+            year = int(data['year'])
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'month and year must be integers'
+            }), 400
+
+        if not (1 <= month <= 12):
+            return jsonify({
+                'success': False,
+                'error': 'month must be between 1 and 12'
+            }), 400
+
+        service = CommissionService()
+        result = service.calculate_commissions_for_period(
+            month=month,
+            year=year,
+            spreadsheet_id=data.get('spreadsheet_id'),
+            sheet_name=data.get('sheet_name', 'Sheet1')
+        )
+
+        if not result.get('success', False):
             return jsonify(result), 500
 
         return jsonify(result), 200
