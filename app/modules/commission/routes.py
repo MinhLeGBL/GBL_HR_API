@@ -588,6 +588,10 @@ def update_commission_employee(employee_code):
     """
     Create or update commission settings for a single employee for a given period.
 
+    Note: is_manager is NOT persisted here. It is determined at query time
+    from employee_manager_history and can be overridden at runtime by the
+    frontend during commission calculation (never saved).
+
     URL Parameter:
         - employee_code: string (e.g. "GL013")
 
@@ -595,7 +599,6 @@ def update_commission_employee(employee_code):
         {
             "month": integer (1-12),
             "year": integer,
-            "is_manager": boolean,
             "personal_target": integer (VND),
             "working_day": integer
         }
@@ -621,7 +624,7 @@ def update_commission_employee(employee_code):
                 'error': 'Request body is required'
             }), 400
 
-        required_fields = ['month', 'year', 'is_manager', 'personal_target', 'working_day']
+        required_fields = ['month', 'year', 'personal_target', 'working_day']
         for field in required_fields:
             if field not in data:
                 return jsonify({
@@ -644,18 +647,11 @@ def update_commission_employee(employee_code):
                 'error': 'month must be between 1 and 12'
             }), 400
 
-        if not isinstance(data['is_manager'], bool):
-            return jsonify({
-                'success': False,
-                'error': 'is_manager must be a boolean'
-            }), 400
-
         service = CommissionSettingsService()
         result = service.update_commission_settings(
             employee_code=employee_code,
             month=month,
             year=year,
-            is_manager=data['is_manager'],
             personal_target=data['personal_target'],
             working_day=data['working_day']
         )

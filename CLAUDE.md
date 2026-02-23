@@ -153,41 +153,55 @@ python scripts/init_db.py
 
 ## Running the API Locally (dev/staging/feature branches)
 
-### Kill stale processes first
+### Kill stale processes and free ports first
 
-Before starting or restarting the API locally, **always kill all existing python processes** to release port 5200 and the SSH tunnel port (6543). Stale processes cause the SSH tunnel to fail with "Server is not started. Please .start() first!".
+Before starting or restarting the API locally, **always kill processes on port 5200 (API) and port 6543 (SSH tunnel)**. Stale tunnel listeners cause "Couldn't open tunnel localhost:6543" errors.
 
 ```bash
-# Kill all python processes (Windows)
+# macOS — kill by port
+lsof -ti:5200 | xargs kill -9 2>/dev/null
+lsof -ti:6543 | xargs kill -9 2>/dev/null
+
+# Windows — kill all python processes
 taskkill //F //IM python.exe
 
-# Verify ports are free before starting
+# Verify ports are free
+# macOS:
+lsof -i:5200 -i:6543
+# Windows:
 netstat -ano | grep ":5200\|:6543" | grep LISTEN
 ```
 
 ### Start the API
 
 ```bash
+# macOS (background, no reloader to avoid port conflicts)
+nohup .venv/bin/python -c "from app.main import app; app.run(host='0.0.0.0', port=5200, debug=False, use_reloader=False)" > /tmp/gbl_api.log 2>&1 &
+
+# Windows
 cd "e:/Git Project/GBL_HR_API" && source venv/Scripts/activate && FLASK_ENV=development python app.py
 ```
 
-Run in background if needed; the SSH tunnel starts lazily on the first PostgreSQL request.
+The SSH tunnel starts lazily on the first PostgreSQL request.
 
-### Verify SSH tunnel health after startup
+### Verify API and tunnel health after startup
 
-On `staging` and `feature/*` branches, `USE_SSH_TUNNEL=true` is required for PostgreSQL. After starting the API, verify the tunnel is working by hitting a DB-backed endpoint:
+On `staging` and `feature/*` branches, `USE_SSH_TUNNEL=true` is required for PostgreSQL. After starting, verify:
 
 ```bash
-# Should return "Invalid email or password" (not an SSH/tunnel error)
+# 1. Health check (no DB needed)
+curl -s http://127.0.0.1:5200/api/v1/health/
+
+# 2. DB-backed endpoint — should return "Invalid email or password" (not a tunnel error)
 curl -s -X POST http://127.0.0.1:5200/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"test@test.com","password":"test"}'
 ```
 
-A tunnel error looks like: `{"error": "Server is not started. Please .start() first!", "success": false}`
+A tunnel error looks like: `{"error": "Server is not started. Please .start() first!"}` or `"Couldn't open tunnel localhost:6543 <> localhost:5432 might be in use"`
 
-If you see the tunnel error:
-1. Kill all python processes (`taskkill //F //IM python.exe`)
-2. Confirm port 6543 is free (`netstat -ano | grep ":6543"`)
+If you see a tunnel error:
+1. Kill processes on ports 5200 and 6543 (see commands above)
+2. Confirm both ports are free
 3. Restart the API
 

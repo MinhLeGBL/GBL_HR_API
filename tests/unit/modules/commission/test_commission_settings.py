@@ -161,7 +161,6 @@ def _put_payload(**overrides):
     payload = {
         'month': 12,
         'year': 2025,
-        'is_manager': True,
         'personal_target': 650000000,
         'working_day': 22
     }
@@ -209,7 +208,6 @@ class TestUpdateCommissionEmployee:
             employee_code='GL013',
             month=12,
             year=2025,
-            is_manager=True,
             personal_target=650000000,
             working_day=22
         )
@@ -233,7 +231,7 @@ class TestUpdateCommissionEmployee:
     def test_missing_required_field(self, mock_get_user, mock_verify, client):
         self._mock_manager(mock_verify, mock_get_user)
 
-        for field in ['month', 'year', 'is_manager', 'personal_target', 'working_day']:
+        for field in ['month', 'year', 'personal_target', 'working_day']:
             payload = _put_payload()
             del payload[field]
             resp = client.put(self.URL, json=payload, headers=self._manager_headers())
@@ -249,15 +247,6 @@ class TestUpdateCommissionEmployee:
         resp = client.put(self.URL, json=_put_payload(month=0), headers=self._manager_headers())
         assert resp.status_code == 400
         assert 'month must be between 1 and 12' in resp.get_json()['error']
-
-    @patch('app.core.auth.middleware.auth_service.verify_token')
-    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    def test_is_manager_not_boolean(self, mock_get_user, mock_verify, client):
-        self._mock_manager(mock_verify, mock_get_user)
-
-        resp = client.put(self.URL, json=_put_payload(is_manager='yes'), headers=self._manager_headers())
-        assert resp.status_code == 400
-        assert 'is_manager must be a boolean' in resp.get_json()['error']
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
@@ -414,7 +403,7 @@ class TestCommissionSettingsServiceUpdate:
         from app.modules.commission.service import CommissionSettingsService
         result = CommissionSettingsService().update_commission_settings(
             employee_code='GL013', month=12, year=2025,
-            is_manager=True, personal_target=650000000, working_day=22
+            personal_target=650000000, working_day=22
         )
 
         assert result['success'] is True
@@ -430,7 +419,7 @@ class TestCommissionSettingsServiceUpdate:
         from app.modules.commission.service import CommissionSettingsService
         result = CommissionSettingsService().update_commission_settings(
             employee_code='GL013', month=12, year=2025,
-            is_manager=True, personal_target=650000000, working_day=22
+            personal_target=650000000, working_day=22
         )
 
         assert result['success'] is False
@@ -447,7 +436,7 @@ class TestCommissionSettingsServiceUpdate:
         from app.modules.commission.service import CommissionSettingsService
         result = CommissionSettingsService().update_commission_settings(
             employee_code='GL013', month=12, year=2025,
-            is_manager=True, personal_target=650000000, working_day=22
+            personal_target=650000000, working_day=22
         )
 
         assert result['success'] is False

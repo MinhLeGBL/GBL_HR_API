@@ -28,7 +28,7 @@ STANDARD_RATES = {
     'tier1': {'fp': 0.0025, 'discount': 0.00125},     # 50-70%: FP 0.25%, Discount 0.125%
     'tier2': {'fp': 0.005, 'discount': 0.0025},       # 70-100%: FP 0.5%, Discount 0.25%
     'tier3': {'fp': 0.01, 'discount': 0.005},         # 100%+: FP 1%, Discount 0.5%
-    'over_100': 0.01                                   # Over 100% bonus: 1%
+    'over_100': 0.01                                   # Over 100% bonus: 1% additional (items already get 1% from tier 3)
 }
 # ============================================================================
 
@@ -623,11 +623,17 @@ class CommissionService:
                     e.full_name,
                     e.join_date,
                     e.retailpro_username,
-                    COALESCE(cs.is_manager, emh.is_manager) AS is_manager,
+                    ct.code AS contract,
+                    CASE
+                        WHEN %(last_day)s >= e.created_at::date
+                            THEN COALESCE(emh.is_manager, emh_first.is_manager, FALSE)
+                        ELSE COALESCE(emh_first.is_manager, FALSE)
+                    END AS is_manager,
                     cs.personal_target,
                     cs.working_day
                 FROM employees e
                 JOIN employee_types et  ON e.employee_type_id = et.id
+                JOIN contract_types ct  ON e.contract_type_id = ct.id
                 LEFT JOIN stores s      ON e.store_id = s.id
                 LEFT JOIN LATERAL (
                     SELECT esh.store_id
@@ -638,6 +644,7 @@ class CommissionService:
                     LIMIT 1
                 ) esh_latest ON TRUE
                 LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
+                -- Latest manager history entry as of the query period
                 LEFT JOIN LATERAL (
                     SELECT emh.is_manager
                     FROM employee_manager_history emh
@@ -646,6 +653,14 @@ class CommissionService:
                     ORDER BY emh.effective_from DESC, emh.id DESC
                     LIMIT 1
                 ) emh ON TRUE
+                -- Earliest manager history entry (value when employee was first created)
+                LEFT JOIN LATERAL (
+                    SELECT emh2.is_manager
+                    FROM employee_manager_history emh2
+                    WHERE emh2.employee_sid = e.sid
+                    ORDER BY emh2.effective_from ASC, emh2.id ASC
+                    LIMIT 1
+                ) emh_first ON TRUE
                 LEFT JOIN commission_settings cs
                     ON cs.employee_code = e.employee_code
                    AND cs.month = %(month)s
@@ -664,6 +679,7 @@ class CommissionService:
             for row in rows:
                 record = dict(zip(columns, row))
                 join_date = record['join_date']
+                contract = record.get('contract', '').upper() if record.get('contract') else ''
                 result.append({
                     'store_code':        record['store_code'],
                     'store_name':        record['store_name'],
@@ -671,6 +687,7 @@ class CommissionService:
                     'full_name':         record['full_name'],
                     'join_date':         join_date.isoformat() if hasattr(join_date, 'isoformat') else join_date,
                     'retailpro_username': record['retailpro_username'],
+                    'contract':          contract,
                     'is_manager':        record['is_manager'],
                     'personal_target':   record['personal_target'],
                     'working_day':       record['working_day'],
@@ -851,8 +868,27 @@ class CommissionService:
             # Calculate achievement rate based on TOTAL revenue WITH VAT from ALL sources
             achievement_rate = (total_revenue_with_vat / target) * 100 if target > 0 else 0
 
+            # GROUP BY BILL to calculate bill-level totals (for >100% tier calculation)
+            # IMPORTANT: Use the FULL sales data (INCLUDING COSM) for the running total,
+            # because COSM revenue counts toward reaching the personal target.
+            # The running total determines WHEN the employee reached their target.
+            # NOTE: Use revenue_before_vat for the running total (not revenue_with_vat),
+            # because the over-100% bonus threshold is measured against non-VAT revenue.
+            bill_totals_df = employee_sales_df.groupby('bill_number', sort=False).agg({
+                'revenue_before_vat': 'sum',
+                'sale_date': 'first',
+                'sale_time': 'first'
+            }).reset_index()
+
+            # Sort bills chronologically
+            bill_totals_df = bill_totals_df.sort_values(['sale_date', 'sale_time'])
+
+            # Calculate running total by BILL (BEFORE VAT) to find when 100% target was reached
+            bill_totals_df['running_total'] = bill_totals_df['revenue_before_vat'].cumsum()
+
             # EXCLUDE COSM department items from commission calculations
-            # IMPORTANT: COSM items COUNT toward achievement but do NOT earn commission
+            # IMPORTANT: COSM items COUNT toward achievement and running total
+            # but do NOT earn commission
             # This exclusion affects: FP, discount, jewelry, hand carry, suitcase commissions
             employee_sales_df = employee_sales_df[employee_sales_df['department'] != EXCLUDED_DEPARTMENT].copy()
 
@@ -885,24 +921,6 @@ class CommissionService:
             non_jewelry_disc_df = non_jewelry_df[non_jewelry_df['discount_rate'] > DISCOUNT_THRESHOLD]
             non_jewelry_disc_revenue = non_jewelry_disc_df['revenue_before_vat'].sum()
 
-            # GROUP BY BILL to calculate bill-level totals (for >100% tier calculation)
-            # IMPORTANT: For finding target-reaching bill, use TOTAL revenue from ALL sources
-            # This includes FP, discount, jewelry, hand carry, suitcase - everything
-            # The running total determines when the employee reached their target
-
-            bill_totals_df = employee_sales_df.groupby('bill_number', sort=False).agg({
-                'revenue_with_vat': 'sum',
-                'sale_date': 'first',
-                'sale_time': 'first'
-            }).reset_index()
-
-            # Sort bills chronologically
-            bill_totals_df = bill_totals_df.sort_values(['sale_date', 'sale_time'])
-
-            # Calculate running total by BILL (WITH VAT) to find when 100% target was reached
-            # This running total uses TOTAL revenue from ALL sources
-            bill_totals_df['running_total'] = bill_totals_df['revenue_with_vat'].cumsum()
-
             # Find full-price NON-JEWELRY sales after reaching 100% target (for >100% tier bonus)
             fp_non_jewelry_after_target = 0
 
@@ -914,7 +932,7 @@ class CommissionService:
                     # Get the first bill that reached/exceeded target
                     target_bill_number = target_reached_bills.iloc[0]['bill_number']
                     target_bill_running_total = target_reached_bills.iloc[0]['running_total']
-                    target_bill_revenue = target_reached_bills.iloc[0]['revenue_with_vat']
+                    target_bill_revenue = target_reached_bills.iloc[0]['revenue_before_vat']
 
                     previous_total = target_bill_running_total - target_bill_revenue
 
@@ -933,11 +951,11 @@ class CommissionService:
                     # OPTIMIZATION: Sort items by selling price (ascending) and count row-by-row
                     # Only items that pushed over 100% and items after qualify for over 100% bonus
                     if previous_total < target and len(target_bill_qualifying) > 0:
-                        # Sort qualifying items by revenue_with_vat (ascending) - lowest price first
-                        target_bill_qualifying = target_bill_qualifying.sort_values('revenue_with_vat')
+                        # Sort qualifying items by revenue_before_vat (ascending) - lowest price first
+                        target_bill_qualifying = target_bill_qualifying.sort_values('revenue_before_vat')
 
-                        # Calculate running total for each item in this bill
-                        target_bill_qualifying['item_running_total'] = previous_total + target_bill_qualifying['revenue_with_vat'].cumsum()
+                        # Calculate running total for each item in this bill (using revenue_before_vat)
+                        target_bill_qualifying['item_running_total'] = previous_total + target_bill_qualifying['revenue_before_vat'].cumsum()
 
                         # Find items that are at or after the 100% threshold
                         items_over_target = target_bill_qualifying[target_bill_qualifying['item_running_total'] >= target]
@@ -1467,7 +1485,8 @@ class CommissionService:
                         'EMPLOYEE_CODE': emp_code,
                         'EMPLOYEE_FP_REVENUE': emp_sales.get('EMPLOYEE_FP_REVENUE', 0),
                         'EMPLOYEE_DISCOUNTED_REVENUE': emp_sales.get('EMPLOYEE_DISCOUNTED_REVENUE', 0),
-                        'TENURE_MONTHS': emp.get('seniority', 0)
+                        'TENURE_MONTHS': emp.get('seniority', 0),
+                        'IS_MANAGER': emp.get('is_manager', False)
                     })
 
             if not requested_employees_data:
@@ -1494,8 +1513,7 @@ class CommissionService:
                 discounted_revenue = emp_data['EMPLOYEE_DISCOUNTED_REVENUE']
                 tenure_months = emp_data['TENURE_MONTHS']
 
-                # Check if manager (you may want to add this to request)
-                is_manager = False
+                is_manager = emp_data['IS_MANAGER']
 
                 # Determine tier rates based on tenure and achievement
                 tier_rates = self._get_tier_rates(tenure_months, achievement_pct)
@@ -1782,14 +1800,16 @@ class CommissionService:
             query_date = {'from_date': start_date, 'to_date': end_date}
 
             # 5. Group employees by store, compute seniority
-            today = date.today()
+            # Use the period end date (not today) so seniority is accurate for the
+            # commission month, even when calculations are run retroactively.
+            period_end_date = date(year, month, last_day_num)
             employees_by_store: Dict[str, List[Dict]] = {}
             for emp in all_employees:
                 store_code = emp['store_code']
                 if store_code not in employees_by_store:
                     employees_by_store[store_code] = []
 
-                # Compute seniority in years from join_date
+                # Compute seniority in years from join_date relative to period end
                 join_date_raw = emp.get('join_date')
                 if join_date_raw:
                     if isinstance(join_date_raw, str):
@@ -1797,9 +1817,12 @@ class CommissionService:
                         join_date_obj = _dt.strptime(join_date_raw, '%Y-%m-%d').date()
                     else:
                         join_date_obj = join_date_raw
-                    seniority_years = (today - join_date_obj).days / 365.25
+                    seniority_years = (period_end_date - join_date_obj).days / 365.25
                 else:
                     seniority_years = 0
+
+                contract = emp.get('contract', '').upper()
+                is_probation = contract == 'PROBATION'
 
                 employees_by_store[store_code].append({
                     'employee_code':   emp['employee_code'],
@@ -1811,7 +1834,7 @@ class CommissionService:
                     'working_day':     emp.get('working_day') or 0,
                     'working_day_count': emp.get('working_day') or 0,
                     'seniority':       seniority_years,
-                    'is_probation':    False,
+                    'is_probation':    is_probation,
                 })
 
             # 6. Process each store
@@ -1886,19 +1909,20 @@ class CommissionService:
                         'employee_code': row['employee_code'],
                         'full_name':     row['employee_name'],
                         'result': {
-                            'individual':          int(row.get('personal_commission_fp_under_100', 0) or 0),
-                            'shared':              int(row.get('store_commission_30pct', 0) or 0),
-                            'manager':             int(row.get('manager_bonus', 0) or 0),
+                            'individual':            int(row.get('store_commission_70pct', 0) or 0),
+                            'shared':                int(row.get('store_commission_30pct', 0) or 0),
+                            'manager':               int(row.get('manager_bonus', 0) or 0),
+                            'fp_below_target':       int(row.get('personal_commission_fp_under_100', 0) or 0),
                             'discount_below_target': int(row.get('personal_commission_discount_under_100', 0) or 0),
-                            'over_target':         int(row.get('personal_commission_over_100', 0) or 0),
-                            'jewelry':             int(jewelry_net),
-                            'vhernier':            int(row.get('personal_commission_vhernier', 0) or 0),
-                            'rosa_maria':          int(row.get('personal_commission_rosa_maria', 0) or 0),
-                            'suitcase':            int(row.get('personal_commission_suitcase', 0) or 0),
-                            'hand_carry':          int(row.get('personal_commission_hand_carry', 0) or 0),
-                            'store_total':         int(row.get('total_store_commission', 0) or 0),
-                            'personal_total':      int(row.get('personal_commission_total', 0) or 0),
-                            'employee_total':      int(row.get('total_handout_commission', 0) or 0),
+                            'over_target':           int(row.get('personal_commission_over_100', 0) or 0),
+                            'jewelry':               int(jewelry_net),
+                            'vhernier':              int(row.get('personal_commission_vhernier', 0) or 0),
+                            'rosa_maria':            int(row.get('personal_commission_rosa_maria', 0) or 0),
+                            'suitcase':              int(row.get('personal_commission_suitcase', 0) or 0),
+                            'hand_carry':            int(row.get('personal_commission_hand_carry', 0) or 0),
+                            'store_total':           int(row.get('total_store_commission', 0) or 0),
+                            'personal_total':        int(row.get('personal_commission_total', 0) or 0),
+                            'employee_total':        int(row.get('total_handout_commission', 0) or 0),
                         }
                     })
 
@@ -2003,7 +2027,11 @@ class CommissionSettingsService:
                     e.full_name,
                     e.join_date,
                     ct.code AS contract,
-                    COALESCE(cs.is_manager, emh.is_manager) AS is_manager,
+                    CASE
+                        WHEN %(last_day)s >= e.created_at::date
+                            THEN COALESCE(emh.is_manager, emh_first.is_manager, FALSE)
+                        ELSE COALESCE(emh_first.is_manager, FALSE)
+                    END AS is_manager,
                     cs.personal_target,
                     cs.working_day
                 FROM employees e
@@ -2020,7 +2048,7 @@ class CommissionSettingsService:
                     LIMIT 1
                 ) esh_latest ON TRUE
                 LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
-                -- period-accurate is_manager from history (overridden by commission_settings)
+                -- Latest manager history entry as of the query period
                 LEFT JOIN LATERAL (
                     SELECT emh.is_manager
                     FROM employee_manager_history emh
@@ -2029,6 +2057,14 @@ class CommissionSettingsService:
                     ORDER BY emh.effective_from DESC, emh.id DESC
                     LIMIT 1
                 ) emh ON TRUE
+                -- Earliest manager history entry (value when employee was first created)
+                LEFT JOIN LATERAL (
+                    SELECT emh2.is_manager
+                    FROM employee_manager_history emh2
+                    WHERE emh2.employee_sid = e.sid
+                    ORDER BY emh2.effective_from ASC, emh2.id ASC
+                    LIMIT 1
+                ) emh_first ON TRUE
                 LEFT JOIN commission_settings cs
                     ON cs.employee_code = e.employee_code
                    AND cs.month = %(month)s
@@ -2086,18 +2122,20 @@ class CommissionSettingsService:
         employee_code: str,
         month: int,
         year: int,
-        is_manager: bool,
         personal_target: int,
         working_day: int
     ) -> Dict[str, Any]:
         """
         Upsert commission settings for one employee for a given period.
 
+        Note: is_manager is NOT saved here — it is determined at query time
+        from employee_manager_history and is only overridden at runtime by
+        the frontend during commission calculation (never persisted).
+
         Args:
             employee_code:   Employee code (e.g. "GL013")
             month:           Commission month (1-12)
             year:            Commission year
-            is_manager:      Whether the employee is a manager this period
             personal_target: Personal sales target (VND)
             working_day:     Number of working days in the period
 
@@ -2113,13 +2151,12 @@ class CommissionSettingsService:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO commission_settings
-                    (employee_code, month, year, is_manager, personal_target, working_day, updated_at)
+                    (employee_code, month, year, personal_target, working_day, updated_at)
                 VALUES
                     (%(employee_code)s, %(month)s, %(year)s,
-                     %(is_manager)s, %(personal_target)s, %(working_day)s,
+                     %(personal_target)s, %(working_day)s,
                      CURRENT_TIMESTAMP)
                 ON CONFLICT (employee_code, month, year) DO UPDATE SET
-                    is_manager      = EXCLUDED.is_manager,
                     personal_target = EXCLUDED.personal_target,
                     working_day     = EXCLUDED.working_day,
                     updated_at      = CURRENT_TIMESTAMP
@@ -2128,7 +2165,6 @@ class CommissionSettingsService:
                 'employee_code': employee_code,
                 'month': month,
                 'year': year,
-                'is_manager': is_manager,
                 'personal_target': personal_target,
                 'working_day': working_day
             })

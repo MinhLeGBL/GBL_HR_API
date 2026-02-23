@@ -51,37 +51,174 @@ def get_oracle_connection():
 
 # Global SSH tunnel for development mode
 _ssh_tunnel = None
+_MAX_TUNNEL_RETRIES = 3
+
+
+def _force_release_port(port):
+    """Release a local port by closing any socket bound to it.
+
+    Works even when the process that bound the port has been killed,
+    leaving an orphan TIME_WAIT or CLOSE_WAIT socket behind.
+    """
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('localhost', port))
+        sock.close()
+    except OSError:
+        # Port is truly stuck (another live process owns it) — try kill
+        import subprocess
+        try:
+            result = subprocess.run(
+                ['lsof', '-ti', f':{port}'],
+                capture_output=True, text=True, timeout=5
+            )
+            pids = result.stdout.strip().split('\n')
+            my_pid = str(os.getpid())
+            for pid in pids:
+                if pid and pid != my_pid:
+                    print(f"[WARN] Killing stale process {pid} on port {port}")
+                    subprocess.run(['kill', '-9', pid], timeout=5)
+        except Exception:
+            pass
+
+
+def _stop_tunnel(tunnel):
+    """Stop a tunnel and forcibly release its local port."""
+    if tunnel is None:
+        return
+    # 1. Shutdown + close the internal TCPServer sockets FIRST (these hold the port)
+    for server in getattr(tunnel, '_server_list', []):
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
+        # Last resort: close the raw socket fd
+        for attr in ('socket', '_socket', 'server_socket'):
+            try:
+                sock = getattr(server, attr, None)
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+    # 2. Close the SSH transport
+    try:
+        transport = getattr(tunnel, '_transport', None) or getattr(tunnel, 'ssh_transport', None)
+        if transport:
+            transport.close()
+    except Exception:
+        pass
+    # 3. Now call tunnel.stop() for any remaining cleanup
+    try:
+        tunnel.stop()
+    except Exception:
+        pass
+
+
+def _tunnel_is_healthy(tunnel):
+    """Deep health check: tunnel active AND SSH transport alive."""
+    if tunnel is None:
+        return False
+    try:
+        if not tunnel.is_active:
+            return False
+        # sshtunnel uses _transport (private) or ssh_transport (older versions)
+        transport = getattr(tunnel, '_transport', None) or getattr(tunnel, 'ssh_transport', None)
+        return transport is not None and transport.is_active()
+    except Exception:
+        return False
+
+
+def _create_tunnel():
+    """Create and start a new SSH tunnel with keepalive enabled.
+
+    Uses OS-assigned local port (port 0) to avoid fixed-port conflicts.
+    The actual port is read from tunnel.local_bind_port after start().
+    """
+    from sshtunnel import SSHTunnelForwarder
+
+    tunnel = SSHTunnelForwarder(
+        (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
+        ssh_username=SSH_CONFIG['ssh_username'],
+        ssh_password=SSH_CONFIG['ssh_password'],
+        remote_bind_address=('localhost', SSH_CONFIG['remote_port']),
+        local_bind_address=('localhost', 0),  # OS picks a free port
+        allow_agent=False,
+        host_pkey_directories=[],
+        set_keepalive=30,  # Send keepalive every 30s to prevent silent drops
+    )
+    tunnel.start()
+
+    # Double-check transport is actually connected
+    if not _tunnel_is_healthy(tunnel):
+        raise RuntimeError("Tunnel started but transport is not healthy")
+
+    print(f"[OK] SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
+    print(f"  Local port: {tunnel.local_bind_port}")
+    return tunnel
 
 
 def _start_ssh_tunnel():
-    """Start SSH tunnel for local development"""
+    """Start or reuse the global SSH tunnel for local development.
+
+    - Reuses an existing healthy tunnel.
+    - If stale, tears it down and retries up to _MAX_TUNNEL_RETRIES times.
+    - Force-releases port 6543 before each retry to handle orphan sockets.
+    """
     global _ssh_tunnel
-    if _ssh_tunnel is not None:
-        if _ssh_tunnel.is_active:
-            return _ssh_tunnel
-        # Tunnel dropped — reset and restart
-        _ssh_tunnel = None
 
-    try:
-        from sshtunnel import SSHTunnelForwarder
-
-        _ssh_tunnel = SSHTunnelForwarder(
-            (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
-            ssh_username=SSH_CONFIG['ssh_username'],
-            ssh_password=SSH_CONFIG['ssh_password'],
-            remote_bind_address=('localhost', SSH_CONFIG['remote_port']),
-            local_bind_address=('localhost', SSH_CONFIG['local_port']),
-            allow_agent=False,
-            host_pkey_directories=[]
-        )
-        _ssh_tunnel.start()
-        print(f"[OK] SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
-        print(f"  Local port: {_ssh_tunnel.local_bind_port}")
+    # Reuse if healthy
+    if _tunnel_is_healthy(_ssh_tunnel):
         return _ssh_tunnel
-    except Exception as e:
-        print(f"Failed to start SSH tunnel: {e}")
+
+    # Stale or None — clean up before retry
+    if _ssh_tunnel is not None:
+        print("[WARN] SSH tunnel stale, forcing cleanup...")
+        _stop_tunnel(_ssh_tunnel)
         _ssh_tunnel = None
-        return None
+
+    for attempt in range(1, _MAX_TUNNEL_RETRIES + 1):
+        tunnel = None
+        try:
+            tunnel = _create_tunnel()
+            _ssh_tunnel = tunnel
+            return _ssh_tunnel
+        except Exception as e:
+            print(f"[WARN] SSH tunnel attempt {attempt}/{_MAX_TUNNEL_RETRIES} failed: {e}")
+            _stop_tunnel(tunnel)
+            import time
+            time.sleep(1)  # Wait before retrying
+
+    print("[ERROR] All SSH tunnel attempts exhausted")
+    _ssh_tunnel = None
+    return None
+
+
+def _make_pg_connection(host, port):
+    """Create a PostgreSQL connection, trying psycopg2 then psycopg3."""
+    try:
+        import psycopg2
+        return psycopg2.connect(
+            host=host,
+            port=port,
+            database=POSTGRES_CONFIG['database'],
+            user=POSTGRES_CONFIG['username'],
+            password=POSTGRES_CONFIG['password'],
+        )
+    except ImportError:
+        import psycopg
+        return psycopg.connect(
+            host=host,
+            port=port,
+            dbname=POSTGRES_CONFIG['database'],
+            user=POSTGRES_CONFIG['username'],
+            password=POSTGRES_CONFIG['password'],
+        )
 
 
 def get_postgres_connection():
@@ -89,139 +226,68 @@ def get_postgres_connection():
     Connect to PostgreSQL database.
     Uses SSH tunnel if USE_SSH_TUNNEL=true in environment.
 
+    Self-healing: if the DB connection fails through an existing tunnel,
+    the tunnel is torn down and recreated once before giving up.
+
     Returns:
         connection object if successful, None otherwise
     """
     use_ssh = os.getenv('USE_SSH_TUNNEL', 'false').lower() == 'true'
 
-    host = POSTGRES_CONFIG['host']
-    port = POSTGRES_CONFIG['port']
-
-    # If using SSH tunnel, start it and use local port
-    if use_ssh:
-        tunnel = _start_ssh_tunnel()
-        if tunnel:
-            host = 'localhost'
-            port = tunnel.local_bind_port
-        else:
-            print("Warning: SSH tunnel failed, trying direct connection...")
-
-    try:
-        # Try to import psycopg2 first, then fall back to psycopg
+    if not use_ssh:
+        # Direct connection — no retry logic needed
         try:
-            import psycopg2
-
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                database=POSTGRES_CONFIG['database'],
-                user=POSTGRES_CONFIG['username'],
-                password=POSTGRES_CONFIG['password']
-            )
-            if use_ssh:
-                print(f"[OK] Connected to PostgreSQL via SSH tunnel (localhost:{port})")
-            else:
-                print(f"[OK] Successfully connected to PostgreSQL at {host}:{port}")
+            conn = _make_pg_connection(POSTGRES_CONFIG['host'], POSTGRES_CONFIG['port'])
+            print(f"[OK] Connected to PostgreSQL at {POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}")
             return conn
-
         except ImportError:
-            # Try psycopg (version 3)
-            import psycopg
+            print("ImportError: PostgreSQL driver not installed")
+            print("  Please install: pip install psycopg2-binary")
+        except Exception as error:
+            print(f"Error connecting to PostgreSQL: {error}")
+        return None
 
-            conn = psycopg.connect(
-                host=host,
-                port=port,
-                dbname=POSTGRES_CONFIG['database'],
-                user=POSTGRES_CONFIG['username'],
-                password=POSTGRES_CONFIG['password']
-            )
-            if use_ssh:
-                print(f"[OK] Connected to PostgreSQL via SSH tunnel (localhost:{port})")
-            else:
-                print(f"[OK] Successfully connected to PostgreSQL at {host}:{port}")
+    # --- SSH tunnel path with self-healing retry ---
+    for attempt in range(1, _MAX_TUNNEL_RETRIES + 1):
+        tunnel = _start_ssh_tunnel()
+        if not tunnel:
+            break
+
+        try:
+            conn = _make_pg_connection('localhost', tunnel.local_bind_port)
+            print(f"[OK] Connected to PostgreSQL via SSH tunnel (localhost:{tunnel.local_bind_port})")
             return conn
+        except Exception as error:
+            print(f"[WARN] DB connection attempt {attempt}/{_MAX_TUNNEL_RETRIES} failed: {error}")
+            # Tunnel might be half-dead — tear it down so next loop rebuilds it
+            global _ssh_tunnel
+            _stop_tunnel(_ssh_tunnel)
+            _ssh_tunnel = None
 
-    except ImportError as import_error:
-        print(f"ImportError: PostgreSQL driver not installed")
-        print(f"  Please install: pip install psycopg2-binary")
-        print(f"  Error details: {import_error}")
-    except Exception as error:
-        print(f"Error connecting to PostgreSQL: {error}")
-        print(f"  Host: {host}")
-        print(f"  Port: {port}")
-        print(f"  Database: {POSTGRES_CONFIG['database']}")
-        print(f"  User: {POSTGRES_CONFIG['username']}")
+    print("[ERROR] Could not connect to PostgreSQL via SSH tunnel")
     return None
 
 
 def get_postgres_connection_ssh():
     """
-    Connect to PostgreSQL database through SSH tunnel
+    Connect to PostgreSQL database through SSH tunnel.
 
     Returns:
         tuple: (tunnel, connection) if successful, (None, None) otherwise
-        Both tunnel and connection should be closed when done
+        Both tunnel and connection should be closed when done.
     """
+    tunnel = None
     try:
-        from sshtunnel import SSHTunnelForwarder
-
-        # Create SSH tunnel
-        tunnel = SSHTunnelForwarder(
-            (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
-            ssh_username=SSH_CONFIG['ssh_username'],
-            ssh_password=SSH_CONFIG['ssh_password'],
-            remote_bind_address=('localhost', SSH_CONFIG['remote_port']),
-            local_bind_address=('localhost', SSH_CONFIG['local_port'])
-        )
-
-        # Start the tunnel
-        tunnel.start()
-        print(f"[OK] SSH tunnel established to {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
-        print(f"  Local port: {tunnel.local_bind_port}")
-        print(f"  Remote port: {SSH_CONFIG['remote_port']}")
-
-        # Try to connect to PostgreSQL through the tunnel
-        try:
-            import psycopg2
-
-            conn = psycopg2.connect(
-                host='localhost',
-                port=tunnel.local_bind_port,
-                database=POSTGRES_CONFIG['database'],
-                user=POSTGRES_CONFIG['username'],
-                password=POSTGRES_CONFIG['password']
-            )
-            print(f"[OK] Successfully connected to PostgreSQL through SSH tunnel")
-            print(f"  Database: {POSTGRES_CONFIG['database']}")
-            print(f"  User: {POSTGRES_CONFIG['username']}")
-            return tunnel, conn
-
-        except ImportError:
-            # Try psycopg (version 3)
-            import psycopg
-
-            conn = psycopg.connect(
-                host='localhost',
-                port=tunnel.local_bind_port,
-                dbname=POSTGRES_CONFIG['database'],
-                user=POSTGRES_CONFIG['username'],
-                password=POSTGRES_CONFIG['password']
-            )
-            print(f"[OK] Successfully connected to PostgreSQL through SSH tunnel")
-            print(f"  Database: {POSTGRES_CONFIG['database']}")
-            print(f"  User: {POSTGRES_CONFIG['username']}")
-            return tunnel, conn
-
-    except ImportError as import_error:
-        print(f"ImportError: Required library not installed")
-        print(f"  Please install: pip install sshtunnel psycopg2-binary")
-        print(f"  Error details: {import_error}")
+        tunnel = _create_tunnel()
+        conn = _make_pg_connection('localhost', tunnel.local_bind_port)
+        print(f"[OK] Connected to PostgreSQL through SSH tunnel")
+        return tunnel, conn
+    except ImportError as e:
+        print(f"ImportError: Required library not installed — {e}")
+        print("  Please install: pip install sshtunnel psycopg2-binary")
+        _stop_tunnel(tunnel)
         return None, None
     except Exception as error:
         print(f"Error connecting to PostgreSQL through SSH: {error}")
-        print(f"  SSH Host: {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}")
-        print(f"  SSH User: {SSH_CONFIG['ssh_username']}")
-        print(f"  Database: {POSTGRES_CONFIG['database']}")
-        if 'tunnel' in locals() and tunnel:
-            tunnel.stop()
+        _stop_tunnel(tunnel)
         return None, None
