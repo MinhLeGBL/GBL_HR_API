@@ -446,6 +446,7 @@ class CommissionService:
             total_commission = personal_commission + manager_bonus
 
             results.append({
+                'employee_code': emp.get('employee_code', ''),
                 'employee_name': emp['employee_name'],
                 'tenure_months': emp['tenure_months'],
                 'is_manager': emp['is_manager'],
@@ -1444,22 +1445,26 @@ class CommissionService:
             # Get employee sales data for this store
             employee_sales_list = stores_employee_sales.get(store_code, [])
 
-            # Create employee sales lookup by name
+            # Create employee sales lookup by employee_code (more reliable than name matching)
+            # EMPLOYEE_CODE comes from Oracle's CUSTOMER.UDF4_STRING
             employee_sales_lookup = {
-                emp_sale.get('EMPLOYEE_FULL_NAME'): emp_sale
+                emp_sale.get('EMPLOYEE_CODE'): emp_sale
                 for emp_sale in employee_sales_list
+                if emp_sale.get('EMPLOYEE_CODE')
             }
 
             # Filter to only requested employees with their provided seniority
             requested_employees_data = []
             for emp in employees_by_store[store_code]:
                 emp_name = emp.get('employee_name')
-                emp_sales = employee_sales_lookup.get(emp_name)
+                emp_code = emp.get('employee_code')
+                emp_sales = employee_sales_lookup.get(emp_code)
 
                 if emp_sales:
                     # Add seniority from request
                     requested_employees_data.append({
                         'EMPLOYEE_FULL_NAME': emp_name,
+                        'EMPLOYEE_CODE': emp_code,
                         'EMPLOYEE_FP_REVENUE': emp_sales.get('EMPLOYEE_FP_REVENUE', 0),
                         'EMPLOYEE_DISCOUNTED_REVENUE': emp_sales.get('EMPLOYEE_DISCOUNTED_REVENUE', 0),
                         'TENURE_MONTHS': emp.get('seniority', 0)
@@ -1484,6 +1489,7 @@ class CommissionService:
             employee_contributions = []
             for emp_data in requested_employees_data:
                 emp_name = emp_data['EMPLOYEE_FULL_NAME']
+                emp_code = emp_data['EMPLOYEE_CODE']
                 fp_revenue = emp_data['EMPLOYEE_FP_REVENUE']
                 discounted_revenue = emp_data['EMPLOYEE_DISCOUNTED_REVENUE']
                 tenure_months = emp_data['TENURE_MONTHS']
@@ -1510,6 +1516,7 @@ class CommissionService:
                 total_contribution = fp_commission + discounted_commission
 
                 employee_contributions.append({
+                    'employee_code': emp_code,
                     'employee_name': emp_name,
                     'tenure_months': tenure_months,
                     'is_manager': is_manager,
@@ -1530,15 +1537,10 @@ class CommissionService:
                 achievement_pct
             )
 
-            # Add employee codes to results
+            # Map results back to employees using employee_code
             for emp_commission in employee_commissions:
+                emp_code = emp_commission.get('employee_code', '')
                 emp_name = emp_commission['employee_name']
-                # Find matching employee in request to get employee_code
-                matching_emp = next(
-                    (e for e in employees_by_store[store_code] if e.get('employee_name') == emp_name),
-                    None
-                )
-                emp_code = matching_emp.get('employee_code', '') if matching_emp else ''
 
                 all_employee_results.append({
                     'employee_code': emp_code,
