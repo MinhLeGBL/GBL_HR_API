@@ -1,5 +1,6 @@
 import platform
 import os
+import threading
 import oracledb
 from config.database import DATABASE_CONFIG, POSTGRES_CONFIG, SSH_CONFIG
 
@@ -49,39 +50,10 @@ def get_oracle_connection():
     return None
 
 
-# Global SSH tunnel for development mode
+# Global SSH tunnel for development mode (guarded by _tunnel_lock)
 _ssh_tunnel = None
+_tunnel_lock = threading.Lock()
 _MAX_TUNNEL_RETRIES = 3
-
-
-def _force_release_port(port):
-    """Release a local port by closing any socket bound to it.
-
-    Works even when the process that bound the port has been killed,
-    leaving an orphan TIME_WAIT or CLOSE_WAIT socket behind.
-    """
-    import socket
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('localhost', port))
-        sock.close()
-    except OSError:
-        # Port is truly stuck (another live process owns it) — try kill
-        import subprocess
-        try:
-            result = subprocess.run(
-                ['lsof', '-ti', f':{port}'],
-                capture_output=True, text=True, timeout=5
-            )
-            pids = result.stdout.strip().split('\n')
-            my_pid = str(os.getpid())
-            for pid in pids:
-                if pid and pid != my_pid:
-                    print(f"[WARN] Killing stale process {pid} on port {port}")
-                    subprocess.run(['kill', '-9', pid], timeout=5)
-        except Exception:
-            pass
 
 
 def _stop_tunnel(tunnel):
@@ -166,37 +138,37 @@ def _create_tunnel():
 def _start_ssh_tunnel():
     """Start or reuse the global SSH tunnel for local development.
 
-    - Reuses an existing healthy tunnel.
-    - If stale, tears it down and retries up to _MAX_TUNNEL_RETRIES times.
-    - Force-releases port 6543 before each retry to handle orphan sockets.
+    Thread-safe: uses _tunnel_lock to prevent concurrent tunnel creation.
+    Reuses an existing healthy tunnel; if stale, tears it down and retries.
     """
     global _ssh_tunnel
 
-    # Reuse if healthy
-    if _tunnel_is_healthy(_ssh_tunnel):
-        return _ssh_tunnel
-
-    # Stale or None — clean up before retry
-    if _ssh_tunnel is not None:
-        print("[WARN] SSH tunnel stale, forcing cleanup...")
-        _stop_tunnel(_ssh_tunnel)
-        _ssh_tunnel = None
-
-    for attempt in range(1, _MAX_TUNNEL_RETRIES + 1):
-        tunnel = None
-        try:
-            tunnel = _create_tunnel()
-            _ssh_tunnel = tunnel
+    with _tunnel_lock:
+        # Reuse if healthy
+        if _tunnel_is_healthy(_ssh_tunnel):
             return _ssh_tunnel
-        except Exception as e:
-            print(f"[WARN] SSH tunnel attempt {attempt}/{_MAX_TUNNEL_RETRIES} failed: {e}")
-            _stop_tunnel(tunnel)
-            import time
-            time.sleep(1)  # Wait before retrying
 
-    print("[ERROR] All SSH tunnel attempts exhausted")
-    _ssh_tunnel = None
-    return None
+        # Stale or None — clean up before retry
+        if _ssh_tunnel is not None:
+            print("[WARN] SSH tunnel stale, forcing cleanup...")
+            _stop_tunnel(_ssh_tunnel)
+            _ssh_tunnel = None
+
+        for attempt in range(1, _MAX_TUNNEL_RETRIES + 1):
+            tunnel = None
+            try:
+                tunnel = _create_tunnel()
+                _ssh_tunnel = tunnel
+                return _ssh_tunnel
+            except Exception as e:
+                print(f"[WARN] SSH tunnel attempt {attempt}/{_MAX_TUNNEL_RETRIES} failed: {e}")
+                _stop_tunnel(tunnel)
+                import time
+                time.sleep(1)  # Wait before retrying
+
+        print("[ERROR] All SSH tunnel attempts exhausted")
+        _ssh_tunnel = None
+        return None
 
 
 def _make_pg_connection(host, port):
@@ -261,8 +233,9 @@ def get_postgres_connection():
             print(f"[WARN] DB connection attempt {attempt}/{_MAX_TUNNEL_RETRIES} failed: {error}")
             # Tunnel might be half-dead — tear it down so next loop rebuilds it
             global _ssh_tunnel
-            _stop_tunnel(_ssh_tunnel)
-            _ssh_tunnel = None
+            with _tunnel_lock:
+                _stop_tunnel(_ssh_tunnel)
+                _ssh_tunnel = None
 
     print("[ERROR] Could not connect to PostgreSQL via SSH tunnel")
     return None
