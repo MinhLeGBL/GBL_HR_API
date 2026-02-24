@@ -2,12 +2,81 @@
 Commission API Routes
 """
 from flask import Blueprint, jsonify, request, Response
-from app.modules.commission.service import CommissionService
+from app.modules.commission.service import CommissionService, CommissionSettingsService, CommissionStoreSettingsService, CommissionRevenueService
 from app.modules.commission.sheets_service import GoogleSheetsService
+from app.core.auth.middleware import token_required, manager_required
 import pandas as pd
 import io
 
 commission_bp = Blueprint('commission', __name__, url_prefix='/api/v1/commission')
+
+
+def _parse_period(data, source='body'):
+    """Parse and validate month/year from request data.
+
+    Args:
+        data: dict with 'month' and 'year' keys
+        source: 'body' for JSON body, 'args' for query params
+
+    Returns:
+        (month, year, None) on success, or (None, None, error_response_tuple) on failure
+    """
+    month_raw = data.get('month')
+    year_raw = data.get('year')
+
+    if month_raw is None or year_raw is None:
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'Missing required field: month and year'
+        }), 400)
+
+    try:
+        month = int(month_raw)
+        year = int(year_raw)
+    except (ValueError, TypeError):
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'month and year must be integers'
+        }), 400)
+
+    if not (1 <= month <= 12):
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'month must be between 1 and 12'
+        }), 400)
+
+    if not (2000 <= year <= 2100):
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'year must be between 2000 and 2100'
+        }), 400)
+
+    return month, year, None
+
+
+def _parse_json_body():
+    """Parse JSON request body, distinguishing parse failure from empty body.
+
+    Returns:
+        (data, None) on success, or (None, error_response_tuple) on failure
+    """
+    data = request.get_json(force=True, silent=True)
+    if data is None:
+        return None, (jsonify({
+            'success': False,
+            'error': 'Invalid or missing JSON body'
+        }), 400)
+    return data, None
+
+
+def _safe_int(value, field_name):
+    """Cast a value to int, returning (int_val, None) or (None, error_string)."""
+    if value is None:
+        return None, None  # None is allowed (nullable fields)
+    try:
+        return int(value), None
+    except (ValueError, TypeError):
+        return None, f'{field_name} must be an integer'
 
 
 @commission_bp.route('/personal/calculate', methods=['POST'])
@@ -499,6 +568,411 @@ def calculate_store_commission_from_sheet():
             'success': False,
             'error': str(e)
         }), 400
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/employees', methods=['GET'])
+@token_required
+def get_commission_employees():
+    """
+    Get active store employees with their commission settings for a given month/year.
+
+    Query Parameters:
+        - month: integer (1-12), required
+        - year:  integer, required
+
+    Returns:
+        {
+            "success": true,
+            "month": 12,
+            "year": 2025,
+            "stores": [
+                {
+                    "store_code": "RWT",
+                    "store_name": "...",
+                    "employees": [
+                        {
+                            "employee_code": "GL013",
+                            "full_name": "...",
+                            "join_date": "2010-07-14",
+                            "contract": "permanent",
+                            "is_manager": true,
+                            "personal_target": 650000000,
+                            "working_day": null
+                        }
+                    ]
+                }
+            ]
+        }
+    """
+    try:
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
+
+        service = CommissionSettingsService()
+        result = service.get_commission_employees(month, year)
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/employees/<employee_code>', methods=['PUT'])
+@manager_required
+def update_commission_employee(employee_code):
+    """
+    Create or update commission settings for a single employee for a given period.
+
+    Note: is_manager is NOT persisted here. It is determined at query time
+    from employee_manager_history and can be overridden at runtime by the
+    frontend during commission calculation (never saved).
+
+    URL Parameter:
+        - employee_code: string (e.g. "GL013")
+
+    Request Body:
+        {
+            "month": integer (1-12),
+            "year": integer,
+            "personal_target": integer (VND),
+            "working_day": integer
+        }
+
+    Returns:
+        {
+            "success": true,
+            "data": {
+                "employee_code": "GL013",
+                "month": 12,
+                "year": 2025,
+                "is_manager": true,
+                "personal_target": 650000000,
+                "working_day": 22
+            }
+        }
+    """
+    try:
+        data, err = _parse_json_body()
+        if err:
+            return err
+
+        required_fields = ['month', 'year', 'personal_target', 'working_day']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        month, year, err = _parse_period(data)
+        if err:
+            return err
+
+        personal_target, pt_err = _safe_int(data['personal_target'], 'personal_target')
+        if pt_err:
+            return jsonify({'success': False, 'error': pt_err}), 400
+
+        working_day, wd_err = _safe_int(data['working_day'], 'working_day')
+        if wd_err:
+            return jsonify({'success': False, 'error': wd_err}), 400
+
+        service = CommissionSettingsService()
+        result = service.update_commission_settings(
+            employee_code=employee_code,
+            month=month,
+            year=year,
+            personal_target=personal_target,
+            working_day=working_day
+        )
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/stores', methods=['GET'])
+@token_required
+def get_commission_stores():
+    """
+    Get all stores with their commission settings for a given month/year period.
+
+    Query Parameters:
+        - month: integer (1-12), required
+        - year:  integer, required
+
+    Returns:
+        {
+            "success": true,
+            "month": 2,
+            "year": 2026,
+            "stores": [
+                {
+                    "store_code": "RWT",
+                    "store_name": "Rolex Warranted Retailer T",
+                    "store_target": 5000000000,
+                    "fp_ratio_target": 60
+                }
+            ]
+        }
+    """
+    try:
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
+
+        service = CommissionStoreSettingsService()
+        result = service.get_commission_stores(month, year)
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/stores/<store_code>', methods=['PUT'])
+@manager_required
+def update_commission_store(store_code):
+    """
+    Create or update commission settings for a store for a given period.
+
+    URL Parameter:
+        - store_code: string (e.g. "RWT")
+
+    Request Body:
+        {
+            "month": 2,
+            "year": 2026,
+            "store_target": 5000000000,
+            "fp_ratio_target": 60
+        }
+
+    Returns:
+        {
+            "success": true,
+            "data": {
+                "store_code": "RWT",
+                "month": 2,
+                "year": 2026,
+                "store_target": 5000000000,
+                "fp_ratio_target": 60
+            }
+        }
+    """
+    try:
+        data, err = _parse_json_body()
+        if err:
+            return err
+
+        for field in ['month', 'year']:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        month, year, err = _parse_period(data)
+        if err:
+            return err
+
+        store_target, st_err = _safe_int(data.get('store_target'), 'store_target')
+        if st_err:
+            return jsonify({'success': False, 'error': st_err}), 400
+
+        fp_ratio, fp_err = _safe_int(data.get('fp_ratio_target'), 'fp_ratio_target')
+        if fp_err:
+            return jsonify({'success': False, 'error': fp_err}), 400
+
+        service = CommissionStoreSettingsService()
+        result = service.update_commission_store_settings(
+            store_code=store_code,
+            month=month,
+            year=year,
+            store_target=store_target,
+            fp_ratio_target=fp_ratio
+        )
+
+        if not result.get('success', False):
+            if 'not found' in result.get('error', '').lower():
+                return jsonify(result), 404
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/revenue', methods=['GET'])
+@token_required
+def get_commission_revenue():
+    """
+    Get live Oracle revenue breakdown per employee per 7 revenue types,
+    with stored adjustment deltas applied, for a given period.
+
+    Query Parameters:
+        - month: integer (1-12), required
+        - year:  integer, required
+    """
+    try:
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
+
+        service = CommissionRevenueService()
+        result = service.get_revenue_breakdown(month, year)
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/revenue/adjustments/<employee_code>', methods=['PUT'])
+@manager_required
+def update_revenue_adjustments(employee_code):
+    """
+    Create or update revenue adjustment deltas for an employee for a given period.
+
+    URL Parameter:
+        - employee_code: string (e.g. "GL013")
+
+    Request Body:
+        {
+            "month": 3,
+            "year": 2026,
+            "adjustments": [
+                {"revenue_type": "full_price", "adjustment": 50000000},
+                {"revenue_type": "markdown",   "adjustment": -10000000}
+            ]
+        }
+
+    Valid revenue_type values: full_price, markdown, jewelry, vhernier, rosa_maria,
+                               hand_carry, suitcase
+    """
+    try:
+        data, err = _parse_json_body()
+        if err:
+            return err
+
+        for field in ['month', 'year', 'adjustments']:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        month, year, err = _parse_period(data)
+        if err:
+            return err
+
+        if not isinstance(data['adjustments'], list):
+            return jsonify({
+                'success': False,
+                'error': 'adjustments must be an array'
+            }), 400
+
+        service = CommissionRevenueService()
+        result = service.save_revenue_adjustments(
+            employee_code=employee_code,
+            month=month,
+            year=year,
+            adjustments=data['adjustments']
+        )
+
+        if not result.get('success', False):
+            if result.get('not_found'):
+                return jsonify(result), 404
+            return jsonify(result), 400
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@commission_bp.route('/calculate', methods=['POST'])
+@manager_required
+def calculate_commission():
+    """
+    Trigger full commission calculation pipeline for a given month/year.
+
+    Reads settings from PostgreSQL, fetches Oracle sales, applies revenue adjustments,
+    calculates all commission components, and optionally writes results to Google Sheets.
+
+    Request Body:
+        {
+            "month": 3,
+            "year": 2026,
+            "spreadsheet_id": "..." (optional — if provided, results are written to Sheets),
+            "sheet_name": "Sheet1" (optional, default "Sheet1")
+        }
+    """
+    try:
+        data, err = _parse_json_body()
+        if err:
+            return err
+
+        for field in ['month', 'year']:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+
+        month, year, err = _parse_period(data)
+        if err:
+            return err
+
+        service = CommissionService()
+        result = service.calculate_commissions_for_period(
+            month=month,
+            year=year,
+            spreadsheet_id=data.get('spreadsheet_id'),
+            sheet_name=data.get('sheet_name', 'Sheet1')
+        )
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
 
     except Exception as e:
         return jsonify({

@@ -136,14 +136,105 @@ Mock where the object is **looked up**, not where it's defined:
 ```
 
 ### Commands
+
+**Windows (dev machine):** Always activate the venv first — `python`, `python3`, and `py` are unreliable on this machine. Use:
 ```bash
-# Run all unit tests
+source venv/Scripts/activate && FLASK_ENV=testing pytest tests/ -x --ignore=tests/integration -v
+source venv/Scripts/activate && FLASK_ENV=testing python -c "from app.main import app; print('OK')"
+source venv/Scripts/activate && python scripts/init_db.py
+```
+
+**Linux/CI (deployment server):** Standard commands work as-is:
+```bash
 FLASK_ENV=testing pytest tests/ -x --ignore=tests/integration -v
-
-# Import check
 FLASK_ENV=testing python -c "from app.main import app; print('OK')"
-
-# Init database tables
 python scripts/init_db.py
 ```
+
+## Frontend CR Documentation (API Change Requests)
+
+The frontend project (`GBL_HR_Frontend`) uses per-feature CR files to communicate API requirements:
+
+```
+GBL_HR_Frontend/docs/
+├── API_REFERENCE.md          # Slim index: architecture, endpoint tables, change log
+└── cr/
+    ├── commission.md          # Commission feature (CR #4–#10)
+    ├── employees.md           # Employee management (CR #2, #5)
+    ├── permissions.md         # Permissions & access (CR #1)
+    └── users.md               # User management & auth
+```
+
+### Status markers in CR files
+
+| Marker | Meaning |
+|--------|---------|
+| ⏳ | Requested by frontend — pending backend implementation |
+| Done | Implemented and confirmed |
+
+### When implementing a CR
+
+1. **Update `docs/cr/<feature>.md`** — actual response shapes, implementation notes, mark ⏳ → Done
+2. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
+3. **Never remove frontend-written sections** — only annotate with actual implementation details
+4. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
+
+### Skills
+
+- `/checkcr` — Reads all CR files and compares against backend implementation; reports pending/mismatched items
+- `/responsecr` — Updates CR files and API_REFERENCE.md to reflect current backend status
+
+## Running the API Locally (dev/staging/feature branches)
+
+### Kill stale processes and free ports first
+
+Before starting or restarting the API locally, **always kill processes on port 5200 (API) and port 6543 (SSH tunnel)**. Stale tunnel listeners cause "Couldn't open tunnel localhost:6543" errors.
+
+```bash
+# macOS — kill by port
+lsof -ti:5200 | xargs kill -9 2>/dev/null
+lsof -ti:6543 | xargs kill -9 2>/dev/null
+
+# Windows — kill all python processes
+taskkill //F //IM python.exe
+
+# Verify ports are free
+# macOS:
+lsof -i:5200 -i:6543
+# Windows:
+netstat -ano | grep ":5200\|:6543" | grep LISTEN
+```
+
+### Start the API
+
+```bash
+# macOS (background, no reloader to avoid port conflicts)
+nohup .venv/bin/python -c "from app.main import app; app.run(host='0.0.0.0', port=5200, debug=False, use_reloader=False)" > /tmp/gbl_api.log 2>&1 &
+
+# Windows
+cd "e:/Git Project/GBL_HR_API" && source venv/Scripts/activate && FLASK_ENV=development python app.py
+```
+
+The SSH tunnel starts lazily on the first PostgreSQL request.
+
+### Verify API and tunnel health after startup
+
+On `staging` and `feature/*` branches, `USE_SSH_TUNNEL=true` is required for PostgreSQL. After starting, verify:
+
+```bash
+# 1. Health check (no DB needed)
+curl -s http://127.0.0.1:5200/api/v1/health/
+
+# 2. DB-backed endpoint — should return "Invalid email or password" (not a tunnel error)
+curl -s -X POST http://127.0.0.1:5200/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@test.com","password":"test"}'
+```
+
+A tunnel error looks like: `{"error": "Server is not started. Please .start() first!"}` or `"Couldn't open tunnel localhost:6543 <> localhost:5432 might be in use"`
+
+If you see a tunnel error:
+1. Kill processes on ports 5200 and 6543 (see commands above)
+2. Confirm both ports are free
+3. Restart the API
 

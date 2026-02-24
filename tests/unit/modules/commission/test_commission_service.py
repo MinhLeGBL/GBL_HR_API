@@ -443,7 +443,7 @@ class TestDistributeStorePool:
         ]
         result = service._distribute_store_pool(employees, 10_000, 80.0)
         expected_keys = {
-            'employee_name', 'tenure_months', 'is_manager',
+            'employee_code', 'employee_name', 'tenure_months', 'is_manager',
             'fp_revenue', 'discounted_revenue', 'contribution',
             'commission_70pct', 'commission_30pct',
             'manager_bonus', 'total_commission',
@@ -1203,6 +1203,7 @@ class TestCalculateBatchStoreCommissions:
         mock_repo.get_multiple_stores_employee_sales_data.return_value = {
             'HBT': [
                 {
+                    'EMPLOYEE_CODE': 'EMP001',
                     'EMPLOYEE_FULL_NAME': 'Alice',
                     'EMPLOYEE_FP_REVENUE': 500_000,
                     'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
@@ -1249,6 +1250,7 @@ class TestCalculateBatchStoreCommissions:
         mock_repo.get_multiple_stores_employee_sales_data.return_value = {
             'HBT': [
                 {
+                    'EMPLOYEE_CODE': 'EMP001',
                     'EMPLOYEE_FULL_NAME': 'Alice',
                     'EMPLOYEE_FP_REVENUE': 500_000,
                     'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
@@ -1256,6 +1258,7 @@ class TestCalculateBatchStoreCommissions:
             ],
             'HDG': [
                 {
+                    'EMPLOYEE_CODE': 'EMP002',
                     'EMPLOYEE_FULL_NAME': 'Bob',
                     'EMPLOYEE_FP_REVENUE': 200_000,
                     'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
@@ -1298,7 +1301,7 @@ class TestCalculateBatchStoreCommissions:
         }
         mock_repo.get_multiple_stores_employee_sales_data.return_value = {
             'HBT': [
-                {'EMPLOYEE_FULL_NAME': 'Alice', 'EMPLOYEE_FP_REVENUE': 500_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 50_000}
+                {'EMPLOYEE_CODE': 'EMP001', 'EMPLOYEE_FULL_NAME': 'Alice', 'EMPLOYEE_FP_REVENUE': 500_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 50_000}
             ]
         }
 

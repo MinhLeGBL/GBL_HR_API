@@ -102,6 +102,36 @@ class HREmployeeService:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_employees_store ON employees(store_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_employees_type ON employees(employee_type_id)')
 
+            # ── History: is_manager status changes ──
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS employee_manager_history (
+                    id SERIAL PRIMARY KEY,
+                    employee_sid BIGINT NOT NULL REFERENCES employees(sid) ON DELETE CASCADE,
+                    is_manager BOOLEAN NOT NULL,
+                    effective_from DATE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_emp_manager_history_sid
+                ON employee_manager_history (employee_sid, effective_from DESC)
+            ''')
+
+            # ── History: store transfers ──
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS employee_store_history (
+                    id SERIAL PRIMARY KEY,
+                    employee_sid BIGINT NOT NULL REFERENCES employees(sid) ON DELETE CASCADE,
+                    store_id BIGINT NOT NULL REFERENCES stores(id),
+                    effective_from DATE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_emp_store_history_sid
+                ON employee_store_history (employee_sid, effective_from DESC)
+            ''')
+
             # ── Seed default employee if table is empty ──
             cursor.execute('SELECT COUNT(*) FROM employees')
             if cursor.fetchone()[0] == 0:
@@ -191,6 +221,7 @@ class HREmployeeService:
             'join_date': row[13].isoformat() if row[13] and hasattr(row[13], 'isoformat') else str(row[13]) if row[13] else None,
             'created_at': row[14].isoformat() if row[14] else None,
             'updated_at': row[15].isoformat() if row[15] else None,
+            'is_manager': row[16],
         }
         return employee
 
@@ -200,7 +231,11 @@ class HREmployeeService:
                e.contract_type_id, ct.code AS contract,
                e.department_id, e.store_id, e.email,
                e.retailpro_username, e.retailpro_sid,
-               e.is_active, e.join_date, e.created_at, e.updated_at
+               e.is_active, e.join_date, e.created_at, e.updated_at,
+               (SELECT emh.is_manager FROM employee_manager_history emh
+                WHERE emh.employee_sid = e.sid
+                ORDER BY emh.effective_from DESC, emh.id DESC
+                LIMIT 1) AS is_manager
         FROM employees e
         JOIN employee_types et ON e.employee_type_id = et.id
         JOIN contract_types ct ON e.contract_type_id = ct.id
@@ -330,6 +365,15 @@ class HREmployeeService:
                   department_id, store_id, email, is_active, join_date))
 
             new_sid = cursor.fetchone()[0]
+
+            # Record initial store assignment in history
+            # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
+            if store_id:
+                cursor.execute('''
+                    INSERT INTO employee_store_history (employee_sid, store_id, effective_from)
+                    VALUES (%s, %s, CURRENT_DATE)
+                ''', (new_sid, store_id))
+
             conn.commit()
 
             # Fetch full employee with JOINs
@@ -359,11 +403,13 @@ class HREmployeeService:
 
             cursor = conn.cursor()
 
-            # Check if employee exists
-            cursor.execute('SELECT sid FROM employees WHERE sid = %s', (sid,))
-            if not cursor.fetchone():
+            # Check if employee exists and fetch current store_id for history tracking
+            cursor.execute('SELECT sid, store_id FROM employees WHERE sid = %s', (sid,))
+            existing = cursor.fetchone()
+            if not existing:
                 cursor.close()
                 return {'success': False, 'error': 'Employee not found'}
+            current_store_id = existing[1]
 
             # Resolve code strings to FK IDs
             if 'employee_type' in updates:
@@ -402,6 +448,16 @@ class HREmployeeService:
             cursor.execute(query, values)
 
             row = cursor.fetchone()
+
+            # Insert store transfer history if store_id changed
+            # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
+            new_store_id = updates.get('store_id')
+            if 'store_id' in updates and new_store_id != current_store_id:
+                cursor.execute('''
+                    INSERT INTO employee_store_history (employee_sid, store_id, effective_from)
+                    VALUES (%s, %s, CURRENT_DATE)
+                ''', (sid, new_store_id))
+
             conn.commit()
 
             # Fetch full employee with JOINs
@@ -481,6 +537,53 @@ class HREmployeeService:
             return {'success': True, 'contract_types': types}
 
         except Exception as e:
+            return {'success': False, 'error': str(e)}
+        finally:
+            if conn:
+                conn.close()
+
+    # ── Manager Status History ──
+
+    def set_manager_status(self, sid: int, is_manager: bool) -> Dict[str, Any]:
+        """
+        Append a new is_manager history row for a store employee.
+
+        effective_from is always today's date (server-side).
+        History is append-only — each call inserts a new row.
+        """
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to database'}
+
+            cursor = conn.cursor()
+
+            cursor.execute('SELECT sid FROM employees WHERE sid = %s', (sid,))
+            if not cursor.fetchone():
+                cursor.close()
+                return {'success': False, 'error': 'Employee not found'}
+
+            # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
+            cursor.execute('''
+                INSERT INTO employee_manager_history (employee_sid, is_manager, effective_from)
+                VALUES (%s, %s, CURRENT_DATE)
+                RETURNING is_manager, effective_from
+            ''', (sid, is_manager))
+
+            row = cursor.fetchone()
+            conn.commit()
+            cursor.close()
+
+            return {
+                'success': True,
+                'is_manager': row[0],
+                'effective_from': row[1].isoformat()
+            }
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
             return {'success': False, 'error': str(e)}
         finally:
             if conn:
