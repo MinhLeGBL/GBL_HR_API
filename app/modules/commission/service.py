@@ -694,7 +694,8 @@ class CommissionService:
                 })
             return result
 
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] _get_employees_with_username_for_period failed: {e}")
             return []
 
         finally:
@@ -872,10 +873,10 @@ class CommissionService:
             # IMPORTANT: Use the FULL sales data (INCLUDING COSM) for the running total,
             # because COSM revenue counts toward reaching the personal target.
             # The running total determines WHEN the employee reached their target.
-            # NOTE: Use revenue_before_vat for the running total (not revenue_with_vat),
-            # because the over-100% bonus threshold is measured against non-VAT revenue.
+            # NOTE: Both the running total and the personal target use revenue_with_vat.
+            # Adjustment values are treated as with_vat = before_vat (same amount).
             bill_totals_df = employee_sales_df.groupby('bill_number', sort=False).agg({
-                'revenue_before_vat': 'sum',
+                'revenue_with_vat': 'sum',
                 'sale_date': 'first',
                 'sale_time': 'first'
             }).reset_index()
@@ -883,8 +884,8 @@ class CommissionService:
             # Sort bills chronologically
             bill_totals_df = bill_totals_df.sort_values(['sale_date', 'sale_time'])
 
-            # Calculate running total by BILL (BEFORE VAT) to find when 100% target was reached
-            bill_totals_df['running_total'] = bill_totals_df['revenue_before_vat'].cumsum()
+            # Calculate running total by BILL (WITH VAT) to find when 100% target was reached
+            bill_totals_df['running_total'] = bill_totals_df['revenue_with_vat'].cumsum()
 
             # EXCLUDE COSM department items from commission calculations
             # IMPORTANT: COSM items COUNT toward achievement and running total
@@ -932,7 +933,7 @@ class CommissionService:
                     # Get the first bill that reached/exceeded target
                     target_bill_number = target_reached_bills.iloc[0]['bill_number']
                     target_bill_running_total = target_reached_bills.iloc[0]['running_total']
-                    target_bill_revenue = target_reached_bills.iloc[0]['revenue_before_vat']
+                    target_bill_revenue = target_reached_bills.iloc[0]['revenue_with_vat']
 
                     previous_total = target_bill_running_total - target_bill_revenue
 
@@ -951,11 +952,11 @@ class CommissionService:
                     # OPTIMIZATION: Sort items by selling price (ascending) and count row-by-row
                     # Only items that pushed over 100% and items after qualify for over 100% bonus
                     if previous_total < target and len(target_bill_qualifying) > 0:
-                        # Sort qualifying items by revenue_before_vat (ascending) - lowest price first
-                        target_bill_qualifying = target_bill_qualifying.sort_values('revenue_before_vat')
+                        # Sort qualifying items by revenue_with_vat (ascending) - lowest price first
+                        target_bill_qualifying = target_bill_qualifying.sort_values('revenue_with_vat')
 
-                        # Calculate running total for each item in this bill (using revenue_before_vat)
-                        target_bill_qualifying['item_running_total'] = previous_total + target_bill_qualifying['revenue_before_vat'].cumsum()
+                        # Calculate running total for each item in this bill (using revenue_with_vat)
+                        target_bill_qualifying['item_running_total'] = previous_total + target_bill_qualifying['revenue_with_vat'].cumsum()
 
                         # Find items that are at or after the 100% threshold
                         items_over_target = target_bill_qualifying[target_bill_qualifying['item_running_total'] >= target]
@@ -1880,6 +1881,7 @@ class CommissionService:
             final_df = pd.concat(all_combined_dfs, ignore_index=True)
 
             # 7. Upload to Google Sheets (optional)
+            sheets_warning = None
             if spreadsheet_id:
                 try:
                     from app.modules.commission.sheets_service import GoogleSheetsService
@@ -1889,8 +1891,9 @@ class CommissionService:
                         combined_commission_df=final_df,
                         sheet_name=sheet_name
                     )
-                except Exception:
-                    pass  # Sheets upload failure does not fail the calculation
+                except Exception as e:
+                    sheets_warning = f'Google Sheets upload failed: {e}'
+                    print(f"[WARN] {sheets_warning}")
 
             # 8. Build response
             stores_response = []
@@ -1934,7 +1937,7 @@ class CommissionService:
                     'employees':     employees_response,
                 })
 
-            return {
+            result = {
                 'success':            True,
                 'month':              month,
                 'year':               year,
@@ -1942,6 +1945,9 @@ class CommissionService:
                 'employees_processed': len(final_df),
                 'stores':             stores_response,
             }
+            if sheets_warning:
+                result['sheets_warning'] = sheets_warning
+            return result
 
         except Exception as e:
             return {'success': False, 'error': str(e)}
