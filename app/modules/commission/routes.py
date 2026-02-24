@@ -3,7 +3,6 @@ Commission API Routes
 """
 from flask import Blueprint, jsonify, request, Response
 from app.modules.commission.service import CommissionService, CommissionSettingsService, CommissionStoreSettingsService, CommissionRevenueService
-from app.modules.commission.sheets_service import GoogleSheetsService
 from app.core.auth.middleware import token_required, manager_required
 import pandas as pd
 import io
@@ -403,179 +402,6 @@ def calculate_store_commission_v2():
         }), 500
 
 
-@commission_bp.route('/store/calculate-from-sheet', methods=['GET'])
-def calculate_store_commission_from_sheet():
-    """
-    Calculate store and personal commissions for ALL stores by reading input data from Google Sheets,
-    then upload results back to the sheet
-
-    Query Parameters:
-        - spreadsheet_title: Google Sheets spreadsheet title/name (optional - if provided, will search for sheet by name)
-        - spreadsheet_id: Google Sheets spreadsheet ID (optional - direct ID access)
-        - sheet_name: Name of the sheet/tab (optional, default: 'Sheet1')
-
-    Note: Provide either spreadsheet_title OR spreadsheet_id (title takes precedence)
-
-    Returns:
-        JSON response with commission calculation results and upload status for all stores
-    """
-    try:
-        # Get query parameters
-        spreadsheet_title = request.args.get('spreadsheet_title')
-        spreadsheet_id = request.args.get('spreadsheet_id')
-        sheet_name = request.args.get('sheet_name', 'Sheet1')
-
-        # Initialize services
-        sheets_service = GoogleSheetsService()
-        commission_service = CommissionService()
-
-        # Find spreadsheet ID if title is provided
-        if spreadsheet_title:
-            try:
-                spreadsheet_id = sheets_service.find_spreadsheet_by_title(spreadsheet_title)
-            except Exception as e:
-                return jsonify({
-                    'success': False,
-                    'error': f'Could not find spreadsheet: {str(e)}'
-                }), 404
-
-        # Validate that we have a spreadsheet ID
-        if not spreadsheet_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required parameter: spreadsheet_title or spreadsheet_id'
-            }), 400
-
-        # Step 1: Clear output ranges
-        sheets_service.clear_output_ranges(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name
-        )
-
-        # Step 2: Get input data from Google Sheets
-        sheet_data = sheets_service.get_sheet_data(spreadsheet_id, sheet_name)
-
-        # Extract query period from sheet selector
-        from_date = sheet_data['query_period']['from_date']
-        to_date = sheet_data['query_period']['to_date']
-        month = sheet_data['query_period'].get('month')
-        year = sheet_data['query_period'].get('year')
-
-        # Parse month and year from selector
-        month_map = {
-            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
-            'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6,
-            'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12
-        }
-        month_num = month_map.get(month, 1) if isinstance(month, str) else month
-        year_num = year if isinstance(year, int) else int(year)
-
-        # Step 3: Process all stores
-        all_store_results = []
-        all_combined_dfs = []
-
-        for store_data in sheet_data['stores']:
-            store_code = store_data['store_code']
-
-            # Filter employees for this store
-            store_employees = [emp for emp in sheet_data['employees'] if emp['store_code'] == store_code]
-
-            if not store_employees:
-                # Skip stores with no employees
-                continue
-
-            # Calculate store commission
-            store_commission_result = commission_service.calculate_store_commission_v2(
-                store_code=store_code,
-                store_target=store_data['store_target'],
-                store_fp_ratio_target=store_data['store_fp_ratio_target'],
-                query_date={'from_date': from_date, 'to_date': to_date},
-                employees=store_employees
-            )
-
-            # Calculate personal commission
-            personal_commission_df = commission_service.calculate_personal_commissions(
-                month=month_num,
-                year=year_num,
-                employees=store_employees,
-                store_code=store_code
-            )
-
-            # Combine both commissions
-            combined_commission_df = commission_service.calculate_combined_commission(
-                store_commission_result=store_commission_result,
-                personal_commission_df=personal_commission_df
-            )
-
-            # Collect results
-            all_store_results.append(store_commission_result)
-            all_combined_dfs.append(combined_commission_df)
-
-        # Step 4: Concatenate all employee DataFrames
-        if not all_combined_dfs:
-            return jsonify({
-                'success': False,
-                'error': 'No employees found in any store'
-            }), 400
-
-        final_combined_df = pd.concat(all_combined_dfs, ignore_index=True)
-
-        # Step 5: Upload results back to Google Sheets
-        sheets_service.upload_commission_results(
-            spreadsheet_id=spreadsheet_id,
-            store_commission_results=all_store_results,
-            combined_commission_df=final_combined_df,
-            sheet_name=sheet_name
-        )
-
-        # Step 6: Prepare summary for all stores
-        total_employees = len(final_combined_df)
-        total_commission = float(final_combined_df['total_handout_commission'].sum())
-
-        store_summaries = []
-        for store_result in all_store_results:
-            store_code = store_result['store_code']
-            store_df = final_combined_df[final_combined_df['store_code'] == store_code]
-            store_summaries.append({
-                'store_code': store_code,
-                'achievement_pct': store_result.get('achievement_pct', 0),
-                'actual_fp_ratio': store_result.get('actual_fp_ratio', 0),
-                'eligible': store_result.get('eligible', False),
-                'employee_count': len(store_df),
-                'total_commission': float(store_df['total_handout_commission'].sum())
-            })
-
-        return jsonify({
-            'success': True,
-            'message': 'Commission calculated and uploaded to sheet successfully for all stores',
-            'data': {
-                'total_stores': len(all_store_results),
-                'total_employees': total_employees,
-                'total_commission': total_commission,
-                'stores': store_summaries,
-                'period': {
-                    'from_date': from_date,
-                    'to_date': to_date,
-                    'month': month,
-                    'year': year
-                }
-            }
-        }), 200
-
-    except ValueError as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 400
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
 @commission_bp.route('/employees', methods=['GET'])
 @token_required
 def get_commission_employees():
@@ -935,14 +761,12 @@ def calculate_commission():
     Trigger full commission calculation pipeline for a given month/year.
 
     Reads settings from PostgreSQL, fetches Oracle sales, applies revenue adjustments,
-    calculates all commission components, and optionally writes results to Google Sheets.
+    and calculates all commission components.
 
     Request Body:
         {
             "month": 3,
-            "year": 2026,
-            "spreadsheet_id": "..." (optional — if provided, results are written to Sheets),
-            "sheet_name": "Sheet1" (optional, default "Sheet1")
+            "year": 2026
         }
     """
     try:
@@ -964,9 +788,7 @@ def calculate_commission():
         service = CommissionService()
         result = service.calculate_commissions_for_period(
             month=month,
-            year=year,
-            spreadsheet_id=data.get('spreadsheet_id'),
-            sheet_name=data.get('sheet_name', 'Sheet1')
+            year=year
         )
 
         if not result.get('success', False):
