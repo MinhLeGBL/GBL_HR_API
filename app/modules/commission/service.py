@@ -371,21 +371,21 @@ class CommissionService:
         Returns:
             Dict with keys: 'hand_carry', 'suitcase', 'jewelry', 'non_jewelry'
         """
+        # Priority chain (cascading): hand_carry → suitcase → jewelry → non-jewelry
+        # Each step removes matched items from the remainder so categories never overlap.
         # 1. Hand carry (highest priority) — by UPC match
         hand_carry_df = sales_df[sales_df['upc_clean'].isin(hand_carry_upcs)].copy()
-        non_hand_carry_df = sales_df[~sales_df['upc_clean'].isin(hand_carry_upcs)].copy()
+        remainder = sales_df[~sales_df['upc_clean'].isin(hand_carry_upcs)]
 
-        # 2. Suitcase (TVL/TIT)
-        suitcase_df = non_hand_carry_df[non_hand_carry_df['vendor_code'].isin(SUITCASE_VENDORS)].copy()
+        # 2. Suitcase (TVL/TIT) — removed from remainder before jewelry check
+        suitcase_df = remainder[remainder['vendor_code'].isin(SUITCASE_VENDORS)].copy()
+        remainder = remainder[~remainder['vendor_code'].isin(SUITCASE_VENDORS)]
 
-        # 3. Jewelry (is_jewelry == 1)
-        jewelry_df = non_hand_carry_df[non_hand_carry_df['is_jewelry'] == 1].copy()
+        # 3. Jewelry (is_jewelry == 1) — from remainder after suitcase removed
+        jewelry_df = remainder[remainder['is_jewelry'] == 1].copy()
 
-        # 4. Non-jewelry = everything else (excluding hand carry, suitcase, jewelry)
-        non_jewelry_df = non_hand_carry_df[
-            (non_hand_carry_df['is_jewelry'] == 0) &
-            (~non_hand_carry_df['vendor_code'].isin(SUITCASE_VENDORS))
-        ].copy()
+        # 4. Non-jewelry = everything left
+        non_jewelry_df = remainder[remainder['is_jewelry'] == 0].copy()
 
         return {
             'hand_carry': hand_carry_df,
@@ -1998,6 +1998,8 @@ class CommissionSettingsService:
                     employee_code VARCHAR(50) NOT NULL,
                     month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
                     year INTEGER NOT NULL,
+                    -- is_manager is NOT used; kept for schema compat. The authoritative
+                    -- source is employee_manager_history, resolved at query time.
                     is_manager BOOLEAN DEFAULT FALSE,
                     personal_target BIGINT,
                     working_day INTEGER,
@@ -2574,8 +2576,10 @@ class CommissionRevenueService:
                     'store_code':           store_code,
                     'store_name':           emp['store_name'],
                     'store_target':         ss.get('store_target'),
+                    # Sum of tracked employees' personal revenue (not full store Oracle total).
+                    # Used as a preview indicator; the real store commission uses get_store_sales_data.
                     'store_total_adjusted': 0,
-                    'store_eligible':       False,
+                    'store_eligible':       False,  # Approximate — based on tracked employees only
                     'employees':            [],
                 }
 

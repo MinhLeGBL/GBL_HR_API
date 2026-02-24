@@ -175,9 +175,17 @@ def _start_ssh_tunnel():
 
 
 def _make_pg_connection(host, port):
-    """Create a PostgreSQL connection, trying psycopg2 then psycopg3."""
+    """Create a PostgreSQL connection, trying psycopg2 then psycopg3.
+
+    Import and connect are separated so a broken psycopg2 install
+    (import succeeds but connect raises) doesn't silently fall through to psycopg.
+    """
     try:
         import psycopg2
+    except ImportError:
+        psycopg2 = None
+
+    if psycopg2 is not None:
         return psycopg2.connect(
             host=host,
             port=port,
@@ -185,15 +193,15 @@ def _make_pg_connection(host, port):
             user=POSTGRES_CONFIG['username'],
             password=POSTGRES_CONFIG['password'],
         )
-    except ImportError:
-        import psycopg
-        return psycopg.connect(
-            host=host,
-            port=port,
-            dbname=POSTGRES_CONFIG['database'],
-            user=POSTGRES_CONFIG['username'],
-            password=POSTGRES_CONFIG['password'],
-        )
+
+    import psycopg
+    return psycopg.connect(
+        host=host,
+        port=port,
+        dbname=POSTGRES_CONFIG['database'],
+        user=POSTGRES_CONFIG['username'],
+        password=POSTGRES_CONFIG['password'],
+    )
 
 
 def get_postgres_connection():
