@@ -367,6 +367,7 @@ class HREmployeeService:
             new_sid = cursor.fetchone()[0]
 
             # Record initial store assignment in history
+            # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
             if store_id:
                 cursor.execute('''
                     INSERT INTO employee_store_history (employee_sid, store_id, effective_from)
@@ -449,6 +450,7 @@ class HREmployeeService:
             row = cursor.fetchone()
 
             # Insert store transfer history if store_id changed
+            # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
             new_store_id = updates.get('store_id')
             if 'store_id' in updates and new_store_id != current_store_id:
                 cursor.execute('''
@@ -562,6 +564,7 @@ class HREmployeeService:
                 cursor.close()
                 return {'success': False, 'error': 'Employee not found'}
 
+            # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
             cursor.execute('''
                 INSERT INTO employee_manager_history (employee_sid, is_manager, effective_from)
                 VALUES (%s, %s, CURRENT_DATE)

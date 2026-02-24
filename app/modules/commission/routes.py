@@ -11,6 +11,74 @@ import io
 commission_bp = Blueprint('commission', __name__, url_prefix='/api/v1/commission')
 
 
+def _parse_period(data, source='body'):
+    """Parse and validate month/year from request data.
+
+    Args:
+        data: dict with 'month' and 'year' keys
+        source: 'body' for JSON body, 'args' for query params
+
+    Returns:
+        (month, year, None) on success, or (None, None, error_response_tuple) on failure
+    """
+    month_raw = data.get('month')
+    year_raw = data.get('year')
+
+    if month_raw is None or year_raw is None:
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'Missing required field: month and year'
+        }), 400)
+
+    try:
+        month = int(month_raw)
+        year = int(year_raw)
+    except (ValueError, TypeError):
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'month and year must be integers'
+        }), 400)
+
+    if not (1 <= month <= 12):
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'month must be between 1 and 12'
+        }), 400)
+
+    if not (2000 <= year <= 2100):
+        return None, None, (jsonify({
+            'success': False,
+            'error': 'year must be between 2000 and 2100'
+        }), 400)
+
+    return month, year, None
+
+
+def _parse_json_body():
+    """Parse JSON request body, distinguishing parse failure from empty body.
+
+    Returns:
+        (data, None) on success, or (None, error_response_tuple) on failure
+    """
+    data = request.get_json(force=True, silent=True)
+    if data is None:
+        return None, (jsonify({
+            'success': False,
+            'error': 'Invalid or missing JSON body'
+        }), 400)
+    return data, None
+
+
+def _safe_int(value, field_name):
+    """Cast a value to int, returning (int_val, None) or (None, error_string)."""
+    if value is None:
+        return None, None  # None is allowed (nullable fields)
+    try:
+        return int(value), None
+    except (ValueError, TypeError):
+        return None, f'{field_name} must be an integer'
+
+
 @commission_bp.route('/personal/calculate', methods=['POST'])
 def calculate_personal_commission():
     """
@@ -543,29 +611,9 @@ def get_commission_employees():
         }
     """
     try:
-        month_str = request.args.get('month')
-        year_str = request.args.get('year')
-
-        if not month_str or not year_str:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required query parameters: month, year'
-            }), 400
-
-        try:
-            month = int(month_str)
-            year = int(year_str)
-        except ValueError:
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
-
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
 
         service = CommissionSettingsService()
         result = service.get_commission_employees(month, year)
@@ -617,12 +665,9 @@ def update_commission_employee(employee_code):
         }
     """
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            return jsonify({
-                'success': False,
-                'error': 'Request body is required'
-            }), 400
+        data, err = _parse_json_body()
+        if err:
+            return err
 
         required_fields = ['month', 'year', 'personal_target', 'working_day']
         for field in required_fields:
@@ -632,28 +677,25 @@ def update_commission_employee(employee_code):
                     'error': f'Missing required field: {field}'
                 }), 400
 
-        try:
-            month = int(data['month'])
-            year = int(data['year'])
-        except (ValueError, TypeError):
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
+        month, year, err = _parse_period(data)
+        if err:
+            return err
 
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        personal_target, pt_err = _safe_int(data['personal_target'], 'personal_target')
+        if pt_err:
+            return jsonify({'success': False, 'error': pt_err}), 400
+
+        working_day, wd_err = _safe_int(data['working_day'], 'working_day')
+        if wd_err:
+            return jsonify({'success': False, 'error': wd_err}), 400
 
         service = CommissionSettingsService()
         result = service.update_commission_settings(
             employee_code=employee_code,
             month=month,
             year=year,
-            personal_target=data['personal_target'],
-            working_day=data['working_day']
+            personal_target=personal_target,
+            working_day=working_day
         )
 
         if not result.get('success', False):
@@ -694,29 +736,9 @@ def get_commission_stores():
         }
     """
     try:
-        month_str = request.args.get('month')
-        year_str = request.args.get('year')
-
-        if not month_str or not year_str:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required query parameters: month, year'
-            }), 400
-
-        try:
-            month = int(month_str)
-            year = int(year_str)
-        except ValueError:
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
-
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
 
         service = CommissionStoreSettingsService()
         result = service.get_commission_stores(month, year)
@@ -763,12 +785,9 @@ def update_commission_store(store_code):
         }
     """
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            return jsonify({
-                'success': False,
-                'error': 'Request body is required'
-            }), 400
+        data, err = _parse_json_body()
+        if err:
+            return err
 
         for field in ['month', 'year']:
             if field not in data:
@@ -777,28 +796,25 @@ def update_commission_store(store_code):
                     'error': f'Missing required field: {field}'
                 }), 400
 
-        try:
-            month = int(data['month'])
-            year = int(data['year'])
-        except (ValueError, TypeError):
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
+        month, year, err = _parse_period(data)
+        if err:
+            return err
 
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        store_target, st_err = _safe_int(data.get('store_target'), 'store_target')
+        if st_err:
+            return jsonify({'success': False, 'error': st_err}), 400
+
+        fp_ratio, fp_err = _safe_int(data.get('fp_ratio_target'), 'fp_ratio_target')
+        if fp_err:
+            return jsonify({'success': False, 'error': fp_err}), 400
 
         service = CommissionStoreSettingsService()
         result = service.update_commission_store_settings(
             store_code=store_code,
             month=month,
             year=year,
-            store_target=data.get('store_target'),
-            fp_ratio_target=data.get('fp_ratio_target')
+            store_target=store_target,
+            fp_ratio_target=fp_ratio
         )
 
         if not result.get('success', False):
@@ -827,29 +843,9 @@ def get_commission_revenue():
         - year:  integer, required
     """
     try:
-        month_str = request.args.get('month')
-        year_str = request.args.get('year')
-
-        if not month_str or not year_str:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required query parameters: month, year'
-            }), 400
-
-        try:
-            month = int(month_str)
-            year = int(year_str)
-        except ValueError:
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
-
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
 
         service = CommissionRevenueService()
         result = service.get_revenue_breakdown(month, year)
@@ -889,12 +885,9 @@ def update_revenue_adjustments(employee_code):
                                hand_carry, suitcase
     """
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            return jsonify({
-                'success': False,
-                'error': 'Request body is required'
-            }), 400
+        data, err = _parse_json_body()
+        if err:
+            return err
 
         for field in ['month', 'year', 'adjustments']:
             if field not in data:
@@ -903,20 +896,9 @@ def update_revenue_adjustments(employee_code):
                     'error': f'Missing required field: {field}'
                 }), 400
 
-        try:
-            month = int(data['month'])
-            year = int(data['year'])
-        except (ValueError, TypeError):
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
-
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        month, year, err = _parse_period(data)
+        if err:
+            return err
 
         if not isinstance(data['adjustments'], list):
             return jsonify({
@@ -964,12 +946,9 @@ def calculate_commission():
         }
     """
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            return jsonify({
-                'success': False,
-                'error': 'Request body is required'
-            }), 400
+        data, err = _parse_json_body()
+        if err:
+            return err
 
         for field in ['month', 'year']:
             if field not in data:
@@ -978,20 +957,9 @@ def calculate_commission():
                     'error': f'Missing required field: {field}'
                 }), 400
 
-        try:
-            month = int(data['month'])
-            year = int(data['year'])
-        except (ValueError, TypeError):
-            return jsonify({
-                'success': False,
-                'error': 'month and year must be integers'
-            }), 400
-
-        if not (1 <= month <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
+        month, year, err = _parse_period(data)
+        if err:
+            return err
 
         service = CommissionService()
         result = service.calculate_commissions_for_period(

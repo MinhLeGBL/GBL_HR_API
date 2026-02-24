@@ -91,6 +91,85 @@ VALID_REVENUE_TYPES = frozenset(REVENUE_TYPE_ORDER)
 # ============================================================================
 
 
+def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
+    """
+    Shared query: active STORE employees with period-accurate store/manager
+    assignment, commission settings, and retailpro_username.
+
+    Used by CommissionService._get_employees_with_username_for_period and
+    CommissionSettingsService.get_commission_employees.
+
+    Returns:
+        List of dicts with keys: store_code, store_name, employee_code,
+        full_name, join_date, retailpro_username, contract, is_manager,
+        personal_target, working_day.
+    """
+    last_day_num = calendar.monthrange(year, month)[1]
+    last_day_of_period = f'{year:04d}-{month:02d}-{last_day_num:02d}'
+
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT
+            COALESCE(esh_store.store_code, s.store_code) AS store_code,
+            COALESCE(esh_store.store_name, s.store_name) AS store_name,
+            e.employee_code,
+            e.full_name,
+            e.join_date,
+            e.retailpro_username,
+            ct.code AS contract,
+            CASE
+                WHEN %(last_day)s >= e.created_at::date
+                    THEN COALESCE(emh.is_manager, emh_first.is_manager, FALSE)
+                ELSE COALESCE(emh_first.is_manager, FALSE)
+            END AS is_manager,
+            cs.personal_target,
+            cs.working_day
+        FROM employees e
+        JOIN employee_types et  ON e.employee_type_id = et.id
+        JOIN contract_types ct  ON e.contract_type_id = ct.id
+        LEFT JOIN stores s      ON e.store_id = s.id
+        LEFT JOIN LATERAL (
+            SELECT esh.store_id
+            FROM employee_store_history esh
+            WHERE esh.employee_sid   = e.sid
+              AND esh.effective_from <= %(last_day)s
+            ORDER BY esh.effective_from DESC, esh.id DESC
+            LIMIT 1
+        ) esh_latest ON TRUE
+        LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
+        -- Latest manager history entry as of the query period
+        LEFT JOIN LATERAL (
+            SELECT emh.is_manager
+            FROM employee_manager_history emh
+            WHERE emh.employee_sid   = e.sid
+              AND emh.effective_from <= %(last_day)s
+            ORDER BY emh.effective_from DESC, emh.id DESC
+            LIMIT 1
+        ) emh ON TRUE
+        -- Earliest manager history entry (value when employee was first created)
+        LEFT JOIN LATERAL (
+            SELECT emh2.is_manager
+            FROM employee_manager_history emh2
+            WHERE emh2.employee_sid = e.sid
+            ORDER BY emh2.effective_from ASC, emh2.id ASC
+            LIMIT 1
+        ) emh_first ON TRUE
+        LEFT JOIN commission_settings cs
+            ON cs.employee_code = e.employee_code
+           AND cs.month = %(month)s
+           AND cs.year  = %(year)s
+        WHERE et.code = 'STORE'
+          AND e.is_active = TRUE
+          AND COALESCE(esh_latest.store_id, e.store_id) IS NOT NULL
+        ORDER BY COALESCE(esh_store.store_code, s.store_code), e.employee_code
+    ''', {'month': month, 'year': year, 'last_day': last_day_of_period})
+
+    rows = cursor.fetchall()
+    columns = [desc[0] for desc in cursor.description]
+    cursor.close()
+    return [dict(zip(columns, row)) for row in rows]
+
+
 class CommissionService:
     """Business logic layer for commission calculations"""
 
@@ -581,7 +660,7 @@ class CommissionService:
                 'is_jewelry':        props['is_jewelry'],
                 'discount_rate':     props['discount_rate'],
                 'category':          props['category'],
-                'department':        'ADJ',
+                'department':        'ADJ',  # Synthetic department; excluded from COSM filter naturally
                 'customer_sid':      None,
                 'revenue_before_vat': revenue_before_vat,
                 'revenue_with_vat':   revenue_with_vat,
@@ -598,9 +677,6 @@ class CommissionService:
         Get active store employees with period-accurate store/manager assignment,
         plus retailpro_username for Oracle sales matching.
 
-        Same LATERAL JOIN logic as CommissionSettingsService.get_commission_employees()
-        but returns a flat list and includes retailpro_username.
-
         Returns:
             Flat list of dicts: employee_code, full_name, join_date, retailpro_username,
             store_code, store_name, is_manager, personal_target, working_day
@@ -611,73 +687,9 @@ class CommissionService:
             if not conn:
                 return []
 
-            last_day_num = calendar.monthrange(year, month)[1]
-            last_day_of_period = f'{year:04d}-{month:02d}-{last_day_num:02d}'
-
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT
-                    COALESCE(esh_store.store_code, s.store_code) AS store_code,
-                    COALESCE(esh_store.store_name, s.store_name) AS store_name,
-                    e.employee_code,
-                    e.full_name,
-                    e.join_date,
-                    e.retailpro_username,
-                    ct.code AS contract,
-                    CASE
-                        WHEN %(last_day)s >= e.created_at::date
-                            THEN COALESCE(emh.is_manager, emh_first.is_manager, FALSE)
-                        ELSE COALESCE(emh_first.is_manager, FALSE)
-                    END AS is_manager,
-                    cs.personal_target,
-                    cs.working_day
-                FROM employees e
-                JOIN employee_types et  ON e.employee_type_id = et.id
-                JOIN contract_types ct  ON e.contract_type_id = ct.id
-                LEFT JOIN stores s      ON e.store_id = s.id
-                LEFT JOIN LATERAL (
-                    SELECT esh.store_id
-                    FROM employee_store_history esh
-                    WHERE esh.employee_sid   = e.sid
-                      AND esh.effective_from <= %(last_day)s
-                    ORDER BY esh.effective_from DESC, esh.id DESC
-                    LIMIT 1
-                ) esh_latest ON TRUE
-                LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
-                -- Latest manager history entry as of the query period
-                LEFT JOIN LATERAL (
-                    SELECT emh.is_manager
-                    FROM employee_manager_history emh
-                    WHERE emh.employee_sid   = e.sid
-                      AND emh.effective_from <= %(last_day)s
-                    ORDER BY emh.effective_from DESC, emh.id DESC
-                    LIMIT 1
-                ) emh ON TRUE
-                -- Earliest manager history entry (value when employee was first created)
-                LEFT JOIN LATERAL (
-                    SELECT emh2.is_manager
-                    FROM employee_manager_history emh2
-                    WHERE emh2.employee_sid = e.sid
-                    ORDER BY emh2.effective_from ASC, emh2.id ASC
-                    LIMIT 1
-                ) emh_first ON TRUE
-                LEFT JOIN commission_settings cs
-                    ON cs.employee_code = e.employee_code
-                   AND cs.month = %(month)s
-                   AND cs.year  = %(year)s
-                WHERE et.code = 'STORE'
-                  AND e.is_active = TRUE
-                  AND COALESCE(esh_latest.store_id, e.store_id) IS NOT NULL
-                ORDER BY COALESCE(esh_store.store_code, s.store_code), e.employee_code
-            ''', {'month': month, 'year': year, 'last_day': last_day_of_period})
-
-            rows = cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            cursor.close()
-
+            records = _query_store_employees(conn, month, year)
             result = []
-            for row in rows:
-                record = dict(zip(columns, row))
+            for record in records:
                 join_date = record['join_date']
                 contract = record.get('contract', '').upper() if record.get('contract') else ''
                 result.append({
@@ -2000,12 +2012,8 @@ class CommissionSettingsService:
         """
         Get active store employees grouped by store, with commission settings for the given period.
 
-        Store grouping and is_manager are resolved from history tables for period accuracy:
-        - Store: most recent employee_store_history row where effective_from <= last day of period,
-                 falls back to employees.store_id if no history exists.
-        - is_manager: commission_settings.is_manager takes precedence (per-period override);
-                      otherwise falls back to most recent employee_manager_history row where
-                      effective_from <= last day of period.
+        Uses shared _query_store_employees() for the LATERAL JOIN query, then groups
+        results by store for the settings UI.
 
         Args:
             month: Commission month (1-12)
@@ -2020,75 +2028,11 @@ class CommissionSettingsService:
             if not conn:
                 return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
 
-            # Compute the last calendar day of the period (e.g. 2025-02-28 for Feb 2025)
-            last_day_num = calendar.monthrange(year, month)[1]
-            last_day_of_period = f"{year:04d}-{month:02d}-{last_day_num:02d}"
-
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT
-                    COALESCE(esh_store.store_code, s.store_code) AS store_code,
-                    COALESCE(esh_store.store_name, s.store_name) AS store_name,
-                    e.employee_code,
-                    e.full_name,
-                    e.join_date,
-                    ct.code AS contract,
-                    CASE
-                        WHEN %(last_day)s >= e.created_at::date
-                            THEN COALESCE(emh.is_manager, emh_first.is_manager, FALSE)
-                        ELSE COALESCE(emh_first.is_manager, FALSE)
-                    END AS is_manager,
-                    cs.personal_target,
-                    cs.working_day
-                FROM employees e
-                JOIN employee_types et  ON e.employee_type_id = et.id
-                JOIN contract_types ct  ON e.contract_type_id = ct.id
-                LEFT JOIN stores s      ON e.store_id = s.id
-                -- period-accurate store: most recent history row <= last day of period
-                LEFT JOIN LATERAL (
-                    SELECT esh.store_id
-                    FROM employee_store_history esh
-                    WHERE esh.employee_sid   = e.sid
-                      AND esh.effective_from <= %(last_day)s
-                    ORDER BY esh.effective_from DESC, esh.id DESC
-                    LIMIT 1
-                ) esh_latest ON TRUE
-                LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
-                -- Latest manager history entry as of the query period
-                LEFT JOIN LATERAL (
-                    SELECT emh.is_manager
-                    FROM employee_manager_history emh
-                    WHERE emh.employee_sid   = e.sid
-                      AND emh.effective_from <= %(last_day)s
-                    ORDER BY emh.effective_from DESC, emh.id DESC
-                    LIMIT 1
-                ) emh ON TRUE
-                -- Earliest manager history entry (value when employee was first created)
-                LEFT JOIN LATERAL (
-                    SELECT emh2.is_manager
-                    FROM employee_manager_history emh2
-                    WHERE emh2.employee_sid = e.sid
-                    ORDER BY emh2.effective_from ASC, emh2.id ASC
-                    LIMIT 1
-                ) emh_first ON TRUE
-                LEFT JOIN commission_settings cs
-                    ON cs.employee_code = e.employee_code
-                   AND cs.month = %(month)s
-                   AND cs.year  = %(year)s
-                WHERE et.code = 'STORE'
-                  AND e.is_active = TRUE
-                  AND COALESCE(esh_latest.store_id, e.store_id) IS NOT NULL
-                ORDER BY COALESCE(esh_store.store_code, s.store_code), e.employee_code
-            ''', {'month': month, 'year': year, 'last_day': last_day_of_period})
-
-            rows = cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            cursor.close()
+            records = _query_store_employees(conn, month, year)
 
             # Group rows by store
             stores_map: Dict[str, Any] = {}
-            for row in rows:
-                record = dict(zip(columns, row))
+            for record in records:
                 store_code = record['store_code']
 
                 if store_code not in stores_map:

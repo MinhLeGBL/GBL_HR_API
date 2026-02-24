@@ -57,7 +57,10 @@ _MAX_TUNNEL_RETRIES = 3
 
 
 def _stop_tunnel(tunnel):
-    """Stop a tunnel and forcibly release its local port."""
+    """Stop a tunnel and forcibly release its local port.
+
+    Note: _server_list and _transport are private attrs tested with sshtunnel 0.4.x.
+    """
     if tunnel is None:
         return
     # 1. Shutdown + close the internal TCPServer sockets FIRST (these hold the port)
@@ -229,6 +232,10 @@ def get_postgres_connection():
             conn = _make_pg_connection('localhost', tunnel.local_bind_port)
             print(f"[OK] Connected to PostgreSQL via SSH tunnel (localhost:{tunnel.local_bind_port})")
             return conn
+        except ImportError:
+            print("ImportError: PostgreSQL driver not installed")
+            print("  Please install: pip install psycopg2-binary")
+            return None
         except Exception as error:
             print(f"[WARN] DB connection attempt {attempt}/{_MAX_TUNNEL_RETRIES} failed: {error}")
             # Tunnel might be half-dead — tear it down so next loop rebuilds it
