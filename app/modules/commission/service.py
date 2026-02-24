@@ -896,6 +896,21 @@ class CommissionService:
             # Sort bills chronologically
             bill_totals_df = bill_totals_df.sort_values(['sale_date', 'sale_time'])
 
+            # Prepend adjustments as a synthetic "first bill" so they shift the running
+            # total but never fall after the target-crossing bill. This means adjustment
+            # revenue affects WHEN the target is reached but never earns over-100% rate.
+            if emp_adjustments:
+                adj_total = sum(emp_adjustments.values())
+                if adj_total != 0:
+                    earliest_date = bill_totals_df['sale_date'].iloc[0] if len(bill_totals_df) > 0 else period_last_day
+                    adj_bill = pd.DataFrame([{
+                        'bill_number': '__ADJ__',
+                        'revenue_with_vat': adj_total,
+                        'sale_date': earliest_date,
+                        'sale_time': '00:00:00',  # Earliest possible time — always first
+                    }])
+                    bill_totals_df = pd.concat([adj_bill, bill_totals_df], ignore_index=True)
+
             # Calculate running total by BILL (WITH VAT) to find when 100% target was reached
             bill_totals_df['running_total'] = bill_totals_df['revenue_with_vat'].cumsum()
 
@@ -2384,14 +2399,28 @@ class CommissionRevenueService:
                 cursor.close()
                 return {'success': False, 'error': f'Employee not found: {employee_code}', 'not_found': True}
 
-            # Validate revenue_type values
+            # Validate each adjustment item
             for item in adjustments:
-                if item.get('revenue_type') not in VALID_REVENUE_TYPES:
+                if 'revenue_type' not in item or 'adjustment' not in item:
                     cursor.close()
                     return {
                         'success': False,
-                        'error': f"Invalid revenue_type: '{item.get('revenue_type')}'. "
+                        'error': 'Each adjustment must have revenue_type and adjustment'
+                    }
+                if item['revenue_type'] not in VALID_REVENUE_TYPES:
+                    cursor.close()
+                    return {
+                        'success': False,
+                        'error': f"Invalid revenue_type: '{item['revenue_type']}'. "
                                  f"Valid types: {sorted(VALID_REVENUE_TYPES)}"
+                    }
+                try:
+                    int(item['adjustment'])
+                except (ValueError, TypeError):
+                    cursor.close()
+                    return {
+                        'success': False,
+                        'error': f"adjustment must be an integer, got: {item['adjustment']!r}"
                     }
 
             # Upsert each adjustment
@@ -2487,14 +2516,17 @@ class CommissionRevenueService:
             store_settings_map = {s['store_code']: s for s in store_settings_result.get('stores', [])}
 
         # 3. Oracle sales + HC UPCs
+        oracle_warning = None
         try:
             sales_df = commission_service.repository.get_personal_commission_sales_data(year, month)
             sales_df.columns = sales_df.columns.str.lower()
             sales_df['upc_clean'] = sales_df['upc'].astype(str).str.strip()
             hand_carry_upcs = commission_service.repository.get_hand_carry_upcs()
-        except Exception:
+        except Exception as e:
             sales_df = pd.DataFrame()
             hand_carry_upcs = []
+            oracle_warning = f'Could not fetch live Oracle sales data: {e}'
+            print(f"[WARN] {oracle_warning}")
 
         # 4. Load saved adjustments
         adjustments = self._load_adjustments(month, year)
@@ -2564,7 +2596,7 @@ class CommissionRevenueService:
                 store_data['store_total_adjusted'] >= store_target * 0.7
             ) if store_target else False
 
-        return {
+        result = {
             'success': True,
             'month':   month,
             'year':    year,
@@ -2573,3 +2605,6 @@ class CommissionRevenueService:
             ],
             'stores': list(stores_map.values()),
         }
+        if oracle_warning:
+            result['oracle_warning'] = oracle_warning
+        return result
