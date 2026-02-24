@@ -2553,6 +2553,7 @@ class CommissionRevenueService:
             # Apply adjustments
             emp_adj = adjustments.get(employee_code, {})
             revenue = []
+            personal_total_vat = 0
             personal_total_adjusted = 0
             for rev_type in REVENUE_TYPE_ORDER:
                 base_amount = base.get(rev_type, 0)
@@ -2564,6 +2565,7 @@ class CommissionRevenueService:
                     'adjustment':      delta,
                     'adjusted_amount': adjusted,
                 })
+                personal_total_vat += base_amount
                 personal_total_adjusted += adjusted
 
             # Simplified personal eligibility indicator (50% of target)
@@ -2578,16 +2580,19 @@ class CommissionRevenueService:
                     'store_target':         ss.get('store_target'),
                     # Sum of tracked employees' personal revenue (not full store Oracle total).
                     # Used as a preview indicator; the real store commission uses get_store_sales_data.
+                    'store_total_vat':      0,
                     'store_total_adjusted': 0,
                     'store_eligible':       False,  # Approximate — based on tracked employees only
                     'employees':            [],
                 }
 
+            stores_map[store_code]['store_total_vat'] += personal_total_vat
             stores_map[store_code]['store_total_adjusted'] += personal_total_adjusted
             stores_map[store_code]['employees'].append({
                 'employee_code':         employee_code,
                 'full_name':             emp['full_name'],
                 'personal_target':       emp.get('personal_target'),
+                'personal_total_vat':    personal_total_vat,
                 'personal_total_adjusted': personal_total_adjusted,
                 'personal_eligible':     personal_eligible,
                 'revenue':               revenue,

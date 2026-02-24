@@ -280,3 +280,42 @@ class TestGetRevenueBreakdown:
             'full_price', 'markdown', 'jewelry', 'vhernier',
             'rosa_maria', 'hand_carry', 'suitcase'
         ]
+
+    @patch('app.modules.commission.service.CommissionStoreSettingsService')
+    @patch('app.modules.commission.service.CommissionService')
+    @patch('app.modules.commission.service.get_postgres_connection')
+    def test_vat_totals_returned(self, mock_get_conn, MockCommSvc, MockStoreSvc):
+        """personal_total_vat and store_total_vat reflect raw Oracle totals before adjustments."""
+        mock_comm = MockCommSvc.return_value
+        mock_comm._get_employees_with_username_for_period.return_value = [
+            {'store_code': 'S01', 'store_name': 'Store 1',
+             'employee_code': 'GL001', 'full_name': 'Test',
+             'retailpro_username': None, 'personal_target': 0},
+        ]
+        mock_comm.repository.get_personal_commission_sales_data.return_value = pd.DataFrame()
+        mock_comm.repository.get_hand_carry_upcs.return_value = []
+        # _compute_revenue_by_type returns a dict of base amounts (all 0 when no sales)
+        mock_comm._compute_revenue_by_type.return_value = {}
+
+        MockStoreSvc.return_value.get_commission_stores.return_value = {
+            'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
+        }
+
+        # Adjustment: +100 on full_price
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [('GL001', 'full_price', 100)]
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = CommissionRevenueService().get_revenue_breakdown(3, 2026)
+
+        store = result['stores'][0]
+        emp = store['employees'][0]
+        # No Oracle sales → base amounts are all 0 → personal_total_vat = 0
+        assert emp['personal_total_vat'] == 0
+        # Adjustment adds 100 → personal_total_adjusted = 100
+        assert emp['personal_total_adjusted'] == 100
+        # Store totals mirror the single employee
+        assert store['store_total_vat'] == 0
+        assert store['store_total_adjusted'] == 100
