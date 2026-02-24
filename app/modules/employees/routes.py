@@ -189,6 +189,43 @@ def delete_employee(sid):
     return jsonify(result), 400
 
 
+@hr_employee_bp.route('/<int:sid>/manager-status', methods=['POST'])
+@admin_or_hr_it_manager_required
+def set_manager_status(sid):
+    """
+    Record a new is_manager (store commission tag) status change for a store employee.
+
+    Backend sets effective_from = today's date. History is append-only.
+
+    Request Body:
+        { "is_manager": true }
+
+    Response:
+        { "success": true, "is_manager": true, "effective_from": "2026-02-20" }
+    """
+    data = request.get_json(force=True, silent=True)
+
+    if not data or 'is_manager' not in data:
+        return jsonify({
+            'success': False,
+            'error': 'Missing required field: is_manager'
+        }), 400
+
+    if not isinstance(data['is_manager'], bool):
+        return jsonify({
+            'success': False,
+            'error': 'is_manager must be a boolean'
+        }), 400
+
+    result = hr_employee_service.set_manager_status(sid, data['is_manager'])
+
+    if result['success']:
+        return jsonify(result), 200
+    if 'not found' in result.get('error', '').lower():
+        return jsonify(result), 404
+    return jsonify(result), 400
+
+
 @hr_employee_bp.route('/<int:sid>/sync-retailpro', methods=['POST'])
 @admin_or_hr_it_manager_required
 def sync_retailpro(sid):
