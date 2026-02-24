@@ -151,6 +151,39 @@ FLASK_ENV=testing python -c "from app.main import app; print('OK')"
 python scripts/init_db.py
 ```
 
+## Frontend CR Documentation (API Change Requests)
+
+The frontend project (`GBL_HR_Frontend`) uses per-feature CR files to communicate API requirements:
+
+```
+GBL_HR_Frontend/docs/
+├── API_REFERENCE.md          # Slim index: architecture, endpoint tables, change log
+└── cr/
+    ├── commission.md          # Commission feature (CR #4–#10)
+    ├── employees.md           # Employee management (CR #2, #5)
+    ├── permissions.md         # Permissions & access (CR #1)
+    └── users.md               # User management & auth
+```
+
+### Status markers in CR files
+
+| Marker | Meaning |
+|--------|---------|
+| ⏳ | Requested by frontend — pending backend implementation |
+| Done | Implemented and confirmed |
+
+### When implementing a CR
+
+1. **Update `docs/cr/<feature>.md`** — actual response shapes, implementation notes, mark ⏳ → Done
+2. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
+3. **Never remove frontend-written sections** — only annotate with actual implementation details
+4. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
+
+### Skills
+
+- `/checkcr` — Reads all CR files and compares against backend implementation; reports pending/mismatched items
+- `/responsecr` — Updates CR files and API_REFERENCE.md to reflect current backend status
+
 ## Running the API Locally (dev/staging/feature branches)
 
 ### Kill stale processes and free ports first
