@@ -280,3 +280,103 @@ class TestGetRevenueBreakdown:
             'full_price', 'markdown', 'jewelry', 'vhernier',
             'rosa_maria', 'hand_carry', 'suitcase'
         ]
+
+    @patch('app.modules.commission.service.CommissionStoreSettingsService')
+    @patch('app.modules.commission.service.CommissionService')
+    @patch('app.modules.commission.service.get_postgres_connection')
+    def test_vat_totals_returned(self, mock_get_conn, MockCommSvc, MockStoreSvc):
+        """personal_total_vat and store_total_vat reflect raw Oracle totals before adjustments."""
+        mock_comm = MockCommSvc.return_value
+        mock_comm._get_employees_with_username_for_period.return_value = [
+            {'store_code': 'S01', 'store_name': 'Store 1',
+             'employee_code': 'GL001', 'full_name': 'Test',
+             'retailpro_username': None, 'personal_target': 0},
+        ]
+        mock_comm.repository.get_personal_commission_sales_data.return_value = pd.DataFrame()
+        mock_comm.repository.get_hand_carry_upcs.return_value = []
+        # _compute_revenue_by_type returns a dict of base amounts (all 0 when no sales)
+        mock_comm._compute_revenue_by_type.return_value = {}
+
+        MockStoreSvc.return_value.get_commission_stores.return_value = {
+            'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
+        }
+
+        # Adjustment: +100 on full_price
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [('GL001', 'full_price', 100)]
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = CommissionRevenueService().get_revenue_breakdown(3, 2026)
+
+        store = result['stores'][0]
+        emp = store['employees'][0]
+        # No Oracle sales → personal_total_vat = 0
+        assert emp['personal_total_vat'] == 0
+        # Adjustment adds 100 → personal_total_adjusted = 100
+        assert emp['personal_total_adjusted'] == 100
+        # Store totals mirror the single employee
+        assert store['store_total_vat'] == 0
+        assert store['store_fp_total_vat'] == 0
+        assert store['store_total_adjusted'] == 100
+
+    @patch('app.modules.commission.service.CommissionStoreSettingsService')
+    @patch('app.modules.commission.service.CommissionService')
+    @patch('app.modules.commission.service.get_postgres_connection')
+    def test_vat_totals_from_oracle_sales(self, mock_get_conn, MockCommSvc, MockStoreSvc):
+        """CR #12/#13: personal_total_vat uses revenue_with_vat; store_fp_total_vat sums FP with-VAT."""
+        # Oracle sales: 2 items — 1 full_price (discount 0%), 1 markdown (discount 50%)
+        sales_df = pd.DataFrame([
+            {'employee_username': 'user1', 'upc': 'U1', 'vendor_code': 'ABC',
+             'is_jewelry': 0, 'discount_rate': 0.0,
+             'revenue_with_vat': 1100, 'revenue_before_vat': 1000, 'category': 'BAGS'},
+            {'employee_username': 'user1', 'upc': 'U2', 'vendor_code': 'DEF',
+             'is_jewelry': 0, 'discount_rate': 0.5,
+             'revenue_with_vat': 550, 'revenue_before_vat': 500, 'category': 'BAGS'},
+        ])
+        sales_df['upc_clean'] = sales_df['upc'].str.strip()
+
+        mock_comm = MockCommSvc.return_value
+        mock_comm._get_employees_with_username_for_period.return_value = [
+            {'store_code': 'S01', 'store_name': 'Store 1',
+             'employee_code': 'GL001', 'full_name': 'Test',
+             'retailpro_username': 'user1', 'personal_target': 0},
+        ]
+        mock_comm.repository.get_personal_commission_sales_data.return_value = sales_df
+        mock_comm.repository.get_hand_carry_upcs.return_value = []
+        # base amounts use revenue_before_vat: FP=1000, MD=500
+        mock_comm._compute_revenue_by_type.return_value = {
+            'full_price': 1000, 'markdown': 500,
+        }
+        # _separate_sales_by_type returns cascaded DataFrames
+        mock_comm._separate_sales_by_type.return_value = {
+            'hand_carry': pd.DataFrame(),
+            'suitcase': pd.DataFrame(),
+            'jewelry': pd.DataFrame(),
+            'non_jewelry': sales_df,  # both items are non-jewelry
+        }
+
+        MockStoreSvc.return_value.get_commission_stores.return_value = {
+            'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
+        }
+
+        # No adjustments
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = CommissionRevenueService().get_revenue_breakdown(3, 2026)
+
+        store = result['stores'][0]
+        emp = store['employees'][0]
+        # personal_total_vat = sum(revenue_with_vat) = 1100 + 550 = 1650
+        assert emp['personal_total_vat'] == 1650
+        # personal_total_adjusted = sum(base_amounts) = 1000 + 500 = 1500 (before-VAT, no adj)
+        assert emp['personal_total_adjusted'] == 1500
+        # store_total_vat mirrors employee
+        assert store['store_total_vat'] == 1650
+        # store_fp_total_vat = FP item with-VAT only (discount <= 30%) = 1100
+        assert store['store_fp_total_vat'] == 1100
