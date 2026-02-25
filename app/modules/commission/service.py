@@ -2529,11 +2529,21 @@ class CommissionRevenueService:
             # 7-type base revenue totals from Oracle
             base = commission_service._compute_revenue_by_type(emp_sales, hand_carry_upcs)
 
-            # personal_total_vat = raw Oracle with-VAT total (before adjustments)
+            # CR #12: personal_total_vat = sum(revenue_with_vat) directly from Oracle,
+            # independent of the per-type base_amount breakdown (which uses before-VAT for most types).
             if len(emp_sales) > 0 and 'revenue_with_vat' in emp_sales.columns:
                 personal_total_vat = int(emp_sales['revenue_with_vat'].sum())
             else:
                 personal_total_vat = 0
+
+            # CR #13: full_price with-VAT total for this employee (for store FP ratio)
+            if len(emp_sales) > 0 and 'revenue_with_vat' in emp_sales.columns:
+                separated = commission_service._separate_sales_by_type(emp_sales, hand_carry_upcs)
+                non_jewelry = separated['non_jewelry']
+                fp_sales = non_jewelry[non_jewelry['discount_rate'] <= DISCOUNT_THRESHOLD]
+                personal_fp_vat = int(fp_sales['revenue_with_vat'].sum()) if len(fp_sales) > 0 else 0
+            else:
+                personal_fp_vat = 0
 
             # Apply adjustments
             emp_adj = adjustments.get(employee_code, {})
@@ -2564,12 +2574,14 @@ class CommissionRevenueService:
                     # Sum of tracked employees' personal revenue (not full store Oracle total).
                     # Used as a preview indicator; the real store commission uses get_store_sales_data.
                     'store_total_vat':      0,
+                    'store_fp_total_vat':   0,
                     'store_total_adjusted': 0,
                     'store_eligible':       False,  # Approximate — based on tracked employees only
                     'employees':            [],
                 }
 
             stores_map[store_code]['store_total_vat'] += personal_total_vat
+            stores_map[store_code]['store_fp_total_vat'] += personal_fp_vat
             stores_map[store_code]['store_total_adjusted'] += personal_total_adjusted
             stores_map[store_code]['employees'].append({
                 'employee_code':         employee_code,

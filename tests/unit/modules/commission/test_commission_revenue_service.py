@@ -312,29 +312,32 @@ class TestGetRevenueBreakdown:
 
         store = result['stores'][0]
         emp = store['employees'][0]
-        # No Oracle sales → base amounts are all 0 → personal_total_vat = 0
+        # No Oracle sales → personal_total_vat = 0
         assert emp['personal_total_vat'] == 0
         # Adjustment adds 100 → personal_total_adjusted = 100
         assert emp['personal_total_adjusted'] == 100
         # Store totals mirror the single employee
         assert store['store_total_vat'] == 0
+        assert store['store_fp_total_vat'] == 0
         assert store['store_total_adjusted'] == 100
 
     @patch('app.modules.commission.service.CommissionStoreSettingsService')
     @patch('app.modules.commission.service.CommissionService')
     @patch('app.modules.commission.service.get_postgres_connection')
-    def test_personal_total_vat_uses_revenue_with_vat(self, mock_get_conn, MockCommSvc, MockStoreSvc):
-        """CR #12: personal_total_vat must use revenue_with_vat, not revenue_before_vat."""
-        mock_comm = MockCommSvc.return_value
-
-        # Create Oracle sales data with distinct before/with-VAT values
+    def test_vat_totals_from_oracle_sales(self, mock_get_conn, MockCommSvc, MockStoreSvc):
+        """CR #12/#13: personal_total_vat uses revenue_with_vat; store_fp_total_vat sums FP with-VAT."""
+        # Oracle sales: 2 items — 1 full_price (discount 0%), 1 markdown (discount 50%)
         sales_df = pd.DataFrame([
-            {'employee_username': 'user1', 'revenue_with_vat': 1100, 'revenue_before_vat': 1000,
-             'upc': 'U1', 'vendor_code': 'XXX', 'is_jewelry': 0, 'discount_rate': 0, 'category': ''},
-            {'employee_username': 'user1', 'revenue_with_vat': 2200, 'revenue_before_vat': 2000,
-             'upc': 'U2', 'vendor_code': 'YYY', 'is_jewelry': 0, 'discount_rate': 0, 'category': ''},
+            {'employee_username': 'user1', 'upc': 'U1', 'vendor_code': 'ABC',
+             'is_jewelry': 0, 'discount_rate': 0.0,
+             'revenue_with_vat': 1100, 'revenue_before_vat': 1000, 'category': 'BAGS'},
+            {'employee_username': 'user1', 'upc': 'U2', 'vendor_code': 'DEF',
+             'is_jewelry': 0, 'discount_rate': 0.5,
+             'revenue_with_vat': 550, 'revenue_before_vat': 500, 'category': 'BAGS'},
         ])
+        sales_df['upc_clean'] = sales_df['upc'].str.strip()
 
+        mock_comm = MockCommSvc.return_value
         mock_comm._get_employees_with_username_for_period.return_value = [
             {'store_code': 'S01', 'store_name': 'Store 1',
              'employee_code': 'GL001', 'full_name': 'Test',
@@ -342,8 +345,17 @@ class TestGetRevenueBreakdown:
         ]
         mock_comm.repository.get_personal_commission_sales_data.return_value = sales_df
         mock_comm.repository.get_hand_carry_upcs.return_value = []
-        # _compute_revenue_by_type returns before-VAT based base_amounts
-        mock_comm._compute_revenue_by_type.return_value = {'full_price': 3000}
+        # base amounts use revenue_before_vat: FP=1000, MD=500
+        mock_comm._compute_revenue_by_type.return_value = {
+            'full_price': 1000, 'markdown': 500,
+        }
+        # _separate_sales_by_type returns cascaded DataFrames
+        mock_comm._separate_sales_by_type.return_value = {
+            'hand_carry': pd.DataFrame(),
+            'suitcase': pd.DataFrame(),
+            'jewelry': pd.DataFrame(),
+            'non_jewelry': sales_df,  # both items are non-jewelry
+        }
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {
             'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
@@ -360,6 +372,11 @@ class TestGetRevenueBreakdown:
 
         store = result['stores'][0]
         emp = store['employees'][0]
-        # personal_total_vat must be sum of revenue_with_vat (1100+2200=3300), NOT before_vat (3000)
-        assert emp['personal_total_vat'] == 3300
-        assert store['store_total_vat'] == 3300
+        # personal_total_vat = sum(revenue_with_vat) = 1100 + 550 = 1650
+        assert emp['personal_total_vat'] == 1650
+        # personal_total_adjusted = sum(base_amounts) = 1000 + 500 = 1500 (before-VAT, no adj)
+        assert emp['personal_total_adjusted'] == 1500
+        # store_total_vat mirrors employee
+        assert store['store_total_vat'] == 1650
+        # store_fp_total_vat = FP item with-VAT only (discount <= 30%) = 1100
+        assert store['store_fp_total_vat'] == 1100
