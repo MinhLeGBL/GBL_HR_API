@@ -1771,21 +1771,17 @@ class CommissionService:
         self,
         month: int,
         year: int,
-        spreadsheet_id: str = None,
-        sheet_name: str = 'Sheet1'
     ) -> Dict[str, Any]:
         """
         Full commission calculation pipeline for a given month/year.
 
         Reads employees and store settings from PostgreSQL, fetches Oracle sales data,
-        applies revenue adjustments, calculates all commission components, uploads results
-        to Google Sheets (if spreadsheet_id provided), and returns the per-employee breakdown.
+        applies revenue adjustments, calculates all commission components,
+        and returns the per-employee breakdown.
 
         Args:
             month: Commission month (1-12)
             year:  Commission year
-            spreadsheet_id: Optional Google Sheets spreadsheet ID for write-back
-            sheet_name: Sheet tab name (default 'Sheet1')
 
         Returns:
             Dict with success, month, year, stores (nested employees with result objects)
@@ -1907,22 +1903,7 @@ class CommissionService:
 
             final_df = pd.concat(all_combined_dfs, ignore_index=True)
 
-            # 7. Upload to Google Sheets (optional)
-            sheets_warning = None
-            if spreadsheet_id:
-                try:
-                    from app.modules.commission.sheets_service import GoogleSheetsService
-                    GoogleSheetsService().upload_commission_results(
-                        spreadsheet_id=spreadsheet_id,
-                        store_commission_results=all_store_results,
-                        combined_commission_df=final_df,
-                        sheet_name=sheet_name
-                    )
-                except Exception as e:
-                    sheets_warning = f'Google Sheets upload failed: {e}'
-                    print(f"[WARN] {sheets_warning}")
-
-            # 8. Build response
+            # 7. Build response
             stores_response = []
             for store_result in all_store_results:
                 sc = store_result['store_code']
@@ -1972,8 +1953,6 @@ class CommissionService:
                 'employees_processed': len(final_df),
                 'stores':             stores_response,
             }
-            if sheets_warning:
-                result['sheets_warning'] = sheets_warning
             return result
 
         except Exception as e:
@@ -2550,6 +2529,22 @@ class CommissionRevenueService:
             # 7-type base revenue totals from Oracle
             base = commission_service._compute_revenue_by_type(emp_sales, hand_carry_upcs)
 
+            # CR #12: personal_total_vat = sum(revenue_with_vat) directly from Oracle,
+            # independent of the per-type base_amount breakdown (which uses before-VAT for most types).
+            if len(emp_sales) > 0 and 'revenue_with_vat' in emp_sales.columns:
+                personal_total_vat = int(emp_sales['revenue_with_vat'].sum())
+            else:
+                personal_total_vat = 0
+
+            # CR #13: full_price with-VAT total for this employee (for store FP ratio)
+            if len(emp_sales) > 0 and 'revenue_with_vat' in emp_sales.columns:
+                separated = commission_service._separate_sales_by_type(emp_sales, hand_carry_upcs)
+                non_jewelry = separated['non_jewelry']
+                fp_sales = non_jewelry[non_jewelry['discount_rate'] <= DISCOUNT_THRESHOLD]
+                personal_fp_vat = int(fp_sales['revenue_with_vat'].sum()) if len(fp_sales) > 0 else 0
+            else:
+                personal_fp_vat = 0
+
             # Apply adjustments
             emp_adj = adjustments.get(employee_code, {})
             revenue = []
@@ -2578,16 +2573,21 @@ class CommissionRevenueService:
                     'store_target':         ss.get('store_target'),
                     # Sum of tracked employees' personal revenue (not full store Oracle total).
                     # Used as a preview indicator; the real store commission uses get_store_sales_data.
+                    'store_total_vat':      0,
+                    'store_fp_total_vat':   0,
                     'store_total_adjusted': 0,
                     'store_eligible':       False,  # Approximate — based on tracked employees only
                     'employees':            [],
                 }
 
+            stores_map[store_code]['store_total_vat'] += personal_total_vat
+            stores_map[store_code]['store_fp_total_vat'] += personal_fp_vat
             stores_map[store_code]['store_total_adjusted'] += personal_total_adjusted
             stores_map[store_code]['employees'].append({
                 'employee_code':         employee_code,
                 'full_name':             emp['full_name'],
                 'personal_target':       emp.get('personal_target'),
+                'personal_total_vat':    personal_total_vat,
                 'personal_total_adjusted': personal_total_adjusted,
                 'personal_eligible':     personal_eligible,
                 'revenue':               revenue,

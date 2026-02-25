@@ -326,23 +326,6 @@ class TestCalculateCommission:
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     @patch('app.modules.commission.routes.CommissionService')
-    def test_with_spreadsheet_id(self, MockService, mock_get_user, mock_verify, client):
-        _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_for_period.return_value = {
-            'success': True, 'month': 3, 'year': 2026, 'employees': []
-        }
-
-        body = self._valid_body(spreadsheet_id='abc123', sheet_name='Commission')
-        resp = client.post(self.URL, json=body, headers=_auth_headers())
-
-        assert resp.status_code == 200
-        call_kwargs = MockService.return_value.calculate_commissions_for_period.call_args
-        assert call_kwargs.kwargs.get('spreadsheet_id') == 'abc123'
-        assert call_kwargs.kwargs.get('sheet_name') == 'Commission'
-
-    @patch('app.core.auth.middleware.auth_service.verify_token')
-    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    @patch('app.modules.commission.routes.CommissionService')
     def test_exception_returns_500(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
         MockService.return_value.calculate_commissions_for_period.side_effect = Exception('boom')
