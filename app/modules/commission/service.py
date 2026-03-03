@@ -102,7 +102,7 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with keys: store_code, store_name, employee_code,
         full_name, join_date, retailpro_username, contract, is_manager,
-        personal_target, working_day.
+        personal_target, working_day, is_commission_active.
     """
     last_day_num = calendar.monthrange(year, month)[1]
     last_day_of_period = f'{year:04d}-{month:02d}-{last_day_num:02d}'
@@ -123,7 +123,8 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
                 ELSE COALESCE(emh_first.is_manager, FALSE)
             END AS is_manager,
             cs.personal_target,
-            cs.working_day
+            cs.working_day,
+            COALESCE(cs.is_commission_active, TRUE) AS is_commission_active
         FROM employees e
         JOIN employee_types et  ON e.employee_type_id = et.id
         JOIN contract_types ct  ON e.contract_type_id = ct.id
@@ -1982,6 +1983,7 @@ class CommissionSettingsService:
                     is_manager BOOLEAN DEFAULT FALSE,
                     personal_target BIGINT,
                     working_day INTEGER,
+                    is_commission_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (employee_code, month, year)
@@ -1990,6 +1992,11 @@ class CommissionSettingsService:
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_commission_settings_period
                 ON commission_settings (month, year)
+            ''')
+            # Migration: add is_commission_active if table already existed without it
+            cursor.execute('''
+                ALTER TABLE commission_settings
+                ADD COLUMN IF NOT EXISTS is_commission_active BOOLEAN DEFAULT TRUE
             ''')
             conn.commit()
             cursor.close()
@@ -2046,7 +2053,8 @@ class CommissionSettingsService:
                     'contract': record['contract'].lower() if record['contract'] else None,
                     'is_manager': record['is_manager'],
                     'personal_target': record['personal_target'],
-                    'working_day': record['working_day']
+                    'working_day': record['working_day'],
+                    'is_commission_active': record['is_commission_active']
                 })
 
             return {
@@ -2069,7 +2077,8 @@ class CommissionSettingsService:
         month: int,
         year: int,
         personal_target: int,
-        working_day: int
+        working_day: int,
+        is_commission_active: bool = True
     ) -> Dict[str, Any]:
         """
         Upsert commission settings for one employee for a given period.
@@ -2079,11 +2088,12 @@ class CommissionSettingsService:
         the frontend during commission calculation (never persisted).
 
         Args:
-            employee_code:   Employee code (e.g. "GL013")
-            month:           Commission month (1-12)
-            year:            Commission year
-            personal_target: Personal sales target (VND)
-            working_day:     Number of working days in the period
+            employee_code:        Employee code (e.g. "GL013")
+            month:                Commission month (1-12)
+            year:                 Commission year
+            personal_target:      Personal sales target (VND)
+            working_day:          Number of working days in the period
+            is_commission_active: Whether employee participates in commission (default True)
 
         Returns:
             Dict with 'success' bool and updated settings on success
@@ -2097,22 +2107,26 @@ class CommissionSettingsService:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO commission_settings
-                    (employee_code, month, year, personal_target, working_day, updated_at)
+                    (employee_code, month, year, personal_target, working_day,
+                     is_commission_active, updated_at)
                 VALUES
                     (%(employee_code)s, %(month)s, %(year)s,
                      %(personal_target)s, %(working_day)s,
-                     CURRENT_TIMESTAMP)
+                     %(is_commission_active)s, CURRENT_TIMESTAMP)
                 ON CONFLICT (employee_code, month, year) DO UPDATE SET
-                    personal_target = EXCLUDED.personal_target,
-                    working_day     = EXCLUDED.working_day,
-                    updated_at      = CURRENT_TIMESTAMP
-                RETURNING employee_code, month, year, is_manager, personal_target, working_day
+                    personal_target      = EXCLUDED.personal_target,
+                    working_day          = EXCLUDED.working_day,
+                    is_commission_active = EXCLUDED.is_commission_active,
+                    updated_at           = CURRENT_TIMESTAMP
+                RETURNING employee_code, month, year, is_manager, personal_target,
+                          working_day, is_commission_active
             ''', {
                 'employee_code': employee_code,
                 'month': month,
                 'year': year,
                 'personal_target': personal_target,
-                'working_day': working_day
+                'working_day': working_day,
+                'is_commission_active': is_commission_active
             })
 
             row = cursor.fetchone()

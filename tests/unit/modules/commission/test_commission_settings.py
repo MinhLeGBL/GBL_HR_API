@@ -209,7 +209,8 @@ class TestUpdateCommissionEmployee:
             month=12,
             year=2025,
             personal_target=650000000,
-            working_day=22
+            working_day=22,
+            is_commission_active=True
         )
 
     def test_no_auth_token(self, client):
@@ -333,12 +334,13 @@ class TestCommissionSettingsServiceGetEmployees:
     def test_success_groups_by_store(self, mock_get_conn):
         columns = [
             'store_code', 'store_name', 'employee_code', 'full_name',
-            'join_date', 'contract', 'is_manager', 'personal_target', 'working_day'
+            'join_date', 'retailpro_username', 'contract', 'is_manager',
+            'personal_target', 'working_day', 'is_commission_active'
         ]
         rows = [
-            ('RWT', 'Retail West', 'GL013', 'Nguyen A', date(2010, 7, 14), 'PERMANENT', True, 650000000, None),
-            ('RWT', 'Retail West', 'GL014', 'Nguyen B', date(2015, 3, 1),  'PERMANENT', False, 500000000, 22),
-            ('HBT', 'Retail HBT',  'GL020', 'Tran C',   date(2018, 9, 5),  'PROBATION', False, None,      None),
+            ('RWT', 'Retail West', 'GL013', 'Nguyen A', date(2010, 7, 14), None, 'PERMANENT', True, 650000000, None, True),
+            ('RWT', 'Retail West', 'GL014', 'Nguyen B', date(2015, 3, 1),  None, 'PERMANENT', False, 500000000, 22, True),
+            ('HBT', 'Retail HBT',  'GL020', 'Tran C',   date(2018, 9, 5),  None, 'PROBATION', False, None,      None, False),
         ]
         mock_cursor = self._make_cursor(rows, columns)
         mock_conn = MagicMock()
@@ -357,6 +359,10 @@ class TestCommissionSettingsServiceGetEmployees:
         assert len(rwt['employees']) == 2
         assert rwt['employees'][0]['join_date'] == '2010-07-14'
         assert rwt['employees'][0]['contract'] == 'permanent'
+        assert rwt['employees'][0]['is_commission_active'] is True
+
+        hbt = next(s for s in result['stores'] if s['store_code'] == 'HBT')
+        assert hbt['employees'][0]['is_commission_active'] is False
 
     @patch('app.modules.commission.service.get_postgres_connection')
     def test_no_connection(self, mock_get_conn):
@@ -371,7 +377,8 @@ class TestCommissionSettingsServiceGetEmployees:
     def test_empty_result(self, mock_get_conn):
         columns = [
             'store_code', 'store_name', 'employee_code', 'full_name',
-            'join_date', 'contract', 'is_manager', 'personal_target', 'working_day'
+            'join_date', 'retailpro_username', 'contract', 'is_manager',
+            'personal_target', 'working_day', 'is_commission_active'
         ]
         mock_cursor = self._make_cursor([], columns)
         mock_conn = MagicMock()
@@ -389,8 +396,8 @@ class TestCommissionSettingsServiceUpdate:
 
     @patch('app.modules.commission.service.get_postgres_connection')
     def test_success(self, mock_get_conn):
-        returned_row = ('GL013', 12, 2025, True, 650000000, 22)
-        columns = ['employee_code', 'month', 'year', 'is_manager', 'personal_target', 'working_day']
+        returned_row = ('GL013', 12, 2025, True, 650000000, 22, True)
+        columns = ['employee_code', 'month', 'year', 'is_manager', 'personal_target', 'working_day', 'is_commission_active']
 
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = returned_row

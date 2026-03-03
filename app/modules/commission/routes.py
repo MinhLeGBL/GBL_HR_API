@@ -515,13 +515,19 @@ def update_commission_employee(employee_code):
         if wd_err:
             return jsonify({'success': False, 'error': wd_err}), 400
 
+        # Optional: is_commission_active (default True)
+        is_commission_active = data.get('is_commission_active', True)
+        if not isinstance(is_commission_active, bool):
+            return jsonify({'success': False, 'error': 'is_commission_active must be a boolean'}), 400
+
         service = CommissionSettingsService()
         result = service.update_commission_settings(
             employee_code=employee_code,
             month=month,
             year=year,
             personal_target=personal_target,
-            working_day=working_day
+            working_day=working_day,
+            is_commission_active=is_commission_active
         )
 
         if not result.get('success', False):
