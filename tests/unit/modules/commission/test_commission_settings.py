@@ -210,7 +210,8 @@ class TestUpdateCommissionEmployee:
             year=2025,
             personal_target=650000000,
             working_day=22,
-            is_commission_active=True
+            is_commission_active=True,
+            store_code_override=None
         )
 
     def test_no_auth_token(self, client):
@@ -258,6 +259,50 @@ class TestUpdateCommissionEmployee:
         resp = client.put(self.URL, json={}, headers=self._manager_headers())
         assert resp.status_code == 400
         assert 'required' in resp.get_json()['error']
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.commission.routes.CommissionSettingsService')
+    def test_with_store_code_override(self, MockService, mock_get_user, mock_verify, client):
+        self._mock_manager(mock_verify, mock_get_user)
+
+        mock_svc = MockService.return_value
+        mock_svc.update_commission_settings.return_value = {
+            'success': True,
+            'data': {
+                'employee_code': 'GL013',
+                'month': 12,
+                'year': 2025,
+                'is_manager': True,
+                'personal_target': 650000000,
+                'working_day': 22,
+                'is_commission_active': True,
+                'store_code_override': 'HBT'
+            }
+        }
+
+        resp = client.put(self.URL, json=_put_payload(store_code_override='HBT'), headers=self._manager_headers())
+
+        assert resp.status_code == 200
+        assert resp.get_json()['data']['store_code_override'] == 'HBT'
+        mock_svc.update_commission_settings.assert_called_once_with(
+            employee_code='GL013',
+            month=12,
+            year=2025,
+            personal_target=650000000,
+            working_day=22,
+            is_commission_active=True,
+            store_code_override='HBT'
+        )
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_invalid_store_code_override_type(self, mock_get_user, mock_verify, client):
+        self._mock_manager(mock_verify, mock_get_user)
+
+        resp = client.put(self.URL, json=_put_payload(store_code_override=123), headers=self._manager_headers())
+        assert resp.status_code == 400
+        assert 'store_code_override' in resp.get_json()['error']
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
@@ -335,12 +380,13 @@ class TestCommissionSettingsServiceGetEmployees:
         columns = [
             'store_code', 'store_name', 'employee_code', 'full_name',
             'join_date', 'retailpro_username', 'contract', 'is_manager',
-            'personal_target', 'working_day', 'is_commission_active'
+            'personal_target', 'working_day', 'is_commission_active',
+            'store_code_override'
         ]
         rows = [
-            ('RWT', 'Retail West', 'GL013', 'Nguyen A', date(2010, 7, 14), None, 'PERMANENT', True, 650000000, None, True),
-            ('RWT', 'Retail West', 'GL014', 'Nguyen B', date(2015, 3, 1),  None, 'PERMANENT', False, 500000000, 22, True),
-            ('HBT', 'Retail HBT',  'GL020', 'Tran C',   date(2018, 9, 5),  None, 'PROBATION', False, None,      None, False),
+            ('RWT', 'Retail West', 'GL013', 'Nguyen A', date(2010, 7, 14), None, 'PERMANENT', True, 650000000, None, True, None),
+            ('RWT', 'Retail West', 'GL014', 'Nguyen B', date(2015, 3, 1),  None, 'PERMANENT', False, 500000000, 22, True, None),
+            ('HBT', 'Retail HBT',  'GL020', 'Tran C',   date(2018, 9, 5),  None, 'PROBATION', False, None,      None, False, None),
         ]
         mock_cursor = self._make_cursor(rows, columns)
         mock_conn = MagicMock()
@@ -365,6 +411,35 @@ class TestCommissionSettingsServiceGetEmployees:
         assert hbt['employees'][0]['is_commission_active'] is False
 
     @patch('app.modules.commission.service.get_postgres_connection')
+    def test_inactive_employee_with_settings_included(self, mock_get_conn):
+        """CR #15: inactive employees with commission_settings rows appear in results."""
+        columns = [
+            'store_code', 'store_name', 'employee_code', 'full_name',
+            'join_date', 'retailpro_username', 'contract', 'is_manager',
+            'personal_target', 'working_day', 'is_commission_active',
+            'store_code_override'
+        ]
+        rows = [
+            ('RWT', 'Retail West', 'GL013', 'Nguyen A', date(2010, 7, 14), None, 'PERMANENT', True, 650000000, 22, True, None),
+            # Inactive employee — included because they have commission_settings for this period
+            ('RWT', 'Retail West', 'GL099', 'Le D', date(2012, 1, 10), None, 'PERMANENT', False, 400000000, 20, False, None),
+        ]
+        mock_cursor = self._make_cursor(rows, columns)
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        from app.modules.commission.service import CommissionSettingsService
+        result = CommissionSettingsService().get_commission_employees(12, 2025)
+
+        assert result['success'] is True
+        rwt = result['stores'][0]
+        assert len(rwt['employees']) == 2
+        inactive_emp = next(e for e in rwt['employees'] if e['employee_code'] == 'GL099')
+        assert inactive_emp['is_commission_active'] is False
+        assert inactive_emp['personal_target'] == 400000000
+
+    @patch('app.modules.commission.service.get_postgres_connection')
     def test_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
 
@@ -378,7 +453,8 @@ class TestCommissionSettingsServiceGetEmployees:
         columns = [
             'store_code', 'store_name', 'employee_code', 'full_name',
             'join_date', 'retailpro_username', 'contract', 'is_manager',
-            'personal_target', 'working_day', 'is_commission_active'
+            'personal_target', 'working_day', 'is_commission_active',
+            'store_code_override'
         ]
         mock_cursor = self._make_cursor([], columns)
         mock_conn = MagicMock()
@@ -396,8 +472,8 @@ class TestCommissionSettingsServiceUpdate:
 
     @patch('app.modules.commission.service.get_postgres_connection')
     def test_success(self, mock_get_conn):
-        returned_row = ('GL013', 12, 2025, True, 650000000, 22, True)
-        columns = ['employee_code', 'month', 'year', 'is_manager', 'personal_target', 'working_day', 'is_commission_active']
+        returned_row = ('GL013', 12, 2025, True, 650000000, 22, True, None)
+        columns = ['employee_code', 'month', 'year', 'is_manager', 'personal_target', 'working_day', 'is_commission_active', 'store_code_override']
 
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = returned_row
@@ -430,6 +506,30 @@ class TestCommissionSettingsServiceUpdate:
         )
 
         assert result['success'] is False
+
+    @patch('app.modules.commission.service.get_postgres_connection')
+    def test_success_with_store_override(self, mock_get_conn):
+        returned_row = ('GL013', 12, 2025, False, 650000000, 22, True, 'HBT')
+        columns = ['employee_code', 'month', 'year', 'is_manager', 'personal_target', 'working_day', 'is_commission_active', 'store_code_override']
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = returned_row
+        mock_cursor.description = [(col,) for col in columns]
+
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        from app.modules.commission.service import CommissionSettingsService
+        result = CommissionSettingsService().update_commission_settings(
+            employee_code='GL013', month=12, year=2025,
+            personal_target=650000000, working_day=22,
+            store_code_override='HBT'
+        )
+
+        assert result['success'] is True
+        assert result['data']['store_code_override'] == 'HBT'
+        mock_conn.commit.assert_called_once()
 
     @patch('app.modules.commission.service.get_postgres_connection')
     def test_db_exception_rolls_back(self, mock_get_conn):

@@ -93,8 +93,10 @@ VALID_REVENUE_TYPES = frozenset(REVENUE_TYPE_ORDER)
 
 def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
     """
-    Shared query: active STORE employees with period-accurate store/manager
+    Shared query: ALL store-type employees with period-accurate store/manager
     assignment, commission settings, and retailpro_username.
+    Includes active and inactive employees — is_commission_active is the
+    per-period authority on participation, not the global is_active flag.
 
     Used by CommissionService._get_employees_with_username_for_period and
     CommissionSettingsService.get_commission_employees.
@@ -102,7 +104,7 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with keys: store_code, store_name, employee_code,
         full_name, join_date, retailpro_username, contract, is_manager,
-        personal_target, working_day, is_commission_active.
+        personal_target, working_day, is_commission_active, store_code_override.
     """
     last_day_num = calendar.monthrange(year, month)[1]
     last_day_of_period = f'{year:04d}-{month:02d}-{last_day_num:02d}'
@@ -110,8 +112,9 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
     cursor = conn.cursor()
     cursor.execute('''
         SELECT
-            COALESCE(esh_store.store_code, s.store_code) AS store_code,
-            COALESCE(esh_store.store_name, s.store_name) AS store_name,
+            -- CR #15: store_code_override takes priority over history/default store
+            COALESCE(override_store.store_code, esh_store.store_code, s.store_code) AS store_code,
+            COALESCE(override_store.store_name, esh_store.store_name, s.store_name) AS store_name,
             e.employee_code,
             e.full_name,
             e.join_date,
@@ -124,7 +127,8 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             END AS is_manager,
             cs.personal_target,
             cs.working_day,
-            COALESCE(cs.is_commission_active, TRUE) AS is_commission_active
+            COALESCE(cs.is_commission_active, TRUE) AS is_commission_active,
+            cs.store_code_override
         FROM employees e
         JOIN employee_types et  ON e.employee_type_id = et.id
         JOIN contract_types ct  ON e.contract_type_id = ct.id
@@ -159,10 +163,11 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             ON cs.employee_code = e.employee_code
            AND cs.month = %(month)s
            AND cs.year  = %(year)s
+        -- CR #15: resolve override store name from store_code_override
+        LEFT JOIN stores override_store ON override_store.store_code = cs.store_code_override
         WHERE et.code = 'STORE'
-          AND e.is_active = TRUE
           AND COALESCE(esh_latest.store_id, e.store_id) IS NOT NULL
-        ORDER BY COALESCE(esh_store.store_code, s.store_code), e.employee_code
+        ORDER BY COALESCE(override_store.store_code, esh_store.store_code, s.store_code), e.employee_code
     ''', {'month': month, 'year': year, 'last_day': last_day_of_period})
 
     rows = cursor.fetchall()
@@ -1984,6 +1989,7 @@ class CommissionSettingsService:
                     personal_target BIGINT,
                     working_day INTEGER,
                     is_commission_active BOOLEAN DEFAULT TRUE,
+                    store_code_override VARCHAR(20) DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (employee_code, month, year)
@@ -1993,10 +1999,14 @@ class CommissionSettingsService:
                 CREATE INDEX IF NOT EXISTS idx_commission_settings_period
                 ON commission_settings (month, year)
             ''')
-            # Migration: add is_commission_active if table already existed without it
+            # Migrations: add columns if table already existed without them
             cursor.execute('''
                 ALTER TABLE commission_settings
                 ADD COLUMN IF NOT EXISTS is_commission_active BOOLEAN DEFAULT TRUE
+            ''')
+            cursor.execute('''
+                ALTER TABLE commission_settings
+                ADD COLUMN IF NOT EXISTS store_code_override VARCHAR(20) DEFAULT NULL
             ''')
             conn.commit()
             cursor.close()
@@ -2054,7 +2064,8 @@ class CommissionSettingsService:
                     'is_manager': record['is_manager'],
                     'personal_target': record['personal_target'],
                     'working_day': record['working_day'],
-                    'is_commission_active': record['is_commission_active']
+                    'is_commission_active': record['is_commission_active'],
+                    'store_code_override': record['store_code_override']
                 })
 
             return {
@@ -2078,7 +2089,8 @@ class CommissionSettingsService:
         year: int,
         personal_target: int,
         working_day: int,
-        is_commission_active: bool = True
+        is_commission_active: bool = True,
+        store_code_override: str = None
     ) -> Dict[str, Any]:
         """
         Upsert commission settings for one employee for a given period.
@@ -2094,6 +2106,7 @@ class CommissionSettingsService:
             personal_target:      Personal sales target (VND)
             working_day:          Number of working days in the period
             is_commission_active: Whether employee participates in commission (default True)
+            store_code_override:  Override store for this period (None = use history)
 
         Returns:
             Dict with 'success' bool and updated settings on success
@@ -2108,25 +2121,28 @@ class CommissionSettingsService:
             cursor.execute('''
                 INSERT INTO commission_settings
                     (employee_code, month, year, personal_target, working_day,
-                     is_commission_active, updated_at)
+                     is_commission_active, store_code_override, updated_at)
                 VALUES
                     (%(employee_code)s, %(month)s, %(year)s,
                      %(personal_target)s, %(working_day)s,
-                     %(is_commission_active)s, CURRENT_TIMESTAMP)
+                     %(is_commission_active)s, %(store_code_override)s,
+                     CURRENT_TIMESTAMP)
                 ON CONFLICT (employee_code, month, year) DO UPDATE SET
                     personal_target      = EXCLUDED.personal_target,
                     working_day          = EXCLUDED.working_day,
                     is_commission_active = EXCLUDED.is_commission_active,
+                    store_code_override  = EXCLUDED.store_code_override,
                     updated_at           = CURRENT_TIMESTAMP
                 RETURNING employee_code, month, year, is_manager, personal_target,
-                          working_day, is_commission_active
+                          working_day, is_commission_active, store_code_override
             ''', {
                 'employee_code': employee_code,
                 'month': month,
                 'year': year,
                 'personal_target': personal_target,
                 'working_day': working_day,
-                'is_commission_active': is_commission_active
+                'is_commission_active': is_commission_active,
+                'store_code_override': store_code_override
             })
 
             row = cursor.fetchone()

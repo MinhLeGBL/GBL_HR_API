@@ -520,6 +520,11 @@ def update_commission_employee(employee_code):
         if not isinstance(is_commission_active, bool):
             return jsonify({'success': False, 'error': 'is_commission_active must be a boolean'}), 400
 
+        # Optional: store_code_override (string or null to clear)
+        store_code_override = data.get('store_code_override')
+        if store_code_override is not None and not isinstance(store_code_override, str):
+            return jsonify({'success': False, 'error': 'store_code_override must be a string or null'}), 400
+
         service = CommissionSettingsService()
         result = service.update_commission_settings(
             employee_code=employee_code,
@@ -527,7 +532,8 @@ def update_commission_employee(employee_code):
             year=year,
             personal_target=personal_target,
             working_day=working_day,
-            is_commission_active=is_commission_active
+            is_commission_active=is_commission_active,
+            store_code_override=store_code_override
         )
 
         if not result.get('success', False):
