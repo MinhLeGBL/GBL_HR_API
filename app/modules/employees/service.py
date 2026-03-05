@@ -2,6 +2,7 @@
 HR Employee Service - PostgreSQL-based employee management for HR frontend
 """
 from typing import Dict, Any, List, Optional
+from datetime import date, datetime
 from app.core.database.connection import get_postgres_connection, get_oracle_connection
 
 
@@ -132,6 +133,51 @@ class HREmployeeService:
                 ON employee_store_history (employee_sid, effective_from DESC)
             ''')
 
+            # ── History: unified employee status snapshots (CR #16) ──
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS employee_status_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    employee_sid BIGINT NOT NULL REFERENCES employees(sid) ON DELETE CASCADE,
+                    period_month INT NOT NULL,
+                    period_year INT NOT NULL,
+                    is_active BOOLEAN NOT NULL,
+                    store_id BIGINT REFERENCES stores(id),
+                    department_id BIGINT NOT NULL REFERENCES departments(id),
+                    contract_type_id BIGINT NOT NULL REFERENCES contract_types(id),
+                    is_manager BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (employee_sid, period_month, period_year)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_esh_employee_period
+                ON employee_status_history (employee_sid, period_year DESC, period_month DESC)
+            ''')
+
+            # ── Backfill: initial snapshot for employees without any history ──
+            cursor.execute('''
+                INSERT INTO employee_status_history
+                    (employee_sid, period_month, period_year, is_active, store_id,
+                     department_id, contract_type_id, is_manager)
+                SELECT
+                    e.sid,
+                    EXTRACT(MONTH FROM e.join_date)::INT,
+                    EXTRACT(YEAR FROM e.join_date)::INT,
+                    e.is_active,
+                    e.store_id,
+                    e.department_id,
+                    e.contract_type_id,
+                    COALESCE(
+                        (SELECT emh.is_manager FROM employee_manager_history emh
+                         WHERE emh.employee_sid = e.sid
+                         ORDER BY emh.effective_from DESC, emh.id DESC LIMIT 1),
+                        FALSE
+                    )
+                FROM employees e
+                ON CONFLICT (employee_sid, period_month, period_year) DO NOTHING
+            ''')
+
             # ── Seed default employee if table is empty ──
             cursor.execute('SELECT COUNT(*) FROM employees')
             if cursor.fetchone()[0] == 0:
@@ -202,6 +248,26 @@ class HREmployeeService:
             return {'id': row[0], 'store_code': row[1], 'store_name': row[2], 'store_rp_sid': row[3]}
         return None
 
+    def _upsert_status_snapshot(self, cursor, employee_sid: int,
+                                period_month: int, period_year: int,
+                                is_active: bool, store_id, department_id: int,
+                                contract_type_id: int, is_manager: bool):
+        """Insert or update an employee status snapshot for a given period."""
+        cursor.execute('''
+            INSERT INTO employee_status_history
+                (employee_sid, period_month, period_year, is_active, store_id,
+                 department_id, contract_type_id, is_manager)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (employee_sid, period_month, period_year) DO UPDATE SET
+                is_active = EXCLUDED.is_active,
+                store_id = EXCLUDED.store_id,
+                department_id = EXCLUDED.department_id,
+                contract_type_id = EXCLUDED.contract_type_id,
+                is_manager = EXCLUDED.is_manager,
+                updated_at = NOW()
+        ''', (employee_sid, period_month, period_year, is_active, store_id,
+              department_id, contract_type_id, is_manager))
+
     def _build_employee_dict(self, row) -> Dict[str, Any]:
         """Build employee dict from a JOIN query row"""
         employee = {
@@ -232,9 +298,9 @@ class HREmployeeService:
                e.department_id, e.store_id, e.email,
                e.retailpro_username, e.retailpro_sid,
                e.is_active, e.join_date, e.created_at, e.updated_at,
-               (SELECT emh.is_manager FROM employee_manager_history emh
-                WHERE emh.employee_sid = e.sid
-                ORDER BY emh.effective_from DESC, emh.id DESC
+               (SELECT esh.is_manager FROM employee_status_history esh
+                WHERE esh.employee_sid = e.sid
+                ORDER BY esh.period_year DESC, esh.period_month DESC
                 LIMIT 1) AS is_manager
         FROM employees e
         JOIN employee_types et ON e.employee_type_id = et.id
@@ -366,13 +432,20 @@ class HREmployeeService:
 
             new_sid = cursor.fetchone()[0]
 
-            # Record initial store assignment in history
+            # Record initial store assignment in history (dual-write for transition)
             # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
             if store_id:
                 cursor.execute('''
                     INSERT INTO employee_store_history (employee_sid, store_id, effective_from)
                     VALUES (%s, %s, CURRENT_DATE)
                 ''', (new_sid, store_id))
+
+            # Record initial status snapshot (CR #16)
+            join_dt = datetime.strptime(join_date, '%Y-%m-%d')
+            self._upsert_status_snapshot(
+                cursor, new_sid, join_dt.month, join_dt.year,
+                is_active, store_id, department_id, contract_type_id, False
+            )
 
             conn.commit()
 
@@ -449,7 +522,7 @@ class HREmployeeService:
 
             row = cursor.fetchone()
 
-            # Insert store transfer history if store_id changed
+            # Insert store transfer history if store_id changed (dual-write for transition)
             # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
             new_store_id = updates.get('store_id')
             if 'store_id' in updates and new_store_id != current_store_id:
@@ -457,6 +530,26 @@ class HREmployeeService:
                     INSERT INTO employee_store_history (employee_sid, store_id, effective_from)
                     VALUES (%s, %s, CURRENT_DATE)
                 ''', (sid, new_store_id))
+
+            # Insert status snapshot if any tracked field changed (CR #16)
+            tracked_fields = ['is_active', 'store_id', 'department_id', 'contract_type_id']
+            if any(f in updates for f in tracked_fields):
+                cursor.execute(
+                    'SELECT is_active, store_id, department_id, contract_type_id FROM employees WHERE sid = %s',
+                    (sid,))
+                current = cursor.fetchone()
+                cursor.execute('''
+                    SELECT is_manager FROM employee_status_history
+                    WHERE employee_sid = %s ORDER BY period_year DESC, period_month DESC LIMIT 1
+                ''', (sid,))
+                mgr_row = cursor.fetchone()
+                is_manager = mgr_row[0] if mgr_row else False
+
+                today = date.today()
+                self._upsert_status_snapshot(
+                    cursor, sid, today.month, today.year,
+                    current[0], current[1], current[2], current[3], is_manager
+                )
 
             conn.commit()
 
@@ -565,6 +658,7 @@ class HREmployeeService:
                 return {'success': False, 'error': 'Employee not found'}
 
             # CURRENT_DATE uses the DB server's timezone (UTC on deployment)
+            # Dual-write to old table for transition
             cursor.execute('''
                 INSERT INTO employee_manager_history (employee_sid, is_manager, effective_from)
                 VALUES (%s, %s, CURRENT_DATE)
@@ -572,6 +666,18 @@ class HREmployeeService:
             ''', (sid, is_manager))
 
             row = cursor.fetchone()
+
+            # Also upsert status snapshot (CR #16)
+            cursor.execute(
+                'SELECT is_active, store_id, department_id, contract_type_id FROM employees WHERE sid = %s',
+                (sid,))
+            emp = cursor.fetchone()
+            today = date.today()
+            self._upsert_status_snapshot(
+                cursor, sid, today.month, today.year,
+                emp[0], emp[1], emp[2], emp[3], is_manager
+            )
+
             conn.commit()
             cursor.close()
 
