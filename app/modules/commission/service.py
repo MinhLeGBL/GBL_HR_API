@@ -98,6 +98,9 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
     Includes active and inactive employees — is_commission_active is the
     per-period authority on participation, not the global is_active flag.
 
+    Uses a single LATERAL JOIN on employee_status_history (CR #16) to get
+    the employee's state as of the requested period (nearest period <= target).
+
     Used by CommissionService._get_employees_with_username_for_period and
     CommissionSettingsService.get_commission_employees.
 
@@ -106,9 +109,6 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
         full_name, join_date, retailpro_username, contract, is_manager,
         personal_target, working_day, is_commission_active, store_code_override.
     """
-    last_day_num = calendar.monthrange(year, month)[1]
-    last_day_of_period = f'{year:04d}-{month:02d}-{last_day_num:02d}'
-
     cursor = conn.cursor()
     cursor.execute('''
         SELECT
@@ -120,11 +120,7 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             e.join_date,
             e.retailpro_username,
             ct.code AS contract,
-            CASE
-                WHEN %(last_day)s >= e.created_at::date
-                    THEN COALESCE(emh.is_manager, emh_first.is_manager, FALSE)
-                ELSE COALESCE(emh_first.is_manager, FALSE)
-            END AS is_manager,
+            COALESCE(esh.is_manager, FALSE) AS is_manager,
             cs.personal_target,
             cs.working_day,
             COALESCE(cs.is_commission_active, TRUE) AS is_commission_active,
@@ -133,32 +129,18 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
         JOIN employee_types et  ON e.employee_type_id = et.id
         JOIN contract_types ct  ON e.contract_type_id = ct.id
         LEFT JOIN stores s      ON e.store_id = s.id
+        -- Single LATERAL JOIN: employee status snapshot as of the requested period
         LEFT JOIN LATERAL (
-            SELECT esh.store_id
-            FROM employee_store_history esh
-            WHERE esh.employee_sid   = e.sid
-              AND esh.effective_from <= %(last_day)s
-            ORDER BY esh.effective_from DESC, esh.id DESC
+            SELECT esh.is_active, esh.store_id, esh.department_id,
+                   esh.contract_type_id, esh.is_manager
+            FROM employee_status_history esh
+            WHERE esh.employee_sid = e.sid
+              AND (esh.period_year < %(year)s
+                   OR (esh.period_year = %(year)s AND esh.period_month <= %(month)s))
+            ORDER BY esh.period_year DESC, esh.period_month DESC
             LIMIT 1
-        ) esh_latest ON TRUE
-        LEFT JOIN stores esh_store ON esh_latest.store_id = esh_store.id
-        -- Latest manager history entry as of the query period
-        LEFT JOIN LATERAL (
-            SELECT emh.is_manager
-            FROM employee_manager_history emh
-            WHERE emh.employee_sid   = e.sid
-              AND emh.effective_from <= %(last_day)s
-            ORDER BY emh.effective_from DESC, emh.id DESC
-            LIMIT 1
-        ) emh ON TRUE
-        -- Earliest manager history entry (value when employee was first created)
-        LEFT JOIN LATERAL (
-            SELECT emh2.is_manager
-            FROM employee_manager_history emh2
-            WHERE emh2.employee_sid = e.sid
-            ORDER BY emh2.effective_from ASC, emh2.id ASC
-            LIMIT 1
-        ) emh_first ON TRUE
+        ) esh ON TRUE
+        LEFT JOIN stores esh_store ON esh.store_id = esh_store.id
         LEFT JOIN commission_settings cs
             ON cs.employee_code = e.employee_code
            AND cs.month = %(month)s
@@ -166,9 +148,9 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
         -- CR #15: resolve override store name from store_code_override
         LEFT JOIN stores override_store ON override_store.store_code = cs.store_code_override
         WHERE et.code = 'STORE'
-          AND COALESCE(esh_latest.store_id, e.store_id) IS NOT NULL
+          AND COALESCE(esh.store_id, e.store_id) IS NOT NULL
         ORDER BY COALESCE(override_store.store_code, esh_store.store_code, s.store_code), e.employee_code
-    ''', {'month': month, 'year': year, 'last_day': last_day_of_period})
+    ''', {'month': month, 'year': year})
 
     rows = cursor.fetchall()
     columns = [desc[0] for desc in cursor.description]
