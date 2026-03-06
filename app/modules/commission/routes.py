@@ -462,9 +462,8 @@ def update_commission_employee(employee_code):
     """
     Create or update commission settings for a single employee for a given period.
 
-    Note: is_manager is NOT persisted here. It is determined at query time
-    from employee_manager_history and can be overridden at runtime by the
-    frontend during commission calculation (never saved).
+    Upserts commission_settings. Optionally upserts employee_status_history
+    when is_manager or contract are provided (CR #17).
 
     URL Parameter:
         - employee_code: string (e.g. "GL013")
@@ -474,7 +473,11 @@ def update_commission_employee(employee_code):
             "month": integer (1-12),
             "year": integer,
             "personal_target": integer (VND),
-            "working_day": integer
+            "working_day": integer,
+            "is_commission_active": boolean (optional, default true),
+            "store_code_override": string|null (optional),
+            "is_manager": boolean (optional, upserts to employee_status_history),
+            "contract": string (optional, e.g. "permanent", upserts to employee_status_history)
         }
 
     Returns:
@@ -525,6 +528,16 @@ def update_commission_employee(employee_code):
         if store_code_override is not None and not isinstance(store_code_override, str):
             return jsonify({'success': False, 'error': 'store_code_override must be a string or null'}), 400
 
+        # Optional CR #17: is_manager (bool) → upsert to employee_status_history
+        is_manager = data.get('is_manager')
+        if is_manager is not None and not isinstance(is_manager, bool):
+            return jsonify({'success': False, 'error': 'is_manager must be a boolean'}), 400
+
+        # Optional CR #17: contract (string code) → resolve and upsert to employee_status_history
+        contract = data.get('contract')
+        if contract is not None and not isinstance(contract, str):
+            return jsonify({'success': False, 'error': 'contract must be a string'}), 400
+
         service = CommissionSettingsService()
         result = service.update_commission_settings(
             employee_code=employee_code,
@@ -533,11 +546,15 @@ def update_commission_employee(employee_code):
             personal_target=personal_target,
             working_day=working_day,
             is_commission_active=is_commission_active,
-            store_code_override=store_code_override
+            store_code_override=store_code_override,
+            is_manager=is_manager,
+            contract=contract
         )
 
         if not result.get('success', False):
-            return jsonify(result), 500
+            error_msg = result.get('error', '')
+            status = 400 if ('not found' in error_msg.lower() or 'invalid' in error_msg.lower()) else 500
+            return jsonify(result), status
 
         return jsonify(result), 200
 

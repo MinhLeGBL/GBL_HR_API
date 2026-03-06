@@ -130,31 +130,49 @@ class CommissionQueries:
         ORDER BY d.STORE_CODE, YEAR_MONTH
     """
 
-    # Get store sales data with revenue breakdown
+    # Get store sales data with revenue breakdown (location-based, CR #21)
+    #
+    # Purpose: Sum ALL sales at a physical store register for store achievement/eligibility.
+    # Unlike EMPLOYEE_SALES_DATA (which filters by employee), this includes everything:
+    # regular employees, cross-store employees, sysadmin accounts, returns.
+    #
+    # Design decisions:
+    # - No INVN_SBS_ITEM/DCS JOINs: sysadmin and non-standard entries may lack inventory
+    #   records. INNER JOIN would silently drop them. We don't need department info here.
+    # - ACTUAL_REVENUE: ALL items, no exclusions. Matches reference spreadsheet store totals.
+    # - ACTUAL_FULL_PRICE_REVENUE: non-jewelry, non-suitcase, discount <= 30%.
+    #   Uses di.VEND_CODE (on DOCUMENT_ITEM) for vendor classification — no JOIN needed.
+    # - WJEW items: included in ACTUAL_REVENUE (like EMPLOYEE_SALES_DATA's EMPLOYEE_REVENUE),
+    #   but excluded from FP/markdown buckets via VEND_CODE-based classification (WJEW items
+    #   are jewelry vendors, so they're already excluded by the vendor filter).
     STORE_SALES_DATA = """
         SELECT
             d.STORE_CODE,
             st.STORE_NAME,
-            -- Total revenue
+            -- Total revenue: ALL items at this location (with VAT)
             ROUND(SUM(
                 CASE WHEN di.item_type = 2
                 THEN di.qty * -1
                 ELSE di.qty END * di.price
             ), 0) as ACTUAL_REVENUE,
 
-            -- Full price revenue (items with less or equal than 30% discount)
+            -- Full price revenue: non-jewelry, non-suitcase items with discount <= 30%
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
+                         AND di.VEND_CODE NOT IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                         AND di.VEND_CODE NOT IN ('TVL', 'TIT')
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
             ), 0) as ACTUAL_FULL_PRICE_REVENUE,
 
-            -- Discounted revenue (items with discount)
+            -- Discounted revenue: non-jewelry, non-suitcase items with discount > 30%
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
+                         AND di.VEND_CODE NOT IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                         AND di.VEND_CODE NOT IN ('TVL', 'TIT')
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
@@ -192,10 +210,11 @@ class CommissionQueries:
             cust.FIRST_NAME as EMPLOYEE_FULL_NAME,
 
             -- Total revenue by employee (excluding tax, after discount)
+            -- CR #20: flat 10% VAT (di.price / 1.1) instead of actual rate (di.price - di.tax_amt)
             ROUND(SUM(
                 CASE WHEN di.item_type = 2
                 THEN di.qty * -1
-                ELSE di.qty END * (di.price - di.tax_amt)
+                ELSE di.qty END * di.price / 1.1
             ), 0) as EMPLOYEE_REVENUE,
 
             -- Full price revenue by employee (items with <= 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
@@ -209,7 +228,7 @@ class CommissionQueries:
                              OR
                              (emp_store.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = emp_store.STORE_CODE)
                          )
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price / 1.1
                     ELSE 0
                 END
             ), 0) as EMPLOYEE_FP_REVENUE,
@@ -225,7 +244,7 @@ class CommissionQueries:
                              OR
                              (emp_store.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = emp_store.STORE_CODE)
                          )
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price / 1.1
                     ELSE 0
                 END
             ), 0) as EMPLOYEE_DISCOUNTED_REVENUE
@@ -287,8 +306,9 @@ class CommissionQueries:
             TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
             ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
                   di.price, 0)                                                    as revenue_with_vat,
+            -- CR #20: flat 10% VAT (di.price / 1.1) instead of actual rate (di.price - di.tax_amt)
             ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
-                  (di.price - di.tax_amt), 0)                                     as revenue_before_vat,
+                  di.price / 1.1, 0)                                              as revenue_before_vat,
             ROUND((1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) * 100, 2) / 100
                                                                                   as discount_rate,
             CASE

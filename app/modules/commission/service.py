@@ -123,7 +123,7 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             COALESCE(esh.is_manager, FALSE) AS is_manager,
             cs.personal_target,
             cs.working_day,
-            COALESCE(cs.is_commission_active, TRUE) AS is_commission_active,
+            COALESCE(cs.is_commission_active, esh.is_active, TRUE) AS is_commission_active,
             cs.store_code_override
         FROM employees e
         JOIN employee_types et  ON e.employee_type_id = et.id
@@ -569,18 +569,20 @@ class CommissionService:
         other_jw_mask = ~jewelry_df.index.isin(vhn_df.index) & ~jewelry_df.index.isin(rom_ear_df.index)
         other_jewelry_df = jewelry_df[other_jw_mask]
 
-        # Non-jewelry sub-types (revenue_before_vat)
+        # Non-jewelry sub-types
         fp_df = non_jewelry_df[non_jewelry_df['discount_rate'] <= DISCOUNT_THRESHOLD]
         md_df = non_jewelry_df[non_jewelry_df['discount_rate'] > DISCOUNT_THRESHOLD]
 
+        # CR #21 spec: Step 2 base_amount uses revenue_with_vat for ALL types.
+        # VAT conversion is handled internally by Step 3 (calculate endpoint).
         return {
-            'full_price': int(fp_df['revenue_before_vat'].sum()),
-            'markdown':   int(md_df['revenue_before_vat'].sum()),
-            'jewelry':    int(other_jewelry_df['revenue_before_vat'].sum()),
-            'vhernier':   int(vhn_df['revenue_before_vat'].sum()),
-            'rosa_maria': int(rom_ear_df['revenue_before_vat'].sum()),
+            'full_price': int(fp_df['revenue_with_vat'].sum()),
+            'markdown':   int(md_df['revenue_with_vat'].sum()),
+            'jewelry':    int(other_jewelry_df['revenue_with_vat'].sum()),
+            'vhernier':   int(vhn_df['revenue_with_vat'].sum()),
+            'rosa_maria': int(rom_ear_df['revenue_with_vat'].sum()),
             'hand_carry': int(hand_carry_df['revenue_with_vat'].sum()),
-            'suitcase':   int(suitcase_df['revenue_before_vat'].sum()),
+            'suitcase':   int(suitcase_df['revenue_with_vat'].sum()),
         }
 
     def _create_adjustment_rows(
@@ -2072,14 +2074,15 @@ class CommissionSettingsService:
         personal_target: int,
         working_day: int,
         is_commission_active: bool = True,
-        store_code_override: str = None
+        store_code_override: str = None,
+        is_manager: bool = None,
+        contract: str = None
     ) -> Dict[str, Any]:
         """
         Upsert commission settings for one employee for a given period.
 
-        Note: is_manager is NOT saved here — it is determined at query time
-        from employee_manager_history and is only overridden at runtime by
-        the frontend during commission calculation (never persisted).
+        CR #17: When is_manager or contract are provided, also upserts
+        employee_status_history for the target (month, year) period.
 
         Args:
             employee_code:        Employee code (e.g. "GL013")
@@ -2089,6 +2092,8 @@ class CommissionSettingsService:
             working_day:          Number of working days in the period
             is_commission_active: Whether employee participates in commission (default True)
             store_code_override:  Override store for this period (None = use history)
+            is_manager:           Override is_manager for this period (None = no change)
+            contract:             Contract type code for this period (None = no change)
 
         Returns:
             Dict with 'success' bool and updated settings on success
@@ -2100,6 +2105,17 @@ class CommissionSettingsService:
                 return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
 
             cursor = conn.cursor()
+
+            # CR #17: if is_manager or contract provided, upsert employee_status_history
+            if is_manager is not None or contract is not None:
+                snapshot_err = self._upsert_employee_status_snapshot(
+                    cursor, employee_code, month, year, is_manager, contract
+                )
+                if snapshot_err:
+                    conn.rollback()
+                    cursor.close()
+                    return snapshot_err
+
             cursor.execute('''
                 INSERT INTO commission_settings
                     (employee_code, month, year, personal_target, working_day,
@@ -2143,6 +2159,80 @@ class CommissionSettingsService:
         finally:
             if conn:
                 conn.close()
+
+    def _upsert_employee_status_snapshot(
+        self, cursor, employee_code: str, month: int, year: int,
+        is_manager: bool = None, contract: str = None
+    ):
+        """
+        CR #17: Upsert employee_status_history for a given period.
+        Carries forward tracked fields from the latest snapshot or employees table.
+
+        Returns None on success, or an error dict on failure.
+        """
+        # Look up the employee by code
+        cursor.execute('''
+            SELECT e.sid, e.is_active, e.store_id, e.department_id,
+                   e.contract_type_id
+            FROM employees e
+            WHERE e.employee_code = %s
+        ''', (employee_code,))
+        emp = cursor.fetchone()
+        if not emp:
+            return {'success': False, 'error': f'Employee not found: {employee_code}'}
+
+        employee_sid, emp_is_active, emp_store_id, emp_department_id, emp_contract_type_id = emp
+
+        # Get latest snapshot to carry forward values
+        cursor.execute('''
+            SELECT is_active, store_id, department_id, contract_type_id, is_manager
+            FROM employee_status_history
+            WHERE employee_sid = %s
+            ORDER BY period_year DESC, period_month DESC
+            LIMIT 1
+        ''', (employee_sid,))
+        latest = cursor.fetchone()
+
+        if latest:
+            snap_is_active, snap_store_id, snap_department_id, snap_contract_type_id, snap_is_manager = latest
+        else:
+            snap_is_active = emp_is_active
+            snap_store_id = emp_store_id
+            snap_department_id = emp_department_id
+            snap_contract_type_id = emp_contract_type_id
+            snap_is_manager = False
+
+        # Apply overrides from request
+        final_is_manager = is_manager if is_manager is not None else snap_is_manager
+        final_contract_type_id = snap_contract_type_id
+
+        if contract is not None:
+            cursor.execute(
+                'SELECT id FROM contract_types WHERE LOWER(code) = LOWER(%s)',
+                (contract,)
+            )
+            ct_row = cursor.fetchone()
+            if not ct_row:
+                return {'success': False, 'error': f'Invalid contract type: {contract}'}
+            final_contract_type_id = ct_row[0]
+
+        # Upsert the snapshot
+        cursor.execute('''
+            INSERT INTO employee_status_history
+                (employee_sid, period_month, period_year, is_active, store_id,
+                 department_id, contract_type_id, is_manager)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (employee_sid, period_month, period_year) DO UPDATE SET
+                is_active = EXCLUDED.is_active,
+                store_id = EXCLUDED.store_id,
+                department_id = EXCLUDED.department_id,
+                contract_type_id = EXCLUDED.contract_type_id,
+                is_manager = EXCLUDED.is_manager,
+                updated_at = NOW()
+        ''', (employee_sid, month, year, snap_is_active, snap_store_id,
+              snap_department_id, final_contract_type_id, final_is_manager))
+
+        return None
 
 
 class CommissionStoreSettingsService:
@@ -2573,10 +2663,6 @@ class CommissionRevenueService:
                 })
                 personal_total_adjusted += adjusted
 
-            # Simplified personal eligibility indicator (50% of target)
-            personal_target = emp.get('personal_target') or 0
-            personal_eligible = (personal_total_adjusted >= personal_target * 0.5) if personal_target else False
-
             if store_code not in stores_map:
                 ss = store_settings_map.get(store_code, {})
                 stores_map[store_code] = {
@@ -2588,7 +2674,6 @@ class CommissionRevenueService:
                     'store_total_vat':      0,
                     'store_fp_total_vat':   0,
                     'store_total_adjusted': 0,
-                    'store_eligible':       False,  # Approximate — based on tracked employees only
                     'employees':            [],
                 }
 
@@ -2601,16 +2686,25 @@ class CommissionRevenueService:
                 'personal_target':       emp.get('personal_target'),
                 'personal_total_vat':    personal_total_vat,
                 'personal_total_adjusted': personal_total_adjusted,
-                'personal_eligible':     personal_eligible,
                 'revenue':               revenue,
             })
 
-        # 6. Compute simplified store eligibility (70% of store target)
-        for store_data in stores_map.values():
-            store_target = store_data.get('store_target') or 0
-            store_data['store_eligible'] = (
-                store_data['store_total_adjusted'] >= store_target * 0.7
-            ) if store_target else False
+        # 6. CR #21: Replace employee-sum store totals with location-based Oracle totals
+        last_day_num = calendar.monthrange(year, month)[1]
+        start_date = f'{year:04d}-{month:02d}-01 00:00:00'
+        end_date = f'{year:04d}-{month:02d}-{last_day_num:02d} 23:59:59'
+
+        for store_code, store_data in stores_map.items():
+            try:
+                oracle_store = commission_service.repository.get_store_sales_data(
+                    store_code, start_date, end_date
+                )
+                if oracle_store:
+                    store_data['store_total_vat'] = int(oracle_store.get('ACTUAL_REVENUE', 0) or 0)
+                    store_data['store_fp_total_vat'] = int(oracle_store.get('ACTUAL_FULL_PRICE_REVENUE', 0) or 0)
+            except Exception as e:
+                print(f"[WARN] CR #21: Could not fetch location-based store data for {store_code}: {e}")
+                # Falls back to employee-sum totals (already set)
 
         result = {
             'success': True,

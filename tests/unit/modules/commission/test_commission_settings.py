@@ -211,7 +211,9 @@ class TestUpdateCommissionEmployee:
             personal_target=650000000,
             working_day=22,
             is_commission_active=True,
-            store_code_override=None
+            store_code_override=None,
+            is_manager=None,
+            contract=None
         )
 
     def test_no_auth_token(self, client):
@@ -292,7 +294,9 @@ class TestUpdateCommissionEmployee:
             personal_target=650000000,
             working_day=22,
             is_commission_active=True,
-            store_code_override='HBT'
+            store_code_override='HBT',
+            is_manager=None,
+            contract=None
         )
 
     @patch('app.core.auth.middleware.auth_service.verify_token')

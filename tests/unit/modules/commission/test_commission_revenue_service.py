@@ -296,6 +296,10 @@ class TestGetRevenueBreakdown:
         mock_comm.repository.get_hand_carry_upcs.return_value = []
         # _compute_revenue_by_type returns a dict of base amounts (all 0 when no sales)
         mock_comm._compute_revenue_by_type.return_value = {}
+        # CR #21: location-based store totals from Oracle
+        mock_comm.repository.get_store_sales_data.return_value = {
+            'ACTUAL_REVENUE': 0, 'ACTUAL_FULL_PRICE_REVENUE': 0
+        }
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {
             'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
@@ -316,7 +320,7 @@ class TestGetRevenueBreakdown:
         assert emp['personal_total_vat'] == 0
         # Adjustment adds 100 → personal_total_adjusted = 100
         assert emp['personal_total_adjusted'] == 100
-        # Store totals mirror the single employee
+        # CR #21: Store totals from location-based Oracle query (0 when no sales)
         assert store['store_total_vat'] == 0
         assert store['store_fp_total_vat'] == 0
         assert store['store_total_adjusted'] == 100
@@ -361,6 +365,11 @@ class TestGetRevenueBreakdown:
             'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
         }
 
+        # CR #21: location-based store totals from Oracle
+        mock_comm.repository.get_store_sales_data.return_value = {
+            'ACTUAL_REVENUE': 1650, 'ACTUAL_FULL_PRICE_REVENUE': 1100
+        }
+
         # No adjustments
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -376,7 +385,7 @@ class TestGetRevenueBreakdown:
         assert emp['personal_total_vat'] == 1650
         # personal_total_adjusted = sum(base_amounts) = 1000 + 500 = 1500 (before-VAT, no adj)
         assert emp['personal_total_adjusted'] == 1500
-        # store_total_vat mirrors employee
+        # CR #21: store_total_vat from location-based Oracle query
         assert store['store_total_vat'] == 1650
-        # store_fp_total_vat = FP item with-VAT only (discount <= 30%) = 1100
+        # CR #21: store_fp_total_vat from location-based Oracle query
         assert store['store_fp_total_vat'] == 1100
