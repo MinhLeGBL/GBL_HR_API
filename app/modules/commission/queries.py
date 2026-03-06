@@ -132,29 +132,24 @@ class CommissionQueries:
 
     # Get store sales data with revenue breakdown (location-based, CR #21)
     #
-    # Purpose: Sum ALL sales at a physical store register for store achievement/eligibility.
+    # Purpose: Sum classified sales at a physical store register for store achievement/eligibility.
     # Unlike EMPLOYEE_SALES_DATA (which filters by employee), this includes everything:
     # regular employees, cross-store employees, sysadmin accounts, returns.
     #
     # Design decisions:
     # - No INVN_SBS_ITEM/DCS JOINs: sysadmin and non-standard entries may lack inventory
     #   records. INNER JOIN would silently drop them. We don't need department info here.
-    # - ACTUAL_REVENUE: ALL items, no exclusions. Matches reference spreadsheet store totals.
+    # - Revenue is broken into 4 vendor-based buckets: full_price, markdown, jewelry, suitcase.
+    #   ACTUAL_REVENUE is computed in Python as the sum of these 4 (7-type filtered).
+    #   Items with NULL VEND_CODE are excluded (Oracle NOT IN returns NULL for NULLs).
     # - ACTUAL_FULL_PRICE_REVENUE: non-jewelry, non-suitcase, discount <= 30%.
     #   Uses di.VEND_CODE (on DOCUMENT_ITEM) for vendor classification — no JOIN needed.
-    # - WJEW items: included in ACTUAL_REVENUE (like EMPLOYEE_SALES_DATA's EMPLOYEE_REVENUE),
-    #   but excluded from FP/markdown buckets via VEND_CODE-based classification (WJEW items
-    #   are jewelry vendors, so they're already excluded by the vendor filter).
+    # - Hand carry items (UPC-based at employee level) are counted by their vendor code
+    #   at store level — they're already included in one of the vendor categories.
     STORE_SALES_DATA = """
         SELECT
             d.STORE_CODE,
             st.STORE_NAME,
-            -- Total revenue: ALL items at this location (with VAT)
-            ROUND(SUM(
-                CASE WHEN di.item_type = 2
-                THEN di.qty * -1
-                ELSE di.qty END * di.price
-            ), 0) as ACTUAL_REVENUE,
 
             -- Full price revenue: non-jewelry, non-suitcase items with discount <= 30%
             ROUND(SUM(
@@ -176,7 +171,25 @@ class CommissionQueries:
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
-            ), 0) as ACTUAL_DISCOUNTED_REVENUE
+            ), 0) as ACTUAL_DISCOUNTED_REVENUE,
+
+            -- Jewelry revenue: all jewelry vendor items (VHN, ROM, ATS, VIS, LUI, NAN, NAK, SPK, TED, BRT)
+            ROUND(SUM(
+                CASE
+                    WHEN di.VEND_CODE IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
+                    ELSE 0
+                END
+            ), 0) as ACTUAL_JEWELRY_REVENUE,
+
+            -- Suitcase revenue: suitcase vendor items (TVL, TIT)
+            ROUND(SUM(
+                CASE
+                    WHEN di.VEND_CODE IN ('TVL', 'TIT')
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
+                    ELSE 0
+                END
+            ), 0) as ACTUAL_SUITCASE_REVENUE
 
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID

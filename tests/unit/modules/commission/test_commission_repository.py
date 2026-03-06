@@ -89,11 +89,12 @@ class TestCommissionRepository:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.description = [
-            ("STORE_CODE",), ("STORE_NAME",), ("ACTUAL_REVENUE",),
+            ("STORE_CODE",), ("STORE_NAME",),
             ("ACTUAL_FULL_PRICE_REVENUE",), ("ACTUAL_DISCOUNTED_REVENUE",),
+            ("ACTUAL_JEWELRY_REVENUE",), ("ACTUAL_SUITCASE_REVENUE",),
         ]
         mock_cursor.fetchall.return_value = [
-            ("S01", "Store One", 100000, 80000, 20000),
+            ("S01", "Store One", 80000, 20000, 5000, 1000),
         ]
         mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
@@ -105,9 +106,10 @@ class TestCommissionRepository:
         assert result == {
             "STORE_CODE": "S01",
             "STORE_NAME": "Store One",
-            "ACTUAL_REVENUE": 100000,
             "ACTUAL_FULL_PRICE_REVENUE": 80000,
             "ACTUAL_DISCOUNTED_REVENUE": 20000,
+            "ACTUAL_JEWELRY_REVENUE": 5000,
+            "ACTUAL_SUITCASE_REVENUE": 1000,
         }
 
     @patch("app.modules.commission.repository.get_oracle_connection")
@@ -262,12 +264,13 @@ class TestCommissionRepository:
         # The method calls execute_query (and thus get_oracle_connection) once per store.
         # We simulate two successive calls with different results.
         mock_cursor.description = [
-            ("STORE_CODE",), ("STORE_NAME",), ("ACTUAL_REVENUE",),
+            ("STORE_CODE",), ("STORE_NAME",),
             ("ACTUAL_FULL_PRICE_REVENUE",), ("ACTUAL_DISCOUNTED_REVENUE",),
+            ("ACTUAL_JEWELRY_REVENUE",), ("ACTUAL_SUITCASE_REVENUE",),
         ]
         mock_cursor.fetchall.side_effect = [
-            [("S01", "Store One", 100000, 80000, 20000)],
-            [("S02", "Store Two", 200000, 150000, 50000)],
+            [("S01", "Store One", 80000, 20000, 0, 0)],
+            [("S02", "Store Two", 150000, 50000, 0, 0)],
         ]
         mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
@@ -280,8 +283,8 @@ class TestCommissionRepository:
 
         assert "S01" in result
         assert "S02" in result
-        assert result["S01"]["ACTUAL_REVENUE"] == 100000
-        assert result["S02"]["ACTUAL_REVENUE"] == 200000
+        assert result["S01"]["ACTUAL_FULL_PRICE_REVENUE"] == 80000
+        assert result["S02"]["ACTUAL_FULL_PRICE_REVENUE"] == 150000
 
     @patch("app.modules.commission.repository.get_oracle_connection")
     def test_get_multiple_stores_sales_data_empty_results(

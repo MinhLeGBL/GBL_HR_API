@@ -196,9 +196,12 @@ class CommissionService:
                 'achievement_pct': 0
             }
 
-        actual_revenue = store_data.get('ACTUAL_REVENUE', 0)
         actual_fp_revenue = store_data.get('ACTUAL_FULL_PRICE_REVENUE', 0)
         actual_discounted_revenue = store_data.get('ACTUAL_DISCOUNTED_REVENUE', 0)
+        actual_jewelry_revenue = store_data.get('ACTUAL_JEWELRY_REVENUE', 0)
+        actual_suitcase_revenue = store_data.get('ACTUAL_SUITCASE_REVENUE', 0)
+        # CR #21 V3: 7-type filtered total
+        actual_revenue = actual_fp_revenue + actual_discounted_revenue + actual_jewelry_revenue + actual_suitcase_revenue
         target_revenue = targets.get('TARGET_REVENUE', 0)
         target_fp_ratio = targets.get('TARGET_FP_RATIO', 0.0)
 
@@ -1145,9 +1148,12 @@ class CommissionService:
         # Get store sales data from repository
         store_data = self.repository.get_store_sales_data(store_code, from_date, to_date)
 
-        actual_revenue = store_data.get('ACTUAL_REVENUE', 0)
         actual_full_price_revenue = store_data.get('ACTUAL_FULL_PRICE_REVENUE', 0)
         actual_discounted_revenue = store_data.get('ACTUAL_DISCOUNTED_REVENUE', 0)
+        actual_jewelry_revenue = store_data.get('ACTUAL_JEWELRY_REVENUE', 0)
+        actual_suitcase_revenue = store_data.get('ACTUAL_SUITCASE_REVENUE', 0)
+        # CR #21 V3: 7-type filtered total (FP + markdown + jewelry + suitcase)
+        actual_revenue = actual_full_price_revenue + actual_discounted_revenue + actual_jewelry_revenue + actual_suitcase_revenue
 
         # STEP 1: Check Store Eligibility & Calculate Achievement
         achievement_pct = (actual_revenue / store_target * 100) if store_target > 0 else 0
@@ -2700,8 +2706,13 @@ class CommissionRevenueService:
                     store_code, start_date, end_date
                 )
                 if oracle_store:
-                    store_data['store_total_vat'] = int(oracle_store.get('ACTUAL_REVENUE', 0) or 0)
-                    store_data['store_fp_total_vat'] = int(oracle_store.get('ACTUAL_FULL_PRICE_REVENUE', 0) or 0)
+                    # CR #21 V3: store_total_vat = sum of 4 classified buckets (7-type filtered)
+                    fp = int(oracle_store.get('ACTUAL_FULL_PRICE_REVENUE', 0) or 0)
+                    md = int(oracle_store.get('ACTUAL_DISCOUNTED_REVENUE', 0) or 0)
+                    jewelry = int(oracle_store.get('ACTUAL_JEWELRY_REVENUE', 0) or 0)
+                    suitcase = int(oracle_store.get('ACTUAL_SUITCASE_REVENUE', 0) or 0)
+                    store_data['store_total_vat'] = fp + md + jewelry + suitcase
+                    store_data['store_fp_total_vat'] = fp
             except Exception as e:
                 print(f"[WARN] CR #21: Could not fetch location-based store data for {store_code}: {e}")
                 # Falls back to employee-sum totals (already set)

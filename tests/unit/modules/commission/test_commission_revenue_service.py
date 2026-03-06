@@ -298,7 +298,8 @@ class TestGetRevenueBreakdown:
         mock_comm._compute_revenue_by_type.return_value = {}
         # CR #21: location-based store totals from Oracle
         mock_comm.repository.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 0, 'ACTUAL_FULL_PRICE_REVENUE': 0
+            'ACTUAL_FULL_PRICE_REVENUE': 0, 'ACTUAL_DISCOUNTED_REVENUE': 0,
+            'ACTUAL_JEWELRY_REVENUE': 0, 'ACTUAL_SUITCASE_REVENUE': 0
         }
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {
@@ -367,7 +368,8 @@ class TestGetRevenueBreakdown:
 
         # CR #21: location-based store totals from Oracle
         mock_comm.repository.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1650, 'ACTUAL_FULL_PRICE_REVENUE': 1100
+            'ACTUAL_FULL_PRICE_REVENUE': 1100, 'ACTUAL_DISCOUNTED_REVENUE': 550,
+            'ACTUAL_JEWELRY_REVENUE': 0, 'ACTUAL_SUITCASE_REVENUE': 0
         }
 
         # No adjustments

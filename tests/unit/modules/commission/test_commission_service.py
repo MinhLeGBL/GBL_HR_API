@@ -90,9 +90,10 @@ class TestCheckStoreEligibility:
         # required_discounted = 100_000 * 2.0 = 200_000
         # actual_discounted = 150_000 < 200_000 => ineligible
         store_data = {
-            'ACTUAL_REVENUE': 1_000_000,
             'ACTUAL_FULL_PRICE_REVENUE': 700_000,
             'ACTUAL_DISCOUNTED_REVENUE': 150_000,
+            'ACTUAL_JEWELRY_REVENUE': 150_000,
+            'ACTUAL_SUITCASE_REVENUE': 0,
         }
         targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.80}
 
@@ -108,9 +109,10 @@ class TestCheckStoreEligibility:
         # required_discounted = 100_000 * 2.0 = 200_000
         # actual_discounted = 250_000 >= 200_000 => eligible
         store_data = {
-            'ACTUAL_REVENUE': 1_000_000,
             'ACTUAL_FULL_PRICE_REVENUE': 700_000,
             'ACTUAL_DISCOUNTED_REVENUE': 250_000,
+            'ACTUAL_JEWELRY_REVENUE': 50_000,
+            'ACTUAL_SUITCASE_REVENUE': 0,
         }
         targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.80}
 
@@ -507,9 +509,10 @@ class TestCalculateStoreCommissionV2:
         # fp_shortage = (0.80 - 0.70) * 1_000_000 = 100_000
         # required_discounted = 200_000, actual = 150_000
         mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_000_000,
             'ACTUAL_FULL_PRICE_REVENUE': 700_000,
             'ACTUAL_DISCOUNTED_REVENUE': 150_000,
+            'ACTUAL_JEWELRY_REVENUE': 150_000,
+            'ACTUAL_SUITCASE_REVENUE': 0,
         }
 
         result = service.calculate_store_commission_v2(
