@@ -220,10 +220,11 @@ class TestCommissionRepository:
         assert df.iloc[0]["sale_id"] == 1
         assert df.iloc[1]["employee_username"] == "jane.smith"
 
-        # Verify the year_month parameter was formatted correctly
+        # Verify date range parameters were formatted correctly
         call_args = mock_cursor.execute.call_args
         params = call_args[0][1]
-        assert params["year_month"] == "2025-01"
+        assert params["start_date"] == "2025-01-01 00:00:00"
+        assert params["end_date"] == "2025-01-31 23:59:59"
 
     @patch("app.modules.commission.repository.get_oracle_connection")
     def test_get_personal_commission_sales_data_returns_empty_dataframe(

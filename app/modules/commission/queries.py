@@ -116,16 +116,25 @@ class CommissionQueries:
         WHERE d.STATUS = 4
           AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
+          -- All sales and returns within the query period count
           AND d.invc_post_date >= :start_date
           AND d.invc_post_date <= :end_date
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.invc_post_date >= :start_date
-                AND d2.invc_post_date <= :end_date
-          )))
+          -- FUTURE: To also include next-month returns for same-period sales, replace
+          -- the date filter above with:
+          -- AND (
+          --     (d.invc_post_date >= :start_date AND d.invc_post_date <= :end_date)
+          --     OR
+          --     (di.ITEM_TYPE = 2
+          --      AND d.invc_post_date > :end_date
+          --      AND d.invc_post_date <= :next_month_end
+          --      AND EXISTS (
+          --          SELECT 1 FROM DOCUMENT d2
+          --          JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
+          --          WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
+          --            AND d2.invc_post_date >= :start_date
+          --            AND d2.invc_post_date <= :end_date
+          --     ))
+          -- )
         GROUP BY d.STORE_CODE, st.STORE_NAME, TO_CHAR(d.invc_post_date, 'YYYY-MM')
         ORDER BY d.STORE_CODE, YEAR_MONTH
     """
@@ -197,23 +206,37 @@ class CommissionQueries:
         WHERE d.STATUS = 4
           AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
+          AND d.STORE_CODE = :store_code
+          -- All sales and returns within the query period count
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND d.STORE_CODE = :store_code
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-                AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          )))
+          -- FUTURE: To also include next-month returns for same-period sales, replace
+          -- the date filter above with:
+          -- AND (
+          --     (d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          --      AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS'))
+          --     OR
+          --     (di.ITEM_TYPE = 2
+          --      AND d.invc_post_date > TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          --      AND d.invc_post_date <= TO_DATE(:next_month_end, 'YYYY-MM-DD HH24:MI:SS')
+          --      AND EXISTS (
+          --          SELECT 1 FROM DOCUMENT d2
+          --          JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
+          --          WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
+          --            AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          --            AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          --     ))
+          -- )
         GROUP BY d.STORE_CODE, st.STORE_NAME
     """
 
     # Get employee sales data for a specific store
     # UPDATED: Now uses EMPLOYEE table with CUSTOMER and STORE joins instead of EMPLOYEE_LIST_V
     # Returns employee_username (emp.USER_NAME) as the primary identifier for matching
+    #
+    # NOTE: FP/discounted revenue from this query does NOT exclude hand carry items.
+    # Hand carry exclusion is applied in the service layer by subtracting hand carry
+    # FP/discounted amounts computed from PERSONAL_COMMISSION_SALES_DATA + rps.carrier_item UPC lookup.
     EMPLOYEE_SALES_DATA = """
         SELECT
             cust.UDF4_STRING as EMPLOYEE_CODE,
@@ -230,7 +253,9 @@ class CommissionQueries:
                 ELSE di.qty END * di.price / 1.1
             ), 0) as EMPLOYEE_REVENUE,
 
-            -- Full price revenue by employee (items with <= 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
+            -- Full price revenue by employee (items with <= 30% total discount, excluding WJEW departments,
+            -- and sales from other stores)
+            -- Note: hand carry exclusion is done at the service layer (not query level)
             -- Exception: RHN and RWP employees can count transactions from both RHN and RWP stores
             ROUND(SUM(
                 CASE
@@ -246,7 +271,9 @@ class CommissionQueries:
                 END
             ), 0) as EMPLOYEE_FP_REVENUE,
 
-            -- Discounted revenue by employee (items with > 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
+            -- Discounted revenue by employee (items with > 30% total discount, excluding WJEW departments,
+            -- and sales from other stores)
+            -- Note: hand carry exclusion is done at the service layer (not query level)
             -- Exception: RHN and RWP employees can count transactions from both RHN and RWP stores
             ROUND(SUM(
                 CASE
@@ -274,8 +301,6 @@ class CommissionQueries:
           AND di.ITEM_TYPE in (1, 2)
           AND emp.USER_NAME IS NOT NULL
           AND di.EMPLOYEE1_LOGIN_NAME IS NOT NULL
-          AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
           -- Special handling for RHN and RWP stores: employees can overlap/work in both stores
           -- For RHN/RWP: include both RHN and RWP employees and sales from both stores
           -- For other stores: filter by employee's assigned store
@@ -284,6 +309,11 @@ class CommissionQueries:
               OR
               (:store_code NOT IN ('RHN', 'RWP') AND emp_store.STORE_CODE = :store_code)
           )
+          -- All sales and returns within the query period count
+          AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          -- FUTURE: To also include next-month returns for same-period sales, replace
+          -- the date filter above with the next-month return extension (see STORE_SALES_SUMMARY)
         GROUP BY cust.UDF4_STRING, emp.SID, emp.USER_NAME, emp_store.STORE_CODE, cust.FIRST_NAME
         ORDER BY EMPLOYEE_REVENUE DESC
     """
@@ -315,6 +345,7 @@ class CommissionQueries:
             d.BT_CUID                                                             as customer_sid,
             d.DOC_NO                                                              as bill_number,
             s.STORE_CODE                                                          as store_code,
+            d.STORE_CODE                                                          as doc_store_code,
             TRUNC(d.invc_post_date)                                               as sale_date,
             TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
             ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
@@ -340,9 +371,14 @@ class CommissionQueries:
         JOIN STORE s ON emp.BASE_STORE_SID = s.SID
         WHERE 1 = 1
           AND d.STATUS = 4
+          AND d.receipt_type IN (0, 1)
           AND di.ITEM_TYPE in (1, 2)
           AND emp.USER_NAME IS NOT NULL
           AND di.EMPLOYEE1_LOGIN_NAME IS NOT NULL
-          AND TO_CHAR(d.invc_post_date, 'YYYY-MM') = :year_month
+          -- All sales and returns within the query period count
+          AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          -- FUTURE: To also include next-month returns for same-period sales, replace
+          -- the date filter above with the next-month return extension (see STORE_SALES_SUMMARY)
         ORDER BY emp.SID, d.invc_post_date, d.DOC_NO
     """

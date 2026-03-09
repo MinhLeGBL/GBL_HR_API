@@ -1,6 +1,7 @@
 """
 Commission Repository for executing commission-related queries
 """
+import calendar
 from typing import List, Dict, Any, Optional
 import pandas as pd
 from app.core.database.connection import get_oracle_connection, get_postgres_connection
@@ -12,6 +13,19 @@ class CommissionRepository:
 
     def __init__(self):
         self.queries = CommissionQueries()
+
+    # FUTURE: Uncomment if next-month return policy is enabled (see queries.py comments)
+    # @staticmethod
+    # def _next_month_end(end_date: str) -> str:
+    #     """Compute last day of the month after end_date."""
+    #     year = int(end_date[:4])
+    #     month = int(end_date[5:7])
+    #     if month == 12:
+    #         next_year, next_month = year + 1, 1
+    #     else:
+    #         next_year, next_month = year, month + 1
+    #     last_day = calendar.monthrange(next_year, next_month)[1]
+    #     return f'{next_year:04d}-{next_month:02d}-{last_day:02d} 23:59:59'
 
     def execute_query(self, query: str, parameters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -133,8 +147,13 @@ class CommissionRepository:
             ['sale_id', 'employee_id', 'store_id', 'sale_date', 'sale_time',
              'revenue_before_vat', 'discount_rate', 'department']
         """
-        year_month = f"{year:04d}-{month:02d}"
-        parameters = {'year_month': year_month}
+        last_day = calendar.monthrange(year, month)[1]
+        start_date = f'{year:04d}-{month:02d}-01 00:00:00'
+        end_date = f'{year:04d}-{month:02d}-{last_day:02d} 23:59:59'
+        parameters = {
+            'start_date': start_date,
+            'end_date': end_date
+        }
 
         results = self.execute_query(self.queries.PERSONAL_COMMISSION_SALES_DATA, parameters)
 

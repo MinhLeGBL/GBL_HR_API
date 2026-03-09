@@ -713,7 +713,9 @@ class CommissionService:
         year: int,
         employees: List[Dict[str, Any]],
         store_code: str = None,
-        revenue_adjustments: Optional[Dict[str, Dict[str, int]]] = None
+        revenue_adjustments: Optional[Dict[str, Dict[str, int]]] = None,
+        preloaded_sales_df: Optional[pd.DataFrame] = None,
+        preloaded_hand_carry_upcs: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Calculate personal commissions for all employees based on the pseudocode algorithm
@@ -755,17 +757,18 @@ class CommissionService:
         last_day_num = calendar.monthrange(year, month)[1]
         period_last_day = date(year, month, last_day_num)
 
-        # 3. GET ALL SALES DATA AS PANDAS DATAFRAME (SINGLE QUERY)
-        # Returns DataFrame with columns: sale_id, upc, employee_code, bill_number, store_code,
-        # sale_date, sale_time, revenue_with_vat, revenue_before_vat, discount_rate,
-        # is_jewelry, vendor_code, category, department
-        all_sales_df = self.repository.get_personal_commission_sales_data(year, month)
+        # 3. GET ALL SALES DATA AS PANDAS DATAFRAME (use preloaded if available)
+        if preloaded_sales_df is not None:
+            all_sales_df = preloaded_sales_df
+        else:
+            all_sales_df = self.repository.get_personal_commission_sales_data(year, month)
+            all_sales_df.columns = all_sales_df.columns.str.lower()
 
-        # Convert column names to lowercase for easier access
-        all_sales_df.columns = all_sales_df.columns.str.lower()
-
-        # Query hand carry item UPC list from PostgreSQL (rps.carrier_item table)
-        hand_carry_upcs = self.repository.get_hand_carry_upcs()
+        # Query hand carry item UPC list (use preloaded if available)
+        if preloaded_hand_carry_upcs is not None:
+            hand_carry_upcs = preloaded_hand_carry_upcs
+        else:
+            hand_carry_upcs = self.repository.get_hand_carry_upcs()
 
         # Create mapping from employee_username to employee_sid for internal processing
         # Use employee_username (from Google Sheets "Employee Acc" column) to match EMPLOYEE.USER_NAME
@@ -1116,7 +1119,9 @@ class CommissionService:
         store_target: float,
         store_fp_ratio_target: float,
         query_date: Dict[str, str],
-        employees: List[Dict[str, Any]]
+        employees: List[Dict[str, Any]],
+        hand_carry_upcs: Optional[List[str]] = None,
+        all_sales_df: Optional[pd.DataFrame] = None
     ) -> Dict[str, Any]:
         """
         Calculate commission for a store following the updated pseudocode algorithm
@@ -1134,6 +1139,8 @@ class CommissionService:
                 - working_day_count: Number
                 - is_manager: Boolean
                 - is_probation: Boolean
+            hand_carry_upcs: Optional list of hand carry UPCs (from PostgreSQL rps.carrier_item)
+            all_sales_df: Optional row-level sales DataFrame for hand carry FP/discounted adjustment
 
         Returns:
             Dictionary containing commission calculation results
@@ -1215,6 +1222,47 @@ class CommissionService:
                         'fp_revenue': emp_sale.get('EMPLOYEE_FP_REVENUE', 0),
                         'disc_revenue': emp_sale.get('EMPLOYEE_DISCOUNTED_REVENUE', 0)
                     }
+
+        # Hand carry adjustment: EMPLOYEE_SALES_DATA FP/discounted includes hand carry items
+        # which should NOT count toward store commission tiers. Subtract hand carry FP/discounted
+        # amounts per employee using the row-level personal sales data.
+        # Uses doc_store_code (transaction store) to match the same-store filter in EMPLOYEE_SALES_DATA,
+        # since employees can sell at different stores and those cross-store sales are already excluded
+        # from FP/discounted by the query's CASE expression.
+        if hand_carry_upcs and all_sales_df is not None and len(all_sales_df) > 0:
+            hc_upc_set = set(hand_carry_upcs)
+            # Filter to hand carry items, non-WJEW department
+            hc_df = all_sales_df[
+                (all_sales_df['upc_clean'].isin(hc_upc_set)) &
+                (all_sales_df['department'] != 'WJEW')
+            ].copy()
+
+            if len(hc_df) > 0:
+                # Apply same store filter as EMPLOYEE_SALES_DATA FP/discounted CASE
+                # using doc_store_code (where the transaction happened, not employee's home store)
+                if store_code in ('RHN', 'RWP'):
+                    # For RHN/RWP: employees from either store, transactions at either store
+                    hc_df = hc_df[
+                        (hc_df['store_code'].isin(['RHN', 'RWP'])) &
+                        (hc_df['doc_store_code'].isin(['RHN', 'RWP']))
+                    ]
+                else:
+                    # For other stores: employee's home store matches AND transaction at same store
+                    hc_df = hc_df[
+                        (hc_df['store_code'] == store_code) &
+                        (hc_df['doc_store_code'] == store_code)
+                    ]
+
+                if len(hc_df) > 0:
+                    for emp_username, emp_data in employee_sales_lookup.items():
+                        emp_hc = hc_df[hc_df['employee_username'] == emp_username]
+                        if len(emp_hc) > 0:
+                            # FP hand carry: discount_rate <= 0.3 (matches EMPLOYEE_SALES_DATA FP CASE)
+                            fp_hc = emp_hc[emp_hc['discount_rate'] <= DISCOUNT_THRESHOLD]['revenue_before_vat'].sum()
+                            # Discounted hand carry: discount_rate > 0.3
+                            disc_hc = emp_hc[emp_hc['discount_rate'] > DISCOUNT_THRESHOLD]['revenue_before_vat'].sum()
+                            emp_data['fp_revenue'] = emp_data['fp_revenue'] - fp_hc
+                            emp_data['disc_revenue'] = emp_data['disc_revenue'] - disc_hc
 
         # STEP 2: Calculate Each Employee's Contribution to Store Pool
         employee_contributions = []
@@ -1857,6 +1905,13 @@ class CommissionService:
                     'is_probation':    is_probation,
                 })
 
+            # 5b. Load hand carry UPCs and row-level sales data once (shared by all stores)
+            hand_carry_upcs = self.repository.get_hand_carry_upcs()
+            all_sales_df = self.repository.get_personal_commission_sales_data(year, month)
+            all_sales_df.columns = all_sales_df.columns.str.lower()
+            if 'upc_clean' not in all_sales_df.columns and 'upc' in all_sales_df.columns:
+                all_sales_df['upc_clean'] = all_sales_df['upc'].astype(str).str.strip()
+
             # 6. Process each store
             all_combined_dfs = []
             all_store_results = []
@@ -1873,16 +1928,20 @@ class CommissionService:
                     store_target=store_target,
                     store_fp_ratio_target=store_fp_ratio,
                     query_date=query_date,
-                    employees=store_employees
+                    employees=store_employees,
+                    hand_carry_upcs=hand_carry_upcs,
+                    all_sales_df=all_sales_df
                 )
 
-                # Personal commission (with revenue adjustments applied)
+                # Personal commission (with revenue adjustments applied, using preloaded data)
                 personal_df = self.calculate_personal_commissions(
                     month=month,
                     year=year,
                     employees=store_employees,
                     store_code=store_code,
-                    revenue_adjustments=adjustments_dict
+                    revenue_adjustments=adjustments_dict,
+                    preloaded_sales_df=all_sales_df,
+                    preloaded_hand_carry_upcs=hand_carry_upcs
                 )
 
                 # Combine store + personal
