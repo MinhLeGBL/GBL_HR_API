@@ -213,7 +213,7 @@ class TestGetRevenueBreakdown:
         # CommissionService mock — no employees
         mock_comm = MockCommSvc.return_value
         mock_comm._get_employees_with_username_for_period.return_value = []
-        mock_comm.repository.get_personal_commission_sales_data.return_value = pd.DataFrame()
+        mock_comm.repository.get_all_sales_data.return_value = pd.DataFrame()
         mock_comm.repository.get_hand_carry_upcs.return_value = []
 
         # Store settings mock
@@ -231,7 +231,7 @@ class TestGetRevenueBreakdown:
         assert result['success'] is True
         assert result['month'] == 3
         assert result['year'] == 2026
-        assert len(result['revenue_types']) == 7
+        assert len(result['revenue_types']) == 9
         assert result['stores'] == []
 
     @patch('app.modules.commission.service.CommissionStoreSettingsService')
@@ -240,7 +240,7 @@ class TestGetRevenueBreakdown:
     def test_oracle_failure_returns_warning(self, mock_get_conn, MockCommSvc, MockStoreSvc):
         mock_comm = MockCommSvc.return_value
         mock_comm._get_employees_with_username_for_period.return_value = []
-        mock_comm.repository.get_personal_commission_sales_data.side_effect = Exception('Oracle down')
+        mock_comm.repository.get_all_sales_data.side_effect = Exception('Oracle down')
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {'success': True, 'stores': []}
 
@@ -262,7 +262,7 @@ class TestGetRevenueBreakdown:
     def test_revenue_types_in_response(self, mock_get_conn, MockCommSvc, MockStoreSvc):
         mock_comm = MockCommSvc.return_value
         mock_comm._get_employees_with_username_for_period.return_value = []
-        mock_comm.repository.get_personal_commission_sales_data.return_value = pd.DataFrame()
+        mock_comm.repository.get_all_sales_data.return_value = pd.DataFrame()
         mock_comm.repository.get_hand_carry_upcs.return_value = []
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {'success': True, 'stores': []}
@@ -278,7 +278,7 @@ class TestGetRevenueBreakdown:
         type_codes = [t['code'] for t in result['revenue_types']]
         assert type_codes == [
             'full_price', 'markdown', 'jewelry', 'vhernier',
-            'rosa_maria', 'hand_carry', 'suitcase'
+            'rosa_maria', 'hand_carry', 'suitcase', 'home_decor', 'other'
         ]
 
     @patch('app.modules.commission.service.CommissionStoreSettingsService')
@@ -292,15 +292,10 @@ class TestGetRevenueBreakdown:
              'employee_code': 'GL001', 'full_name': 'Test',
              'retailpro_username': None, 'personal_target': 0},
         ]
-        mock_comm.repository.get_personal_commission_sales_data.return_value = pd.DataFrame()
+        mock_comm.repository.get_all_sales_data.return_value = pd.DataFrame()
         mock_comm.repository.get_hand_carry_upcs.return_value = []
         # _compute_revenue_by_type returns a dict of base amounts (all 0 when no sales)
         mock_comm._compute_revenue_by_type.return_value = {}
-        # CR #21: location-based store totals from Oracle
-        mock_comm.repository.get_store_sales_data.return_value = {
-            'ACTUAL_FULL_PRICE_REVENUE': 0, 'ACTUAL_DISCOUNTED_REVENUE': 0,
-            'ACTUAL_JEWELRY_REVENUE': 0, 'ACTUAL_SUITCASE_REVENUE': 0
-        }
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {
             'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
@@ -332,12 +327,13 @@ class TestGetRevenueBreakdown:
     def test_vat_totals_from_oracle_sales(self, mock_get_conn, MockCommSvc, MockStoreSvc):
         """CR #12/#13: personal_total_vat uses revenue_with_vat; store_fp_total_vat sums FP with-VAT."""
         # Oracle sales: 2 items — 1 full_price (discount 0%), 1 markdown (discount 50%)
+        # Unified DataFrame from get_all_sales_data includes doc_store_code for store filtering
         sales_df = pd.DataFrame([
-            {'employee_username': 'user1', 'upc': 'U1', 'vendor_code': 'ABC',
-             'is_jewelry': 0, 'discount_rate': 0.0,
+            {'employee_username': 'user1', 'upc': 'U1', 'doc_store_code': 'S01',
+             'vendor_code': 'ABC', 'is_jewelry': 0, 'discount_rate': 0.0,
              'revenue_with_vat': 1100, 'revenue_before_vat': 1000, 'category': 'BAGS'},
-            {'employee_username': 'user1', 'upc': 'U2', 'vendor_code': 'DEF',
-             'is_jewelry': 0, 'discount_rate': 0.5,
+            {'employee_username': 'user1', 'upc': 'U2', 'doc_store_code': 'S01',
+             'vendor_code': 'DEF', 'is_jewelry': 0, 'discount_rate': 0.5,
              'revenue_with_vat': 550, 'revenue_before_vat': 500, 'category': 'BAGS'},
         ])
         sales_df['upc_clean'] = sales_df['upc'].str.strip()
@@ -348,12 +344,14 @@ class TestGetRevenueBreakdown:
              'employee_code': 'GL001', 'full_name': 'Test',
              'retailpro_username': 'user1', 'personal_target': 0},
         ]
-        mock_comm.repository.get_personal_commission_sales_data.return_value = sales_df
+        mock_comm.repository.get_all_sales_data.return_value = sales_df
         mock_comm.repository.get_hand_carry_upcs.return_value = []
-        # base amounts use revenue_before_vat: FP=1000, MD=500
-        mock_comm._compute_revenue_by_type.return_value = {
-            'full_price': 1000, 'markdown': 500,
-        }
+        # _compute_revenue_by_type is called twice: once for employee (base amounts),
+        # once for store-level (filtered by doc_store_code). Use side_effect.
+        mock_comm._compute_revenue_by_type.side_effect = [
+            {'full_price': 1000, 'markdown': 500},     # employee call (revenue_before_vat)
+            {'full_price': 1100, 'markdown': 550},      # store call (filtered by doc_store_code)
+        ]
         # _separate_sales_by_type returns cascaded DataFrames
         mock_comm._separate_sales_by_type.return_value = {
             'hand_carry': pd.DataFrame(),
@@ -364,12 +362,6 @@ class TestGetRevenueBreakdown:
 
         MockStoreSvc.return_value.get_commission_stores.return_value = {
             'success': True, 'stores': [{'store_code': 'S01', 'store_target': None}]
-        }
-
-        # CR #21: location-based store totals from Oracle
-        mock_comm.repository.get_store_sales_data.return_value = {
-            'ACTUAL_FULL_PRICE_REVENUE': 1100, 'ACTUAL_DISCOUNTED_REVENUE': 550,
-            'ACTUAL_JEWELRY_REVENUE': 0, 'ACTUAL_SUITCASE_REVENUE': 0
         }
 
         # No adjustments
@@ -387,7 +379,7 @@ class TestGetRevenueBreakdown:
         assert emp['personal_total_vat'] == 1650
         # personal_total_adjusted = sum(base_amounts) = 1000 + 500 = 1500 (before-VAT, no adj)
         assert emp['personal_total_adjusted'] == 1500
-        # CR #21: store_total_vat from location-based Oracle query
+        # CR #24: store totals from unified DataFrame filtered by doc_store_code
         assert store['store_total_vat'] == 1650
-        # CR #21: store_fp_total_vat from location-based Oracle query
+        # store_fp_total_vat = full_price from store-level _compute_revenue_by_type
         assert store['store_fp_total_vat'] == 1100

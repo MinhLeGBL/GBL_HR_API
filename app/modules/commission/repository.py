@@ -8,6 +8,15 @@ from app.core.database.connection import get_oracle_connection, get_postgres_con
 from app.modules.commission.queries import CommissionQueries
 
 
+# Expected columns from ALL_SALES_DATA query
+ALL_SALES_COLUMNS = [
+    'sale_id', 'upc', 'bill_number', 'doc_store_code', 'sale_date', 'sale_time',
+    'customer_sid', 'employee_sid', 'employee_username', 'store_code',
+    'vendor_code', 'is_jewelry', 'category', 'department', 'discount_rate',
+    'revenue_with_vat', 'revenue_before_vat'
+]
+
+
 class CommissionRepository:
     """Repository for commission-related data access"""
 
@@ -70,7 +79,7 @@ class CommissionRepository:
         end_date: str
     ) -> Dict[str, Any]:
         """
-        Get store sales data with revenue breakdown
+        Get store sales data with revenue breakdown (legacy 4-bucket query)
 
         Args:
             store_code: Store code
@@ -91,30 +100,59 @@ class CommissionRepository:
         # Return first result or empty dict
         return results[0] if results else {}
 
-    def get_employee_sales_data(
+    def get_all_sales_data(
         self,
-        store_code: str,
-        start_date: str,
-        end_date: str
-    ) -> List[Dict[str, Any]]:
+        year: int,
+        month: int
+    ) -> pd.DataFrame:
         """
-        Get employee sales data for a specific store
+        Get ALL transaction line items for a period as a single DataFrame.
+
+        This is the single source of truth — replaces get_store_sales_detail,
+        get_employee_sales_data, and get_personal_commission_sales_data.
+
+        Uses LEFT JOINs so non-employee transactions (SYSADMIN, walk-ins) and
+        items without inventory records are included.
 
         Args:
-            store_code: Store code
-            start_date: Start date in 'YYYY-MM-DD HH:MI:SS' format
-            end_date: End date in 'YYYY-MM-DD HH:MI:SS' format
+            year: Year for the period
+            month: Month for the period
 
         Returns:
-            List of employee sales data
+            DataFrame with columns: sale_id, upc, bill_number, doc_store_code,
+            sale_date, sale_time, customer_sid, employee_sid, employee_username,
+            store_code, vendor_code, is_jewelry, category, department,
+            discount_rate, revenue_with_vat, revenue_before_vat
         """
+        last_day = calendar.monthrange(year, month)[1]
+        start_date = f'{year:04d}-{month:02d}-01 00:00:00'
+        end_date = f'{year:04d}-{month:02d}-{last_day:02d} 23:59:59'
         parameters = {
-            'store_code': store_code,
             'start_date': start_date,
             'end_date': end_date
         }
 
-        return self.execute_query(self.queries.EMPLOYEE_SALES_DATA, parameters)
+        results = self.execute_query(self.queries.ALL_SALES_DATA, parameters)
+
+        df = pd.DataFrame(results)
+
+        if df.empty:
+            return pd.DataFrame(columns=ALL_SALES_COLUMNS)
+
+        df.columns = df.columns.str.lower()
+        if 'upc_clean' not in df.columns and 'upc' in df.columns:
+            df['upc_clean'] = df['upc'].astype(str).str.strip()
+
+        # COSM department items are not eligible for employee commission.
+        # Re-attribute to SYSADMIN so they count toward store revenue total
+        # but not toward any employee's personal total or commission.
+        cosm_mask = df['department'] == 'COSM'
+        if cosm_mask.any():
+            df.loc[cosm_mask, 'employee_sid'] = None
+            df.loc[cosm_mask, 'employee_username'] = 'SYSADMIN'
+            df.loc[cosm_mask, 'store_code'] = None
+
+        return df
 
     def get_employee_info(self, store_code: str) -> List[Dict[str, Any]]:
         """
@@ -129,45 +167,6 @@ class CommissionRepository:
         parameters = {'store_code': store_code}
 
         return self.execute_query(self.queries.EMPLOYEE_INFO, parameters)
-
-    def get_personal_commission_sales_data(
-        self,
-        year: int,
-        month: int
-    ) -> pd.DataFrame:
-        """
-        Get sales data for personal commission calculation as pandas DataFrame
-
-        Args:
-            year: Year for the commission period
-            month: Month for the commission period
-
-        Returns:
-            DataFrame containing sales data with columns:
-            ['sale_id', 'employee_id', 'store_id', 'sale_date', 'sale_time',
-             'revenue_before_vat', 'discount_rate', 'department']
-        """
-        last_day = calendar.monthrange(year, month)[1]
-        start_date = f'{year:04d}-{month:02d}-01 00:00:00'
-        end_date = f'{year:04d}-{month:02d}-{last_day:02d} 23:59:59'
-        parameters = {
-            'start_date': start_date,
-            'end_date': end_date
-        }
-
-        results = self.execute_query(self.queries.PERSONAL_COMMISSION_SALES_DATA, parameters)
-
-        # Convert to pandas DataFrame
-        df = pd.DataFrame(results)
-
-        # If no data, return empty DataFrame with expected columns
-        if df.empty:
-            return pd.DataFrame(columns=[
-                'sale_id', 'employee_id', 'store_id', 'sale_date', 'sale_time',
-                'sale_datetime', 'revenue_before_vat', 'discount_rate', 'department'
-            ])
-
-        return df
 
     def get_multiple_stores_sales_data(
         self,
@@ -191,29 +190,6 @@ class CommissionRepository:
             store_data = self.get_store_sales_data(store_code, start_date, end_date)
             if store_data:
                 results[store_code] = store_data
-        return results
-
-    def get_multiple_stores_employee_sales_data(
-        self,
-        store_codes: List[str],
-        start_date: str,
-        end_date: str
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Get employee sales data for multiple stores
-
-        Args:
-            store_codes: List of store codes
-            start_date: Start date in 'YYYY-MM-DD HH:MI:SS' format
-            end_date: End date in 'YYYY-MM-DD HH24:MI:SS' format
-
-        Returns:
-            Dictionary mapping store_code to list of employee sales data
-        """
-        results = {}
-        for store_code in store_codes:
-            employee_data = self.get_employee_sales_data(store_code, start_date, end_date)
-            results[store_code] = employee_data
         return results
 
     def get_multiple_stores_employee_info(
