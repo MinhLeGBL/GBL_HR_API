@@ -164,14 +164,17 @@ class TestCalculateStoreCommissionV2:
         assert result['employees'] == []
 
     def test_store_with_insufficient_fp_ratio_compensation(self, service, mock_repo):
-        """Store with low FP ratio and insufficient discount compensation is ineligible."""
-        # actual_fp_ratio = 700_000 / 1_000_000 = 0.70, target = 0.80
-        # fp_shortage = (0.80 - 0.70) * 1_000_000 = 100_000
-        # required_discounted = 200_000, actual = 150_000
+        """Store with low FP ratio and insufficient discount compensation is ineligible.
+        CR #27: FP = sum of FP from ALL categories, MD = sum of MD from ALL categories.
+        """
+        # All items at >30% discount → all classified as MD
+        # actual_fp = 0, actual_md = 1_000_000
+        # actual_fp_ratio = 0, target = 0.80 → fp_shortage = 800_000
+        # required_discounted = 1_600_000, actual = 1_000_000 → ineligible
         all_sales_df = self._make_all_sales_df('HBT', store_rows=[
-            {'revenue_with_vat': 700_000, 'discount_rate': 0.0},              # FP
-            {'revenue_with_vat': 150_000, 'discount_rate': 0.5},              # markdown
-            {'revenue_with_vat': 150_000, 'is_jewelry': 1, 'vendor_code': 'ATS'},  # jewelry
+            {'revenue_with_vat': 700_000, 'discount_rate': 0.5},              # fashion MD
+            {'revenue_with_vat': 150_000, 'discount_rate': 0.5},              # fashion MD
+            {'revenue_with_vat': 150_000, 'is_jewelry': 1, 'vendor_code': 'ATS', 'discount_rate': 0.5},  # jewelry MD
         ])
 
         result = service.calculate_store_commission_v2(
@@ -555,8 +558,8 @@ class TestCalculateCombinedCommission:
                 'employee_code': code,
                 'fullname': f'Employee {i+1}',
                 'store_code': 'HBT',
-                'commission_100_and_below_fp': 10_000 * (i + 1),
-                'commission_100_and_below_discount': 2_000 * (i + 1),
+                'commission_fashion_fp': 10_000 * (i + 1),
+                'commission_fashion_md': 2_000 * (i + 1),
                 'commission_over_100': 5_000 * (i + 1),
                 'commission_jewelry': 3_000 * (i + 1),
                 'commission_vhernier': 1_000 * (i + 1),
@@ -676,8 +679,8 @@ class TestCalculateCombinedCommission:
             'store_achievement_pct',
             'store_commission_70pct', 'store_commission_30pct',
             'manager_bonus', 'total_store_commission',
-            'personal_commission_fp_under_100',
-            'personal_commission_discount_under_100',
+            'personal_commission_fashion_fp',
+            'personal_commission_fashion_md',
             'personal_commission_over_100',
             'personal_commission_jewelry',
             'personal_commission_vhernier',
@@ -834,8 +837,8 @@ class TestCalculatePersonalCommissions:
         )
         emp = result.iloc[0]
         # No FP or discount personal commission at < 50%
-        assert emp['commission_100_and_below_fp'] == 0
-        assert emp['commission_100_and_below_discount'] == 0
+        assert emp['commission_fashion_fp'] == 0
+        assert emp['commission_fashion_md'] == 0
         assert emp['commission_over_100'] == 0
 
     def test_tier1_50_to_70_percent_commission(self, service, mock_repo):
@@ -869,8 +872,8 @@ class TestCalculatePersonalCommissions:
         )
         emp = result.iloc[0]
         # Standard tier1 rates: FP 0.25%, discount 0.125%
-        assert emp['commission_100_and_below_fp'] == pytest.approx(500_000 * 0.0025)
-        assert emp['commission_100_and_below_discount'] == pytest.approx(200_000 * 0.00125)
+        assert emp['commission_fashion_fp'] == pytest.approx(500_000 * 0.0025)
+        assert emp['commission_fashion_md'] == pytest.approx(200_000 * 0.00125)
 
     def test_tier2_70_to_100_percent_commission(self, service, mock_repo):
         """Tier 2 (70-100%): FP at 0.5%, discount at 0.25% (standard rates)."""
@@ -899,8 +902,8 @@ class TestCalculatePersonalCommissions:
             month=1, year=2025, employees=employees
         )
         emp = result.iloc[0]
-        assert emp['commission_100_and_below_fp'] == pytest.approx(700_000 * 0.005)
-        assert emp['commission_100_and_below_discount'] == pytest.approx(100_000 * 0.0025)
+        assert emp['commission_fashion_fp'] == pytest.approx(700_000 * 0.005)
+        assert emp['commission_fashion_md'] == pytest.approx(100_000 * 0.0025)
 
     def test_jewelry_commission_regardless_of_achievement(self, service, mock_repo):
         """Jewelry commission is paid regardless of achievement rate."""
@@ -1005,17 +1008,17 @@ class TestCalculatePersonalCommissions:
         expected_hc = (1_000_000 * 0.01) + (2_000_000 * 0.02) + (500_000 * 0.03)
         assert emp['commission_hand_carry'] == pytest.approx(expected_hc)
 
-    def test_cosm_excluded_from_commission_but_counts_for_achievement(self, service, mock_repo):
-        """COSM items count toward achievement but earn no commission."""
+    def test_cosm_hea_excluded_from_commission_but_counts_for_achievement(self, service, mock_repo):
+        """COSM+HEA items count toward achievement but earn no commission."""
         sales_df = self._make_sales_df([
             # Regular RTW item
             [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
              None, 'SID1', 'user1', 'HBT',
              'ABC', 0, 'SHIRTS', 'RTW', 0.10, 500_000, 454_545],
-            # COSM item (should be excluded from commission calc)
+            # COSM+HEA item (excluded from commission — only HEA vendor)
             [2, 'UPC002', 'BILL2', 'HBT', '2025-01-15', '11:00:00',
              None, 'SID1', 'user1', 'HBT',
-             'COS', 0, 'CREAM', 'COSM', 0.10, 300_000, 272_727],
+             'HEA', 0, 'CREAM', 'COSM', 0.10, 300_000, 272_727],
         ])
         mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
@@ -1037,7 +1040,40 @@ class TestCalculatePersonalCommissions:
 
         # FP commission only on non-COSM item (454,545 * tier2 rate)
         # Achievement = (500k + 300k) / 1M = 80% -> tier2 rate 0.005
-        assert emp['commission_100_and_below_fp'] == pytest.approx(454_545 * 0.005)
+        assert emp['commission_fashion_fp'] == pytest.approx(454_545 * 0.005)
+
+    def test_cosm_non_hea_earns_fashion_commission(self, service, mock_repo):
+        """COSM items with non-HEA vendor are classified as fashion and earn commission."""
+        sales_df = self._make_sales_df([
+            # Regular RTW item
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.10, 500_000, 454_545],
+            # COSM+NBP item (non-HEA → earns fashion commission)
+            [2, 'UPC002', 'BILL2', 'HBT', '2025-01-15', '11:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'NBP', 0, 'OTHER', 'COSM', 0.10, 300_000, 272_727],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [
+            {
+                'employee_code': 'EMP001',
+                'employee_username': 'user1',
+                'personal_target': 1_000_000,  # 800k/1M = 80% -> tier2
+                'full_name': 'COSM Non-HEA Test',
+                'store_code': 'HBT',
+            }
+        ]
+
+        result = service.calculate_personal_commissions(
+            month=1, year=2025, employees=employees
+        )
+        emp = result.iloc[0]
+
+        # Both items earn FP commission: (454,545 + 272,727) * tier2 rate 0.005
+        assert emp['commission_fashion_fp'] == pytest.approx((454_545 + 272_727) * 0.005)
 
     def test_rwd_store_uses_special_rates(self, service, mock_repo):
         """RWD store uses special commission rates when ENABLE_RWD_SPECIAL_RATES is True."""
@@ -1066,7 +1102,7 @@ class TestCalculatePersonalCommissions:
 
         emp = result.iloc[0]
         # RWD tier1 FP rate = 0.00375 (vs standard 0.0025)
-        assert emp['commission_100_and_below_fp'] == pytest.approx(500_000 * 0.00375)
+        assert emp['commission_fashion_fp'] == pytest.approx(500_000 * 0.00375)
 
     def test_output_dataframe_columns(self, service, mock_repo):
         """Verify the output DataFrame has all expected columns."""
@@ -1094,7 +1130,7 @@ class TestCalculatePersonalCommissions:
 
         expected_columns = [
             'employee_code', 'fullname', 'store_code',
-            'commission_100_and_below_fp', 'commission_100_and_below_discount',
+            'commission_fashion_fp', 'commission_fashion_md',
             'commission_over_100', 'commission_jewelry',
             'commission_vhernier', 'commission_rosa_maria',
             'commission_suitcase', 'commission_hand_carry',
@@ -1187,8 +1223,8 @@ class TestEmployeeCommissionException:
         result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
         row = result.iloc[0]
 
-        assert row['commission_100_and_below_fp'] == 10_000_000 * 0.007  # 70,000
-        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_fashion_fp'] == 10_000_000 * 0.007  # 70,000
+        assert row['commission_fashion_md'] == 0
         assert row['commission_over_100'] == 0
         assert row['total'] == 10_000_000 * 0.007
 
@@ -1213,8 +1249,8 @@ class TestEmployeeCommissionException:
         result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
         row = result.iloc[0]
 
-        assert row['commission_100_and_below_fp'] == 0
-        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_fashion_fp'] == 0
+        assert row['commission_fashion_md'] == 0
         assert row['total'] == 0
 
     def test_jewelry_still_earned_regardless_of_customer(self, service, mock_repo):
@@ -1241,7 +1277,7 @@ class TestEmployeeCommissionException:
 
         assert row['commission_vhernier'] == 5_000_000 * 0.01  # 50,000
         assert row['commission_jewelry'] == 5_000_000 * 0.01
-        assert row['commission_100_and_below_fp'] == 0  # No qualifying non-jewelry
+        assert row['commission_fashion_fp'] == 0  # No qualifying non-jewelry
         assert row['total'] == 5_000_000 * 0.01
 
     def test_hand_carry_still_earned_regardless_of_customer(self, service, mock_repo):
@@ -1268,7 +1304,7 @@ class TestEmployeeCommissionException:
 
         # Hand carry uses revenue_with_vat, ATQ = 1%
         assert row['commission_hand_carry'] == 2_200_000 * 0.01  # 22,000
-        assert row['commission_100_and_below_fp'] == 0  # No qualifying non-jewelry
+        assert row['commission_fashion_fp'] == 0  # No qualifying non-jewelry
         assert row['total'] == 2_200_000 * 0.01
 
     def test_mixed_customers(self, service, mock_repo):
@@ -1303,8 +1339,8 @@ class TestEmployeeCommissionException:
         row = result.iloc[0]
 
         # Only 10M qualifying non-jewelry earns flat 0.7%, 5M excluded
-        assert row['commission_100_and_below_fp'] == 10_000_000 * 0.007  # 70,000
-        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_fashion_fp'] == 10_000_000 * 0.007  # 70,000
+        assert row['commission_fashion_md'] == 0
         # VHN jewelry (1%)
         assert row['commission_vhernier'] == 3_000_000 * 0.01  # 30,000
         assert row['commission_jewelry'] == 3_000_000 * 0.01

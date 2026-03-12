@@ -601,6 +601,39 @@ def get_commission_revenue():
         }), 500
 
 
+@commission_bp.route('/revenue/store-view', methods=['GET'])
+@token_required
+def get_store_view_revenue():
+    """
+    CR #26: Revenue breakdown grouped by transaction location (doc_store_code).
+
+    Shows contributors (employees + SYSADMIN) per physical store with FP/MD
+    revenue split per category. Includes cross-store indicators.
+
+    Query Parameters:
+        - month: integer (1-12), required
+        - year:  integer, required
+    """
+    try:
+        month, year, err = _parse_period(request.args)
+        if err:
+            return err
+
+        service = CommissionRevenueService()
+        result = service.get_store_view_breakdown(month, year)
+
+        if not result.get('success', False):
+            return jsonify(result), 500
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @commission_bp.route('/revenue/adjustments/<employee_code>', methods=['PUT'])
 @manager_required
 def update_revenue_adjustments(employee_code):
@@ -615,13 +648,15 @@ def update_revenue_adjustments(employee_code):
             "month": 3,
             "year": 2026,
             "adjustments": [
-                {"revenue_type": "full_price", "adjustment": 50000000},
-                {"revenue_type": "markdown",   "adjustment": -10000000}
+                {"revenue_type": "fashion_fp", "adjustment": 50000000},
+                {"revenue_type": "fashion_md", "adjustment": -10000000}
             ]
         }
 
-    Valid revenue_type values: full_price, markdown, jewelry, vhernier, rosa_maria,
-                               hand_carry, suitcase
+    Valid revenue_type values: fashion_fp, fashion_md, jewelry_fp, jewelry_md,
+        vhernier_fp, vhernier_md, rosa_maria_fp, rosa_maria_md,
+        hand_carry_fp, hand_carry_md, suitcase_fp, suitcase_md,
+        home_decor_fp, home_decor_md, other_fp, other_md
     """
     try:
         data, err = _parse_json_body()

@@ -3,6 +3,7 @@ Unit tests for commission revenue and calculate routes
 
 Tests:
 - GET  /api/v1/commission/revenue
+- GET  /api/v1/commission/revenue/store-view
 - PUT  /api/v1/commission/revenue/adjustments/<employee_code>
 - POST /api/v1/commission/calculate
 """
@@ -121,6 +122,90 @@ class TestGetCommissionRevenue:
 
 
 # ===========================================================================
+# GET /api/v1/commission/revenue/store-view  (CR #26)
+# ===========================================================================
+
+class TestGetStoreViewRevenue:
+    URL = '/api/v1/commission/revenue/store-view'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.commission.routes.CommissionRevenueService')
+    def test_success(self, MockService, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        MockService.return_value.get_store_view_breakdown.return_value = {
+            'success': True,
+            'month': 3,
+            'year': 2026,
+            'revenue_types': [],
+            'stores': [],
+        }
+
+        resp = client.get(f'{self.URL}?month=3&year=2026', headers=_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is True
+        assert data['month'] == 3
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_missing_month(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        resp = client.get(f'{self.URL}?year=2026', headers=_auth_headers())
+
+        assert resp.status_code == 400
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_missing_year(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        resp = client.get(f'{self.URL}?month=3', headers=_auth_headers())
+
+        assert resp.status_code == 400
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_invalid_month(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        resp = client.get(f'{self.URL}?month=13&year=2026', headers=_auth_headers())
+
+        assert resp.status_code == 400
+
+    def test_no_auth_returns_401(self, client):
+        resp = client.get(f'{self.URL}?month=3&year=2026')
+        assert resp.status_code == 401
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.commission.routes.CommissionRevenueService')
+    def test_service_error(self, MockService, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        MockService.return_value.get_store_view_breakdown.return_value = {
+            'success': False, 'error': 'DB error'
+        }
+
+        resp = client.get(f'{self.URL}?month=3&year=2026', headers=_auth_headers())
+
+        assert resp.status_code == 500
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.commission.routes.CommissionRevenueService')
+    def test_exception_returns_500(self, MockService, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        MockService.return_value.get_store_view_breakdown.side_effect = Exception('boom')
+
+        resp = client.get(f'{self.URL}?month=3&year=2026', headers=_auth_headers())
+
+        assert resp.status_code == 500
+        assert 'boom' in resp.get_json()['error']
+
+
+# ===========================================================================
 # PUT /api/v1/commission/revenue/adjustments/<employee_code>
 # ===========================================================================
 
@@ -132,7 +217,7 @@ class TestUpdateRevenueAdjustments:
             'month': 3,
             'year': 2026,
             'adjustments': [
-                {'revenue_type': 'full_price', 'adjustment': 50000000},
+                {'revenue_type': 'fashion_fp', 'adjustment': 50000000},
             ],
         }
         body.update(overrides)
@@ -149,7 +234,7 @@ class TestUpdateRevenueAdjustments:
                 'employee_code': 'GL013',
                 'month': 3,
                 'year': 2026,
-                'adjustments': [{'revenue_type': 'full_price', 'adjustment': 50000000}],
+                'adjustments': [{'revenue_type': 'fashion_fp', 'adjustment': 50000000}],
             }
         }
 

@@ -143,14 +143,16 @@ class CommissionRepository:
         if 'upc_clean' not in df.columns and 'upc' in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
 
-        # COSM department items are not eligible for employee commission.
+        # Only COSM department items with HEA vendor are not eligible for commission.
         # Re-attribute to SYSADMIN so they count toward store revenue total
         # but not toward any employee's personal total or commission.
-        cosm_mask = df['department'] == 'COSM'
-        if cosm_mask.any():
-            df.loc[cosm_mask, 'employee_sid'] = None
-            df.loc[cosm_mask, 'employee_username'] = 'SYSADMIN'
-            df.loc[cosm_mask, 'store_code'] = None
+        # Non-HEA COSM items (e.g. NOTES DE BAS DE PAJE, ANN QUEEN) stay with
+        # the original employee and are classified as fashion (FP/MD).
+        cosm_hea_mask = (df['department'] == 'COSM') & (df['vendor_code'] == 'HEA')
+        if cosm_hea_mask.any():
+            df.loc[cosm_hea_mask, 'employee_sid'] = None
+            df.loc[cosm_hea_mask, 'employee_username'] = 'SYSADMIN'
+            df.loc[cosm_hea_mask, 'store_code'] = None
 
         return df
 

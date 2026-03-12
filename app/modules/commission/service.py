@@ -52,6 +52,7 @@ HC_VENDORS_1PCT = frozenset(['ATQ', 'AQU', 'ERE', 'GEO', 'GDC', 'BDA', 'SKY', 'C
 HC_VENDORS_2PCT = frozenset(['CGI', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'ROM', 'SPK', 'TED', 'BRT'])
 JEWELRY_OTHER_VENDORS = frozenset(['ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT'])
 SUITCASE_VENDORS = frozenset(['TVL', 'TIT'])
+COSM_EXCLUDED_VENDOR = 'HEA'  # Only HEA vendor in COSM dept → SYSADMIN (no commission)
 
 # ============================================================================
 # COMMISSION RATES
@@ -76,20 +77,28 @@ POOL_INDIVIDUAL_RATIO = 0.70
 POOL_EQUAL_RATIO = 0.30
 FP_COMPENSATION_MULTIPLIER = 2.0
 FP_REVENUE_MIN_RATIO = 0.70
-EXCLUDED_DEPARTMENTS = frozenset(['COSM', 'HOME'])
+# Departments excluded from over-target bonus qualification:
+# HOME items earn flat 1% (home_decor), COSM+HEA items earn nothing (other/SYSADMIN).
+# Non-HEA COSM items are classified as fashion and DO qualify for over-target.
+OVER_TARGET_EXCLUDED_DEPT = 'HOME'
 # ============================================================================
 
 # ============================================================================
-# REVENUE TYPE CONSTANTS (for 7-type revenue breakdown)
+# REVENUE TYPE CONSTANTS (CR #27: 8 categories with FP/MD split)
 # ============================================================================
-REVENUE_TYPE_ORDER = ['full_price', 'markdown', 'jewelry', 'vhernier', 'rosa_maria', 'hand_carry', 'suitcase', 'home_decor', 'other']
+REVENUE_TYPE_ORDER = ['fashion', 'jewelry', 'vhernier', 'rosa_maria', 'hand_carry', 'suitcase', 'home_decor', 'other']
 REVENUE_TYPE_LABELS = {
-    'full_price': 'Full Price', 'markdown': 'Markdown', 'jewelry': 'Jewelry',
+    'fashion': 'Fashion', 'jewelry': 'Jewelry',
     'vhernier': 'Vhernier', 'rosa_maria': 'Rosa Maria',
     'hand_carry': 'Hand Carry', 'suitcase': 'Suitcase',
     'home_decor': 'Home Decor', 'other': 'Other'
 }
-VALID_REVENUE_TYPES = frozenset(REVENUE_TYPE_ORDER)
+# Adjustment types: each category has _fp and _md variants
+VALID_ADJUSTMENT_TYPES = frozenset(
+    f'{cat}_{tier}' for cat in REVENUE_TYPE_ORDER for tier in ('fp', 'md')
+)
+# Keep backward compat alias for any remaining references
+VALID_REVENUE_TYPES = VALID_ADJUSTMENT_TYPES
 # ============================================================================
 
 
@@ -180,19 +189,20 @@ class CommissionService:
     # _allocate_revenue_to_tiers, _distribute_store_pool) and
     # calculate_batch_store_commissions removed — superseded by v2.
 
-    def _compute_revenue_by_type(self, sales_df, hand_carry_upcs) -> Dict[str, int]:
+    def _compute_revenue_by_type(self, sales_df, hand_carry_upcs) -> Dict[str, Dict[str, int]]:
         """
-        Compute 7-type revenue totals from a sales DataFrame using the standard priority chain:
-        hand_carry → suitcase → jewelry (vhernier/rosa_maria/other) → non-jewelry (full_price/markdown).
+        Compute 8-category revenue totals with FP/MD split from a sales DataFrame.
+        Priority chain: hand_carry → suitcase → other (COSM) → home_decor → jewelry → fashion.
 
         Args:
             sales_df: DataFrame with Oracle sale columns (lowercase). May be empty.
             hand_carry_upcs: List/set of UPCs that classify as hand carry.
 
         Returns:
-            Dict with keys matching REVENUE_TYPE_ORDER, values are integer VND (0 if none).
+            Dict with keys matching REVENUE_TYPE_ORDER, each value is
+            {'fp': int, 'md': int, 'total': int}.
         """
-        zero = {t: 0 for t in REVENUE_TYPE_ORDER}
+        zero = {t: {'fp': 0, 'md': 0, 'total': 0} for t in REVENUE_TYPE_ORDER}
 
         if len(sales_df) == 0:
             return zero
@@ -201,7 +211,7 @@ class CommissionService:
         if 'upc_clean' not in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
 
-        # Priority chain: hand_carry → suitcase → other (COSM) → home_decor → jewelry → non-jewelry
+        # Priority chain: hand_carry → suitcase → other (COSM+HEA) → home_decor → jewelry → fashion
         hc_mask = df['upc_clean'].isin(hand_carry_upcs)
         hand_carry_df = df[hc_mask]
         remainder = df[~hc_mask]
@@ -210,7 +220,9 @@ class CommissionService:
         suitcase_df = remainder[sc_mask]
         remainder2 = remainder[~sc_mask]
 
-        cosm_mask = remainder2['department'] == 'COSM'
+        # Only COSM dept + HEA vendor → 'other' (no commission).
+        # Non-HEA COSM items fall through to normal fashion classification.
+        cosm_mask = (remainder2['department'] == 'COSM') & (remainder2['vendor_code'] == COSM_EXCLUDED_VENDOR)
         other_df = remainder2[cosm_mask]
         remainder3 = remainder2[~cosm_mask]
 
@@ -229,22 +241,26 @@ class CommissionService:
         other_jw_mask = ~jewelry_df.index.isin(vhn_df.index) & ~jewelry_df.index.isin(rom_ear_df.index)
         other_jewelry_df = jewelry_df[other_jw_mask]
 
-        # Non-jewelry sub-types
-        fp_df = non_jewelry_df[non_jewelry_df['discount_rate'] <= DISCOUNT_THRESHOLD]
-        md_df = non_jewelry_df[non_jewelry_df['discount_rate'] > DISCOUNT_THRESHOLD]
+        def _split_fp_md(cat_df):
+            """Split a category DataFrame into FP/MD by discount_rate threshold."""
+            if len(cat_df) == 0:
+                return {'fp': 0, 'md': 0, 'total': 0}
+            fp = cat_df[cat_df['discount_rate'] <= DISCOUNT_THRESHOLD]
+            md = cat_df[cat_df['discount_rate'] > DISCOUNT_THRESHOLD]
+            fp_val = int(fp['revenue_with_vat'].sum())
+            md_val = int(md['revenue_with_vat'].sum())
+            return {'fp': fp_val, 'md': md_val, 'total': fp_val + md_val}
 
-        # CR #21 spec: Step 2 base_amount uses revenue_with_vat for ALL types.
-        # VAT conversion is handled internally by Step 3 (calculate endpoint).
+        # CR #27: Each category gets FP/MD split based on discount_rate
         return {
-            'full_price': int(fp_df['revenue_with_vat'].sum()),
-            'markdown':   int(md_df['revenue_with_vat'].sum()),
-            'jewelry':    int(other_jewelry_df['revenue_with_vat'].sum()),
-            'vhernier':   int(vhn_df['revenue_with_vat'].sum()),
-            'rosa_maria': int(rom_ear_df['revenue_with_vat'].sum()),
-            'hand_carry': int(hand_carry_df['revenue_with_vat'].sum()),
-            'suitcase':   int(suitcase_df['revenue_with_vat'].sum()),
-            'home_decor': int(home_decor_df['revenue_with_vat'].sum()),
-            'other':      int(other_df['revenue_with_vat'].sum()),
+            'fashion':    _split_fp_md(non_jewelry_df),
+            'jewelry':    _split_fp_md(other_jewelry_df),
+            'vhernier':   _split_fp_md(vhn_df),
+            'rosa_maria': _split_fp_md(rom_ear_df),
+            'hand_carry': _split_fp_md(hand_carry_df),
+            'suitcase':   _split_fp_md(suitcase_df),
+            'home_decor': _split_fp_md(home_decor_df),
+            'other':      _split_fp_md(other_df),
         }
 
     def _create_adjustment_rows(
@@ -272,22 +288,40 @@ class CommissionService:
         Returns:
             DataFrame with synthetic rows (empty if no applicable adjustments).
         """
-        # Map each injectable revenue type to its Oracle column values
+        # Map each injectable adjustment type to its Oracle column values.
+        # CR #27: types are now category_tier (e.g. fashion_fp, fashion_md).
+        # discount_rate determines FP (<=0.30) vs MD (>0.30) classification.
         TYPE_PROPS = {
-            'full_price': {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.0,
-                           'upc': '', 'category': 'ADJ', 'use_with_vat': False},
-            'markdown':   {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.50,
-                           'upc': '', 'category': 'ADJ', 'use_with_vat': False},
-            'jewelry':    {'vendor_code': 'ATS',     'is_jewelry': 1, 'discount_rate': 0.0,
-                           'upc': '', 'category': 'ADJ', 'use_with_vat': False},
-            'vhernier':   {'vendor_code': 'VHN',     'is_jewelry': 1, 'discount_rate': 0.0,
-                           'upc': '', 'category': 'ADJ', 'use_with_vat': False},
-            'rosa_maria': {'vendor_code': 'ROM',     'is_jewelry': 1, 'discount_rate': 0.0,
-                           'upc': '', 'category': 'EARRINGS', 'use_with_vat': False},
-            'hand_carry': {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.0,
-                           'upc': '__ADJ_HC__', 'category': 'ADJ', 'use_with_vat': True},
-            # suitcase: NOT injected — handled via total_revenue_with_vat delta
+            'fashion_fp':    {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.0,
+                              'upc': '', 'category': 'ADJ', 'use_with_vat': False},
+            'fashion_md':    {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.50,
+                              'upc': '', 'category': 'ADJ', 'use_with_vat': False},
+            'jewelry_fp':    {'vendor_code': 'ATS',     'is_jewelry': 1, 'discount_rate': 0.0,
+                              'upc': '', 'category': 'ADJ', 'use_with_vat': False},
+            'jewelry_md':    {'vendor_code': 'ATS',     'is_jewelry': 1, 'discount_rate': 0.50,
+                              'upc': '', 'category': 'ADJ', 'use_with_vat': False},
+            'vhernier_fp':   {'vendor_code': 'VHN',     'is_jewelry': 1, 'discount_rate': 0.0,
+                              'upc': '', 'category': 'ADJ', 'use_with_vat': False},
+            'vhernier_md':   {'vendor_code': 'VHN',     'is_jewelry': 1, 'discount_rate': 0.50,
+                              'upc': '', 'category': 'ADJ', 'use_with_vat': False},
+            'rosa_maria_fp': {'vendor_code': 'ROM',     'is_jewelry': 1, 'discount_rate': 0.0,
+                              'upc': '', 'category': 'EARRINGS', 'use_with_vat': False},
+            'rosa_maria_md': {'vendor_code': 'ROM',     'is_jewelry': 1, 'discount_rate': 0.50,
+                              'upc': '', 'category': 'EARRINGS', 'use_with_vat': False},
+            'hand_carry_fp': {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.0,
+                              'upc': '__ADJ_HC__', 'category': 'ADJ', 'use_with_vat': True},
+            'hand_carry_md': {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.50,
+                              'upc': '__ADJ_HC__', 'category': 'ADJ', 'use_with_vat': True},
+            # suitcase_fp/md: NOT injected — handled via total_revenue_with_vat delta
+            # home_decor_fp/md: injected with HOME department
+            'home_decor_fp': {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.0,
+                              'upc': '', 'category': 'ADJ', 'department': 'HOME', 'use_with_vat': False},
+            'home_decor_md': {'vendor_code': '__ADJ__', 'is_jewelry': 0, 'discount_rate': 0.50,
+                              'upc': '', 'category': 'ADJ', 'department': 'HOME', 'use_with_vat': False},
+            # other_fp/md: not injectable (COSM items only)
         }
+        # Track which hand_carry adjustment types were used
+        HC_ADJ_TYPES = ('hand_carry_fp', 'hand_carry_md')
 
         adj_sale_date = period_last_day + timedelta(days=1)
         rows = []
@@ -312,7 +346,7 @@ class CommissionService:
                 'is_jewelry':        props['is_jewelry'],
                 'discount_rate':     props['discount_rate'],
                 'category':          props['category'],
-                'department':        'ADJ',  # Synthetic department; excluded from COSM filter naturally
+                'department':        props.get('department', 'ADJ'),  # HOME for home_decor adjustments
                 'customer_sid':      None,
                 'revenue_before_vat': revenue_before_vat,
                 'revenue_with_vat':   revenue_with_vat,
@@ -481,8 +515,8 @@ class CommissionService:
             'employee_code': employee_code,
             'fullname': employee_name,
             'store_code': store_code,
-            'commission_100_and_below_fp': 0,
-            'commission_100_and_below_discount': 0,
+            'commission_fashion_fp': 0,
+            'commission_fashion_md': 0,
             'commission_over_100': 0,
             'commission_jewelry': 0,
             'commission_vhernier': 0,
@@ -523,8 +557,8 @@ class CommissionService:
             - employee_code: Employee HR code
             - fullname: Employee full name
             - store_code: Store code
-            - commission_100_and_below_fp: Full-price commission at 100% and below (non-jewelry, achievement-based)
-            - commission_100_and_below_discount: Discounted commission at 100% and below (non-jewelry, achievement-based)
+            - commission_fashion_fp: Fashion FP commission (non-jewelry, achievement-based)
+            - commission_fashion_md: Fashion MD commission (non-jewelry, achievement-based)
             - commission_over_100: Over 100% bonus commission (2% on qualifying FP non-jewelry items)
             - commission_jewelry: Total jewelry commission (VHN, ROM, other jewelry vendors)
             - commission_vhernier: VHN jewelry commission (1%)
@@ -613,7 +647,9 @@ class CommissionService:
                 qualifying_customer = exception['qualifying_customer_sid']
                 flat_rate = exception['flat_rate']
 
-                exc_sales_df = employee_sales_df[employee_sales_df['department'] != 'COSM'].copy()
+                exc_sales_df = employee_sales_df[
+                    ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
+                ].copy()
                 exc_sales_df['upc_clean'] = exc_sales_df['upc'].astype(str).str.strip()
 
                 # Separate sales by type (same priority chain as main path)
@@ -637,8 +673,8 @@ class CommissionService:
                     'employee_code': employee_code,
                     'fullname': employee_name,
                     'store_code': emp_store_code,
-                    'commission_100_and_below_fp': exc_flat_commission,
-                    'commission_100_and_below_discount': 0,
+                    'commission_fashion_fp': exc_flat_commission,
+                    'commission_fashion_md': 0,
                     'commission_over_100': 0,
                     'commission_jewelry': jw['total'],
                     'commission_vhernier': jw['vhernier'],
@@ -698,11 +734,14 @@ class CommissionService:
             # Calculate running total by BILL (WITH VAT) to find when 100% target was reached
             bill_totals_df['running_total'] = bill_totals_df['revenue_with_vat'].cumsum()
 
-            # Exclude COSM department items from commission calculations.
-            # COSM items are also re-attributed to SYSADMIN at the repository level,
+            # Exclude COSM+HEA items from commission calculations.
+            # HEA items are also re-attributed to SYSADMIN at the repository level,
             # but this filter handles preloaded data that bypasses the repository.
+            # Non-HEA COSM items earn commission as fashion (FP/MD).
             # HOME items are NOT excluded here — they earn commission via home_decor bucket.
-            employee_sales_df = employee_sales_df[employee_sales_df['department'] != 'COSM'].copy()
+            employee_sales_df = employee_sales_df[
+                ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
+            ].copy()
 
             # SEPARATE SALES BY TYPE for commission calculation
             # Clean UPC for matching (required by _separate_sales_by_type)
@@ -716,7 +755,7 @@ class CommissionService:
                 )
                 if not adj_rows.empty:
                     employee_sales_df = pd.concat([employee_sales_df, adj_rows], ignore_index=True)
-                if emp_adjustments.get('hand_carry', 0) != 0:
+                if emp_adjustments.get('hand_carry_fp', 0) != 0 or emp_adjustments.get('hand_carry_md', 0) != 0:
                     local_hand_carry_upcs = list(hand_carry_upcs) + ['__ADJ_HC__']
 
             separated = self._separate_sales_by_type(employee_sales_df, local_hand_carry_upcs)
@@ -752,12 +791,13 @@ class CommissionService:
                     # Get ALL items from the target-reaching bill
                     target_bill_items = employee_sales_df[employee_sales_df['bill_number'] == target_bill_number]
 
-                    # Filter items from target bill: FP, non-jewelry, NOT TIT/TVL, NOT hand carry
+                    # Filter items from target bill: FP, non-jewelry, NOT TIT/TVL, NOT hand carry, NOT HOME, NOT COSM+HEA
                     target_bill_qualifying = target_bill_items[
                         (target_bill_items['discount_rate'] <= DISCOUNT_THRESHOLD) &
                         (target_bill_items['is_jewelry'] == 0) &
                         (~target_bill_items['vendor_code'].isin(SUITCASE_VENDORS)) &
-                        (~target_bill_items['department'].isin(EXCLUDED_DEPARTMENTS)) &
+                        (target_bill_items['department'] != OVER_TARGET_EXCLUDED_DEPT) &
+                        (~((target_bill_items['department'] == 'COSM') & (target_bill_items['vendor_code'] == COSM_EXCLUDED_VENDOR))) &
                         (~target_bill_items['upc_clean'].isin(local_hand_carry_upcs))
                     ].copy()
 
@@ -791,12 +831,13 @@ class CommissionService:
                             employee_sales_df['bill_number'].isin(bills_after_target_numbers)
                         ]
 
-                        # Filter for: full-price, non-jewelry, NOT TIT/TVL, NOT hand carry
+                        # Filter for: full-price, non-jewelry, NOT TIT/TVL, NOT hand carry, NOT HOME, NOT COSM+HEA
                         fp_non_jewelry_after_df = items_after_target[
                             (items_after_target['discount_rate'] <= DISCOUNT_THRESHOLD) &
                             (items_after_target['is_jewelry'] == 0) &
                             (~items_after_target['vendor_code'].isin(SUITCASE_VENDORS)) &
-                            (~items_after_target['department'].isin(EXCLUDED_DEPARTMENTS)) &
+                            (items_after_target['department'] != OVER_TARGET_EXCLUDED_DEPT) &
+                            (~((items_after_target['department'] == 'COSM') & (items_after_target['vendor_code'] == COSM_EXCLUDED_VENDOR))) &
                             (~items_after_target['upc_clean'].isin(local_hand_carry_upcs))
                         ]
 
@@ -863,10 +904,9 @@ class CommissionService:
                     commission_over_100 = fp_non_jewelry_after_target * rates['over_100']
 
             # Calculate commission components
-            # commission_100_and_below includes: FP, discount, jewelry, suitcase, hand carry, home decor
-            # commission_over_100: Tier 4 bonus only
-            commission_100_and_below_fp = commission_fp
-            commission_100_and_below_discount = commission_discount
+            # CR #27: renamed to fashion_fp / fashion_md
+            commission_fashion_fp = commission_fp
+            commission_fashion_md = commission_discount
             commission_100_and_below = personal_commission + jewelry_commission + suitcase_commission + hand_carry_commission + home_decor_commission
             total_commission = commission_100_and_below + commission_over_100
 
@@ -875,8 +915,8 @@ class CommissionService:
                 'employee_code': employee_code,
                 'fullname': employee_name,
                 'store_code': emp_store_code,
-                'commission_100_and_below_fp': commission_100_and_below_fp,
-                'commission_100_and_below_discount': commission_100_and_below_discount,
+                'commission_fashion_fp': commission_fashion_fp,
+                'commission_fashion_md': commission_fashion_md,
                 'commission_over_100': commission_over_100,
                 'commission_jewelry': jewelry_commission,
                 'commission_vhernier': commission_vhernier,
@@ -893,8 +933,8 @@ class CommissionService:
             'employee_code',
             'fullname',
             'store_code',
-            'commission_100_and_below_fp',
-            'commission_100_and_below_discount',
+            'commission_fashion_fp',
+            'commission_fashion_md',
             'commission_over_100',
             'commission_jewelry',
             'commission_vhernier',
@@ -965,15 +1005,16 @@ class CommissionService:
             store_df = pd.DataFrame()
         store_revenue = self._compute_revenue_by_type(store_df, hc_upcs)
 
-        actual_full_price_revenue = store_revenue.get('full_price', 0)
-        actual_discounted_revenue = store_revenue.get('markdown', 0)
-        actual_jewelry_revenue = (store_revenue.get('jewelry', 0) +
-                                  store_revenue.get('vhernier', 0) +
-                                  store_revenue.get('rosa_maria', 0))
-        actual_suitcase_revenue = store_revenue.get('suitcase', 0)
-        actual_hand_carry_revenue = store_revenue.get('hand_carry', 0)
-        # 7-type total (all classified items)
-        actual_revenue = sum(store_revenue.values())
+        # CR #27: store_revenue values are now {fp, md, total} dicts
+        actual_full_price_revenue = sum(v.get('fp', 0) for v in store_revenue.values())
+        actual_discounted_revenue = sum(v.get('md', 0) for v in store_revenue.values())
+        actual_jewelry_revenue = (store_revenue.get('jewelry', {}).get('total', 0) +
+                                  store_revenue.get('vhernier', {}).get('total', 0) +
+                                  store_revenue.get('rosa_maria', {}).get('total', 0))
+        actual_suitcase_revenue = store_revenue.get('suitcase', {}).get('total', 0)
+        actual_hand_carry_revenue = store_revenue.get('hand_carry', {}).get('total', 0)
+        # 8-category total (all classified items)
+        actual_revenue = sum(v.get('total', 0) for v in store_revenue.values())
 
         # STEP 1: Check Store Eligibility & Calculate Achievement
         achievement_pct = (actual_revenue / store_target * 100) if store_target > 0 else 0
@@ -1195,8 +1236,8 @@ class CommissionService:
                 - employee_code
                 - fullname
                 - store_code
-                - commission_100_and_below_fp
-                - commission_100_and_below_discount
+                - commission_fashion_fp
+                - commission_fashion_md
                 - commission_over_100
                 - commission_jewelry
                 - commission_vhernier
@@ -1215,8 +1256,8 @@ class CommissionService:
                 - store_commission_30pct (equal_share)
                 - manager_bonus
                 - total_store_commission
-                - personal_commission_fp_under_100
-                - personal_commission_discount_under_100
+                - personal_commission_fashion_fp
+                - personal_commission_fashion_md
                 - personal_commission_over_100
                 - personal_commission_jewelry
                 - personal_commission_vhernier
@@ -1269,8 +1310,8 @@ class CommissionService:
                 'store_commission_30pct': store_comm['equal_share'],
                 'manager_bonus': store_comm['manager_bonus'],
                 'total_store_commission': store_comm['total_store_commission'],
-                'personal_commission_fp_under_100': row['commission_100_and_below_fp'],
-                'personal_commission_discount_under_100': row['commission_100_and_below_discount'],
+                'personal_commission_fashion_fp': row['commission_fashion_fp'],
+                'personal_commission_fashion_md': row['commission_fashion_md'],
                 'personal_commission_over_100': row['commission_over_100'],
                 'personal_commission_jewelry': row['commission_jewelry'],
                 'personal_commission_vhernier': row['commission_vhernier'],
@@ -1292,8 +1333,8 @@ class CommissionService:
             'store_commission_30pct',
             'manager_bonus',
             'total_store_commission',
-            'personal_commission_fp_under_100',
-            'personal_commission_discount_under_100',
+            'personal_commission_fashion_fp',
+            'personal_commission_fashion_md',
             'personal_commission_over_100',
             'personal_commission_jewelry',
             'personal_commission_vhernier',
@@ -1471,8 +1512,8 @@ class CommissionService:
                             'individual':            int(row.get('store_commission_70pct', 0) or 0),
                             'shared':                int(row.get('store_commission_30pct', 0) or 0),
                             'manager':               int(row.get('manager_bonus', 0) or 0),
-                            'fp_below_target':       int(row.get('personal_commission_fp_under_100', 0) or 0),
-                            'discount_below_target': int(row.get('personal_commission_discount_under_100', 0) or 0),
+                            'fashion_fp':            int(row.get('personal_commission_fashion_fp', 0) or 0),
+                            'fashion_md':            int(row.get('personal_commission_fashion_md', 0) or 0),
                             'over_target':           int(row.get('personal_commission_over_100', 0) or 0),
                             'jewelry':               int(jewelry_net),
                             'vhernier':              int(row.get('personal_commission_vhernier', 0) or 0),
@@ -1982,14 +2023,57 @@ class CommissionRevenueService:
                     month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
                     year INTEGER NOT NULL,
                     revenue_type VARCHAR(50) NOT NULL CHECK (revenue_type IN (
-                        'full_price', 'markdown', 'jewelry', 'vhernier', 'rosa_maria',
-                        'hand_carry', 'suitcase', 'home_decor', 'other'
+                        'fashion_fp', 'fashion_md', 'jewelry_fp', 'jewelry_md',
+                        'vhernier_fp', 'vhernier_md', 'rosa_maria_fp', 'rosa_maria_md',
+                        'hand_carry_fp', 'hand_carry_md', 'suitcase_fp', 'suitcase_md',
+                        'home_decor_fp', 'home_decor_md', 'other_fp', 'other_md'
                     )),
                     adjustment BIGINT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (employee_code, month, year, revenue_type)
                 )
+            ''')
+            # CR #27: Migrate existing table — drop old CHECK, migrate data, add new CHECK
+            # Step 1: Migrate old type codes
+            cursor.execute('''
+                UPDATE commission_revenue_adjustments SET revenue_type = 'fashion_fp'
+                WHERE revenue_type = 'full_price'
+            ''')
+            cursor.execute('''
+                UPDATE commission_revenue_adjustments SET revenue_type = 'fashion_md'
+                WHERE revenue_type = 'markdown'
+            ''')
+            # Step 2: Drop old CHECK constraint and add new one
+            # Find and drop any existing check constraint on revenue_type
+            cursor.execute('''
+                DO $$
+                DECLARE
+                    constraint_name TEXT;
+                BEGIN
+                    SELECT con.conname INTO constraint_name
+                    FROM pg_constraint con
+                    JOIN pg_attribute att ON att.attnum = ANY(con.conkey)
+                        AND att.attrelid = con.conrelid
+                    WHERE con.conrelid = 'commission_revenue_adjustments'::regclass
+                        AND con.contype = 'c'
+                        AND att.attname = 'revenue_type'
+                    LIMIT 1;
+
+                    IF constraint_name IS NOT NULL THEN
+                        EXECUTE 'ALTER TABLE commission_revenue_adjustments DROP CONSTRAINT ' || constraint_name;
+                    END IF;
+                END $$;
+            ''')
+            cursor.execute('''
+                ALTER TABLE commission_revenue_adjustments
+                ADD CONSTRAINT commission_revenue_adjustments_revenue_type_check
+                CHECK (revenue_type IN (
+                    'fashion_fp', 'fashion_md', 'jewelry_fp', 'jewelry_md',
+                    'vhernier_fp', 'vhernier_md', 'rosa_maria_fp', 'rosa_maria_md',
+                    'hand_carry_fp', 'hand_carry_md', 'suitcase_fp', 'suitcase_md',
+                    'home_decor_fp', 'home_decor_md', 'other_fp', 'other_md'
+                ))
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_commission_revenue_adj_period
@@ -2195,30 +2279,29 @@ class CommissionRevenueService:
             else:
                 personal_total_vat = 0
 
-            # CR #13: full_price with-VAT total for this employee (for store FP ratio)
-            if len(emp_sales) > 0 and 'revenue_with_vat' in emp_sales.columns:
-                separated = commission_service._separate_sales_by_type(emp_sales, hand_carry_upcs)
-                non_jewelry = separated['non_jewelry']
-                fp_sales = non_jewelry[non_jewelry['discount_rate'] <= DISCOUNT_THRESHOLD]
-                personal_fp_vat = int(fp_sales['revenue_with_vat'].sum()) if len(fp_sales) > 0 else 0
-            else:
-                personal_fp_vat = 0
+            # CR #27: FP total = sum of FP from all categories
+            personal_fp_vat = sum(v.get('fp', 0) for v in base.values())
 
-            # Apply adjustments
+            # Apply adjustments — CR #27: per-type-per-tier
             emp_adj = adjustments.get(employee_code, {})
             revenue = []
             personal_total_adjusted = 0
             for rev_type in REVENUE_TYPE_ORDER:
-                base_amount = base.get(rev_type, 0)
-                delta = emp_adj.get(rev_type, 0)
-                adjusted = base_amount + delta
+                type_base = base.get(rev_type, {'fp': 0, 'md': 0, 'total': 0})
+                fp_base = type_base.get('fp', 0)
+                md_base = type_base.get('md', 0)
+                fp_delta = emp_adj.get(f'{rev_type}_fp', 0)
+                md_delta = emp_adj.get(f'{rev_type}_md', 0)
+                fp_adjusted = fp_base + fp_delta
+                md_adjusted = md_base + md_delta
+                total_adjusted = fp_adjusted + md_adjusted
                 revenue.append({
-                    'revenue_type':    rev_type,
-                    'base_amount':     base_amount,
-                    'adjustment':      delta,
-                    'adjusted_amount': adjusted,
+                    'revenue_type': rev_type,
+                    'fp':  {'base_amount': fp_base, 'adjustment': fp_delta, 'adjusted_amount': fp_adjusted},
+                    'md':  {'base_amount': md_base, 'adjustment': md_delta, 'adjusted_amount': md_adjusted},
+                    'total': total_adjusted,
                 })
-                personal_total_adjusted += adjusted
+                personal_total_adjusted += total_adjusted
 
             if store_code not in stores_map:
                 ss = store_settings_map.get(store_code, {})
@@ -2255,9 +2338,167 @@ class CommissionRevenueService:
                     store_revenue = commission_service._compute_revenue_by_type(
                         store_df, hand_carry_upcs
                     )
-                    store_data['store_total_vat'] = sum(store_revenue.values())
-                    store_data['store_fp_total_vat'] = store_revenue.get('full_price', 0)
+                    store_data['store_total_vat'] = sum(v.get('total', 0) for v in store_revenue.values())
+                    store_data['store_fp_total_vat'] = sum(v.get('fp', 0) for v in store_revenue.values())
                     store_data['store_revenue_by_type'] = store_revenue
+
+        result = {
+            'success': True,
+            'month':   month,
+            'year':    year,
+            'revenue_types': [
+                {'code': t, 'label': REVENUE_TYPE_LABELS[t]} for t in REVENUE_TYPE_ORDER
+            ],
+            'stores': list(stores_map.values()),
+        }
+        if oracle_warning:
+            result['oracle_warning'] = oracle_warning
+        return result
+
+    def get_store_view_breakdown(self, month: int, year: int) -> Dict[str, Any]:
+        """
+        CR #26: Revenue breakdown grouped by transaction location (doc_store_code).
+
+        Shows all contributors (employees + SYSADMIN) who generated revenue at each
+        physical store, regardless of their roster assignment. Cross-store sales and
+        COSM re-attributed items appear under the store where the transaction happened.
+
+        Args:
+            month: Commission month (1-12)
+            year:  Commission year
+
+        Returns:
+            Dict with stores, each containing contributors with FP/MD revenue per category.
+        """
+        commission_service = CommissionService()
+
+        # 1. Employees from PostgreSQL (for roster assignment + retailpro_username mapping)
+        all_employees = commission_service._get_employees_with_username_for_period(month, year)
+
+        # Build username → employee info lookup
+        username_to_emp: Dict[str, Dict[str, Any]] = {}
+        for emp in all_employees:
+            if emp.get('retailpro_username'):
+                username_to_emp[emp['retailpro_username']] = emp
+
+        # 2. Store settings (for store_target)
+        store_settings_result = CommissionStoreSettingsService().get_commission_stores(month, year)
+        store_settings_map = {}
+        if store_settings_result.get('success'):
+            store_settings_map = {s['store_code']: s for s in store_settings_result.get('stores', [])}
+
+        # 3. Store name lookup from PostgreSQL
+        store_names: Dict[str, str] = {}
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT store_code, store_name FROM stores')
+                for code, name in cursor.fetchall():
+                    store_names[code] = name
+                cursor.close()
+        finally:
+            if conn:
+                conn.close()
+
+        # 4. Oracle unified sales data + HC UPCs
+        oracle_warning = None
+        try:
+            sales_df = commission_service.repository.get_all_sales_data(year, month)
+            hand_carry_upcs = commission_service.repository.get_hand_carry_upcs()
+        except Exception as e:
+            sales_df = pd.DataFrame()
+            hand_carry_upcs = []
+            oracle_warning = f'Could not fetch live Oracle sales data: {e}'
+            print(f"[WARN] {oracle_warning}")
+
+        # 5. Load saved adjustments
+        adjustments = self._load_adjustments(month, year)
+
+        # 6. Group sales by doc_store_code → employee_username
+        stores_map: Dict[str, Any] = {}
+
+        if len(sales_df) > 0 and 'doc_store_code' in sales_df.columns:
+            for doc_store, store_group in sales_df.groupby('doc_store_code', dropna=False):
+                doc_store_code = str(doc_store) if doc_store else 'UNKNOWN'
+                if doc_store_code == 'nan':
+                    doc_store_code = 'UNKNOWN'
+
+                ss = store_settings_map.get(doc_store_code, {})
+
+                # Store-level totals
+                store_revenue = commission_service._compute_revenue_by_type(
+                    store_group, hand_carry_upcs
+                )
+                store_total_vat = sum(v.get('total', 0) for v in store_revenue.values())
+                store_fp_total_vat = sum(v.get('fp', 0) for v in store_revenue.values())
+
+                contributors = []
+
+                for username, emp_group in store_group.groupby('employee_username', dropna=False):
+                    username_str = str(username) if username else None
+                    if username_str == 'nan':
+                        username_str = None
+
+                    # Resolve employee info from roster
+                    emp_info = username_to_emp.get(username_str, {}) if username_str else {}
+                    employee_code = emp_info.get('employee_code') or username_str or 'UNKNOWN'
+                    full_name = emp_info.get('full_name') or ('System (COSM)' if username_str == 'SYSADMIN' else username_str or 'Unknown')
+                    assigned_store_code = emp_info.get('store_code') if emp_info else None
+                    is_cross_store = (
+                        assigned_store_code is not None
+                        and assigned_store_code != doc_store_code
+                    )
+
+                    # Per-contributor revenue by type with FP/MD split
+                    base = commission_service._compute_revenue_by_type(emp_group, hand_carry_upcs)
+
+                    # Raw Oracle with-VAT total for this contributor at this store
+                    if 'revenue_with_vat' in emp_group.columns:
+                        contributor_total_vat = int(emp_group['revenue_with_vat'].sum())
+                    else:
+                        contributor_total_vat = 0
+
+                    # Apply adjustments (global per employee, not per store)
+                    emp_adj = adjustments.get(employee_code, {})
+                    revenue = []
+                    personal_total_adjusted = 0
+                    for rev_type in REVENUE_TYPE_ORDER:
+                        type_base = base.get(rev_type, {'fp': 0, 'md': 0, 'total': 0})
+                        fp_base = type_base.get('fp', 0)
+                        md_base = type_base.get('md', 0)
+                        fp_delta = emp_adj.get(f'{rev_type}_fp', 0)
+                        md_delta = emp_adj.get(f'{rev_type}_md', 0)
+                        fp_adjusted = fp_base + fp_delta
+                        md_adjusted = md_base + md_delta
+                        total_adjusted = fp_adjusted + md_adjusted
+                        revenue.append({
+                            'revenue_type': rev_type,
+                            'fp':  {'base_amount': fp_base, 'adjustment': fp_delta, 'adjusted_amount': fp_adjusted},
+                            'md':  {'base_amount': md_base, 'adjustment': md_delta, 'adjusted_amount': md_adjusted},
+                            'total': total_adjusted,
+                        })
+                        personal_total_adjusted += total_adjusted
+
+                    contributors.append({
+                        'employee_code':         employee_code,
+                        'full_name':             full_name,
+                        'assigned_store_code':   assigned_store_code,
+                        'is_cross_store':        is_cross_store,
+                        'revenue':               revenue,
+                        'personal_total_adjusted': personal_total_adjusted,
+                        'contributor_total_vat':  contributor_total_vat,
+                    })
+
+                stores_map[doc_store_code] = {
+                    'store_code':        doc_store_code,
+                    'store_name':        store_names.get(doc_store_code, doc_store_code),
+                    'store_target':      ss.get('store_target'),
+                    'store_total_vat':   store_total_vat,
+                    'store_fp_total_vat': store_fp_total_vat,
+                    'contributors':      contributors,
+                }
 
         result = {
             'success': True,
