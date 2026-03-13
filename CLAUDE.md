@@ -20,7 +20,9 @@ app/
     health/                # Health check endpoints
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
-scripts/                   # One-off scripts (init_db.py)
+scripts/                   # Operational scripts
+  database/                # DB init & migrations (init_db.py)
+  deployment/              # Deployment helpers
 tests/                     # Mirrors module structure
 ```
 
@@ -32,7 +34,7 @@ tests/                     # Mirrors module structure
 | `core/auth` | — | — | `AuthService`, `UserRole` | JWT tokens, password hashing, auth decorators |
 | `core/utils` | — | — | — | Date validators, formatters, request decorators |
 | `modules/auth` | `auth_bp`, `user_bp` | `/api/v1/auth`, `/api/v1/users` | — (uses core AuthService) | Login, register, user CRUD |
-| `modules/commission` | `commission_bp` | `/api/v1/commission` | `CommissionService`, `GoogleSheetsService` | Store + personal commission calculations |
+| `modules/commission` | `commission_bp` | `/api/v1/commission` | `CommissionService` | Store + personal commission calculations |
 | `modules/employees` | `hr_employee_bp` | `/api/v1/employees` | `HREmployeeService` | Employee CRUD, types, contracts |
 | `modules/stores` | `store_bp` | `/api/v1/stores` | `StoreService` | Store CRUD |
 | `modules/permissions` | `permission_bp` | `/api/v1` | `PermissionService` | Departments, sections, group permissions |
@@ -74,7 +76,7 @@ tests/                     # Mirrors module structure
    - `routes.py` — Flask Blueprint with prefix `/api/v1/<name>`
    - `service.py` — Business logic class, imports `get_postgres_connection` from core
 3. Register blueprint in `app/main.py`
-4. If module needs database tables, add init step to `scripts/init_db.py`
+4. If module needs database tables, add init step to `scripts/database/init_db.py`
 5. Create test directory: `tests/unit/modules/<name>/` with `__init__.py`
 6. Update this CLAUDE.md module registry table
 
@@ -141,14 +143,14 @@ Mock where the object is **looked up**, not where it's defined:
 ```bash
 source venv/Scripts/activate && FLASK_ENV=testing pytest tests/ -x --ignore=tests/integration -v
 source venv/Scripts/activate && FLASK_ENV=testing python -c "from app.main import app; print('OK')"
-source venv/Scripts/activate && python scripts/init_db.py
+source venv/Scripts/activate && python scripts/database/init_db.py
 ```
 
 **Linux/CI (deployment server):** Standard commands work as-is:
 ```bash
 FLASK_ENV=testing pytest tests/ -x --ignore=tests/integration -v
 FLASK_ENV=testing python -c "from app.main import app; print('OK')"
-python scripts/init_db.py
+python scripts/database/init_db.py
 ```
 
 ## Frontend CR Documentation (API Change Requests)
@@ -159,13 +161,31 @@ The frontend project (`GBL_HR_Frontend`) uses per-feature CR files to communicat
 GBL_HR_Frontend/docs/
 ├── API_REFERENCE.md          # Slim index: architecture, endpoint tables, change log
 └── cr/
-    ├── commission.md          # Commission feature (CR #4–#10)
-    ├── employees.md           # Employee management (CR #2, #5)
-    ├── permissions.md         # Permissions & access (CR #1)
+    ├── commission.md          # Commission feature
+    ├── employees.md           # Employee management
+    ├── permissions.md         # Permissions & access
     └── users.md               # User management & auth
 ```
 
-### Status markers in CR files
+### CR file structure
+
+Each CR file has two sections separated by `# ═══ Completed CRs (Archive) ═══`:
+
+1. **Pending section** (top) — active specs, ⏳ items, current endpoint docs
+2. **Completed section** (bottom) — archived summaries of done CRs
+
+### Branch-sensitive CR checking
+
+CR files are feature-scoped. Only read/update the CR file matching the current branch:
+
+| Branch pattern | CR file |
+|----------------|---------|
+| `feature/commission*` | `cr/commission.md` |
+| `feature/employee*` | `cr/employees.md` |
+| `feature/permission*` | `cr/permissions.md` |
+| `feature/user*` or `feature/auth*` | `cr/users.md` |
+
+### Status markers
 
 | Marker | Meaning |
 |--------|---------|
@@ -174,15 +194,16 @@ GBL_HR_Frontend/docs/
 
 ### When implementing a CR
 
-1. **Update `docs/cr/<feature>.md`** — actual response shapes, implementation notes, mark ⏳ → Done
-2. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
-3. **Never remove frontend-written sections** — only annotate with actual implementation details
-4. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
+1. **Respond in the pending section** of `docs/cr/<feature>.md` — add actual response shapes, implementation notes, mark ⏳ → Done
+2. **Do NOT move CRs to the archive section** — the frontend team handles confirmation and archival
+3. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
+4. **Never remove frontend-written sections** — only annotate with actual implementation details
+5. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
 
 ### Skills
 
-- `/checkcr` — Reads all CR files and compares against backend implementation; reports pending/mismatched items
-- `/responsecr` — Updates CR files and API_REFERENCE.md to reflect current backend status
+- `/checkcr` — Reads the CR file for the current branch, checks pending items against backend code
+- `/responsecr` — Updates the CR file for the current branch to reflect backend implementation status
 
 ## Running the API Locally (dev/staging/feature branches)
 
