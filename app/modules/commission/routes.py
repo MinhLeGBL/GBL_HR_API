@@ -638,7 +638,7 @@ def get_store_view_revenue():
 @manager_required
 def update_revenue_adjustments(employee_code):
     """
-    Create or update revenue adjustment deltas for an employee for a given period.
+    Create or update revenue adjustment deltas for an employee at a specific store.
 
     URL Parameter:
         - employee_code: string (e.g. "GL013")
@@ -647,6 +647,7 @@ def update_revenue_adjustments(employee_code):
         {
             "month": 3,
             "year": 2026,
+            "store_code": "RWR",
             "adjustments": [
                 {"revenue_type": "fashion_fp", "adjustment": 50000000},
                 {"revenue_type": "fashion_md", "adjustment": -10000000}
@@ -663,7 +664,7 @@ def update_revenue_adjustments(employee_code):
         if err:
             return err
 
-        for field in ['month', 'year', 'adjustments']:
+        for field in ['month', 'year', 'store_code', 'adjustments']:
             if field not in data:
                 return jsonify({
                     'success': False,
@@ -673,6 +674,14 @@ def update_revenue_adjustments(employee_code):
         month, year, err = _parse_period(data)
         if err:
             return err
+
+        store_code = data['store_code']
+        if not store_code or not isinstance(store_code, str) or not store_code.strip():
+            return jsonify({
+                'success': False,
+                'error': 'store_code must be a non-empty string'
+            }), 400
+        store_code = store_code.strip()
 
         if not isinstance(data['adjustments'], list):
             return jsonify({
@@ -685,6 +694,7 @@ def update_revenue_adjustments(employee_code):
             employee_code=employee_code,
             month=month,
             year=year,
+            store_code=store_code,
             adjustments=data['adjustments']
         )
 
@@ -706,15 +716,48 @@ def update_revenue_adjustments(employee_code):
 @manager_required
 def calculate_commission():
     """
-    Trigger full commission calculation pipeline for a given month/year.
+    CR #29: Calculate commissions using frontend-supplied revenue context.
 
-    Reads settings from PostgreSQL, fetches Oracle sales, applies revenue adjustments,
-    and calculates all commission components.
+    Frontend sends stores, employees, per-category revenue (base + adjustments),
+    derived totals, achievement rates, and eligibility flags. Backend applies
+    commission rates, handles before-VAT conversion, and returns results.
 
     Request Body:
         {
             "month": 3,
-            "year": 2026
+            "year": 2026,
+            "stores": [
+                {
+                    "store_code": "RWR",
+                    "store_target": 11000000000,
+                    "fp_ratio_target": 60,
+                    "store_total": 6800000000,
+                    "store_fp_total": 4300000000,
+                    "store_achievement": 61.8,
+                    "store_fp_ratio": 63.2,
+                    "store_eligible": true,
+                    "employees": [
+                        {
+                            "employee_code": "GL013",
+                            "is_manager": true,
+                            "contract": "permanent",
+                            "personal_target": 650000000,
+                            "personal_total": 680000000,
+                            "personal_achievement": 104.6,
+                            "personal_eligible": true,
+                            "revenue": [
+                                {
+                                    "revenue_type": "fashion",
+                                    "fp_base": 400000000,
+                                    "fp_adjustment": 50000000,
+                                    "md_base": 80000000,
+                                    "md_adjustment": 0
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
         }
     """
     try:
@@ -722,7 +765,7 @@ def calculate_commission():
         if err:
             return err
 
-        for field in ['month', 'year']:
+        for field in ['month', 'year', 'stores']:
             if field not in data:
                 return jsonify({
                     'success': False,
@@ -733,10 +776,54 @@ def calculate_commission():
         if err:
             return err
 
+        stores = data.get('stores')
+        if not isinstance(stores, list):
+            return jsonify({
+                'success': False,
+                'error': 'stores must be an array'
+            }), 400
+
+        if len(stores) == 0:
+            return jsonify({
+                'success': False,
+                'error': 'stores array must not be empty'
+            }), 400
+
+        # Validate each store has required fields
+        store_required = ['store_code', 'store_target', 'fp_ratio_target',
+                          'store_total', 'store_fp_total', 'store_achievement',
+                          'store_fp_ratio', 'store_eligible', 'employees']
+        for i, store in enumerate(stores):
+            for field in store_required:
+                if field not in store:
+                    return jsonify({
+                        'success': False,
+                        'error': f'stores[{i}] missing required field: {field}'
+                    }), 400
+            if not isinstance(store['employees'], list):
+                return jsonify({
+                    'success': False,
+                    'error': f'stores[{i}].employees must be an array'
+                }), 400
+
+        # Validate each employee has required fields
+        emp_required = ['employee_code', 'is_manager', 'contract',
+                        'personal_target', 'personal_total',
+                        'personal_achievement', 'personal_eligible', 'revenue']
+        for i, store in enumerate(stores):
+            for j, emp in enumerate(store['employees']):
+                for field in emp_required:
+                    if field not in emp:
+                        return jsonify({
+                            'success': False,
+                            'error': f'stores[{i}].employees[{j}] missing required field: {field}'
+                        }), 400
+
         service = CommissionService()
-        result = service.calculate_commissions_for_period(
+        result = service.calculate_commissions_v2(
             month=month,
-            year=year
+            year=year,
+            stores_data=stores
         )
 
         if not result.get('success', False):

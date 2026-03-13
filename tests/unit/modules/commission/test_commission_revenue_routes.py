@@ -216,6 +216,7 @@ class TestUpdateRevenueAdjustments:
         body = {
             'month': 3,
             'year': 2026,
+            'store_code': 'RWR',
             'adjustments': [
                 {'revenue_type': 'fashion_fp', 'adjustment': 50000000},
             ],
@@ -234,6 +235,7 @@ class TestUpdateRevenueAdjustments:
                 'employee_code': 'GL013',
                 'month': 3,
                 'year': 2026,
+                'store_code': 'RWR',
                 'adjustments': [{'revenue_type': 'fashion_fp', 'adjustment': 50000000}],
             }
         }
@@ -245,10 +247,32 @@ class TestUpdateRevenueAdjustments:
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_missing_store_code(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        body = {'month': 3, 'year': 2026, 'adjustments': []}
+        resp = client.put(self.URL, json=body, headers=_auth_headers())
+
+        assert resp.status_code == 400
+        assert 'store_code' in resp.get_json()['error']
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_empty_store_code(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        body = {'month': 3, 'year': 2026, 'store_code': '', 'adjustments': []}
+        resp = client.put(self.URL, json=body, headers=_auth_headers())
+
+        assert resp.status_code == 400
+        assert 'store_code' in resp.get_json()['error']
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     def test_missing_adjustments_field(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
 
-        body = {'month': 3, 'year': 2026}
+        body = {'month': 3, 'year': 2026, 'store_code': 'RWR'}
         resp = client.put(self.URL, json=body, headers=_auth_headers())
 
         assert resp.status_code == 400
@@ -334,8 +358,36 @@ class TestUpdateRevenueAdjustments:
 class TestCalculateCommission:
     URL = '/api/v1/commission/calculate'
 
+    def _valid_store(self):
+        return {
+            'store_code': 'RWR',
+            'store_target': 11000000000,
+            'fp_ratio_target': 60,
+            'store_total': 6800000000,
+            'store_fp_total': 4300000000,
+            'store_achievement': 61.8,
+            'store_fp_ratio': 63.2,
+            'store_eligible': True,
+            'employees': [{
+                'employee_code': 'GL013',
+                'is_manager': True,
+                'contract': 'permanent',
+                'personal_target': 650000000,
+                'personal_total': 680000000,
+                'personal_achievement': 104.6,
+                'personal_eligible': True,
+                'revenue': [{
+                    'revenue_type': 'fashion',
+                    'fp_base': 400000000,
+                    'fp_adjustment': 50000000,
+                    'md_base': 80000000,
+                    'md_adjustment': 0
+                }]
+            }]
+        }
+
     def _valid_body(self, **overrides):
-        body = {'month': 3, 'year': 2026}
+        body = {'month': 3, 'year': 2026, 'stores': [self._valid_store()]}
         body.update(overrides)
         return body
 
@@ -344,11 +396,11 @@ class TestCalculateCommission:
     @patch('app.modules.commission.routes.CommissionService')
     def test_success(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_for_period.return_value = {
+        MockService.return_value.calculate_commissions_v2.return_value = {
             'success': True,
             'month': 3,
             'year': 2026,
-            'employees': [],
+            'stores': [],
         }
 
         resp = client.post(self.URL, json=self._valid_body(), headers=_auth_headers())
@@ -363,7 +415,7 @@ class TestCalculateCommission:
     def test_missing_month(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
 
-        resp = client.post(self.URL, json={'year': 2026}, headers=_auth_headers())
+        resp = client.post(self.URL, json={'year': 2026, 'stores': []}, headers=_auth_headers())
 
         assert resp.status_code == 400
 
@@ -372,16 +424,63 @@ class TestCalculateCommission:
     def test_missing_year(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
 
-        resp = client.post(self.URL, json={'month': 3}, headers=_auth_headers())
+        resp = client.post(self.URL, json={'month': 3, 'stores': []}, headers=_auth_headers())
 
         assert resp.status_code == 400
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_missing_stores(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        resp = client.post(self.URL, json={'month': 3, 'year': 2026}, headers=_auth_headers())
+
+        assert resp.status_code == 400
+        assert 'stores' in resp.get_json()['error']
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_empty_stores(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+
+        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': []},
+                           headers=_auth_headers())
+
+        assert resp.status_code == 400
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_store_missing_required_field(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        store = self._valid_store()
+        del store['store_code']
+
+        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': [store]},
+                           headers=_auth_headers())
+
+        assert resp.status_code == 400
+        assert 'store_code' in resp.get_json()['error']
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_employee_missing_required_field(self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        store = self._valid_store()
+        del store['employees'][0]['employee_code']
+
+        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': [store]},
+                           headers=_auth_headers())
+
+        assert resp.status_code == 400
+        assert 'employee_code' in resp.get_json()['error']
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     def test_invalid_month(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
 
-        resp = client.post(self.URL, json={'month': 0, 'year': 2026}, headers=_auth_headers())
+        resp = client.post(self.URL, json={'month': 0, 'year': 2026, 'stores': [self._valid_store()]},
+                           headers=_auth_headers())
 
         assert resp.status_code == 400
 
@@ -400,7 +499,7 @@ class TestCalculateCommission:
     @patch('app.modules.commission.routes.CommissionService')
     def test_service_error(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_for_period.return_value = {
+        MockService.return_value.calculate_commissions_v2.return_value = {
             'success': False, 'error': 'Calculation failed'
         }
 
@@ -413,7 +512,7 @@ class TestCalculateCommission:
     @patch('app.modules.commission.routes.CommissionService')
     def test_exception_returns_500(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_for_period.side_effect = Exception('boom')
+        MockService.return_value.calculate_commissions_v2.side_effect = Exception('boom')
 
         resp = client.post(self.URL, json=self._valid_body(), headers=_auth_headers())
 
@@ -421,5 +520,5 @@ class TestCalculateCommission:
         assert 'boom' in resp.get_json()['error']
 
     def test_no_auth_returns_401(self, client):
-        resp = client.post(self.URL, json={'month': 3, 'year': 2026})
+        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': []})
         assert resp.status_code == 401

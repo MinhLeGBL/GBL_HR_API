@@ -30,8 +30,10 @@ class TestInitDatabase:
         result = CommissionRevenueService().init_database()
 
         assert result['success'] is True
-        # CREATE TABLE + CREATE INDEX + 2 migrations + constraint drop + constraint add
-        assert mock_cursor.execute.call_count == 6
+        # CREATE TABLE + 2 migrations + 2 named drops + DO$$ drop + delete invalid types
+        # + month check + revenue_type check + CREATE INDEX
+        # + CR #28: add store_code col + drop old unique + add new unique + delete old rows
+        assert mock_cursor.execute.call_count == 14
         mock_conn.commit.assert_called_once()
         mock_cursor.close.assert_called_once()
         mock_conn.close.assert_called_once()
@@ -84,7 +86,7 @@ class TestSaveRevenueAdjustments:
         ]
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026,
+            'GL013', 3, 2026, 'RWR',
             [{'revenue_type': 'fashion_fp', 'adjustment': 50000000}]
         )
 
@@ -104,7 +106,7 @@ class TestSaveRevenueAdjustments:
         ]
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026,
+            'GL013', 3, 2026, 'RWR',
             [
                 {'revenue_type': 'fashion_fp', 'adjustment': 50000000},
                 {'revenue_type': 'fashion_md', 'adjustment': -10000000},
@@ -119,7 +121,7 @@ class TestSaveRevenueAdjustments:
         mock_get_conn.return_value = None
 
         result = CommissionRevenueService().save_revenue_adjustments(
-            'GL013', 3, 2026, [{'revenue_type': 'fashion_fp', 'adjustment': 100}]
+            'GL013', 3, 2026, 'RWR', [{'revenue_type': 'fashion_fp', 'adjustment': 100}]
         )
 
         assert result['success'] is False
@@ -131,7 +133,7 @@ class TestSaveRevenueAdjustments:
         mock_cursor.fetchone.return_value = None
 
         result = svc.save_revenue_adjustments(
-            'INVALID', 3, 2026, [{'revenue_type': 'fashion_fp', 'adjustment': 100}]
+            'INVALID', 3, 2026, 'RWR', [{'revenue_type': 'fashion_fp', 'adjustment': 100}]
         )
 
         assert result['success'] is False
@@ -143,7 +145,7 @@ class TestSaveRevenueAdjustments:
         mock_cursor.fetchone.return_value = (1,)  # employee exists
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026, [{'revenue_type': 'invalid_type', 'adjustment': 100}]
+            'GL013', 3, 2026, 'RWR', [{'revenue_type': 'invalid_type', 'adjustment': 100}]
         )
 
         assert result['success'] is False
@@ -155,7 +157,7 @@ class TestSaveRevenueAdjustments:
         mock_cursor.fetchone.return_value = (1,)
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026, [{'revenue_type': 'fashion_fp'}]
+            'GL013', 3, 2026, 'RWR', [{'revenue_type': 'fashion_fp'}]
         )
 
         assert result['success'] is False
@@ -167,7 +169,7 @@ class TestSaveRevenueAdjustments:
         mock_cursor.fetchone.return_value = (1,)
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026, [{'adjustment': 100}]
+            'GL013', 3, 2026, 'RWR', [{'adjustment': 100}]
         )
 
         assert result['success'] is False
@@ -179,7 +181,7 @@ class TestSaveRevenueAdjustments:
         mock_cursor.fetchone.return_value = (1,)
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026, [{'revenue_type': 'fashion_fp', 'adjustment': 'abc'}]
+            'GL013', 3, 2026, 'RWR', [{'revenue_type': 'fashion_fp', 'adjustment': 'abc'}]
         )
 
         assert result['success'] is False
@@ -194,7 +196,7 @@ class TestSaveRevenueAdjustments:
         # 1st execute: employee exists check, 2nd: fetchone succeeds, 3rd: upsert fails
 
         result = svc.save_revenue_adjustments(
-            'GL013', 3, 2026, [{'revenue_type': 'fashion_fp', 'adjustment': 100}]
+            'GL013', 3, 2026, 'RWR', [{'revenue_type': 'fashion_fp', 'adjustment': 100}]
         )
 
         assert result['success'] is False
@@ -311,7 +313,7 @@ class TestGetRevenueBreakdown:
         # Adjustment: +100 on fashion_fp
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [('GL001', 'fashion_fp', 100)]
+        mock_cursor.fetchall.return_value = [('GL001', 'RWR', 'fashion_fp', 100)]
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
@@ -604,7 +606,7 @@ class TestGetStoreViewBreakdown:
     @patch('app.modules.commission.service.CommissionService')
     @patch('app.modules.commission.service.get_postgres_connection')
     def test_adjustments_applied(self, mock_get_conn, MockCommSvc, MockStoreSvc):
-        """Adjustments are applied per employee globally (not per store)."""
+        """CR #28: Adjustments are applied per store for store-view."""
         sales_df = pd.DataFrame([
             {'employee_username': 'user1', 'upc': 'U1', 'doc_store_code': 'RHN',
              'store_code': 'RHN', 'vendor_code': 'ABC', 'is_jewelry': 0,
@@ -633,7 +635,7 @@ class TestGetStoreViewBreakdown:
         mock_cursor = MagicMock()
         mock_cursor.fetchall.side_effect = [
             [('RHN', 'Rolex Ha Noi')],
-            [('GL001', 'fashion_fp', 200)],  # adjustment: +200 on fashion_fp
+            [('GL001', 'RHN', 'fashion_fp', 200)],  # CR #28: per-store adjustment
         ]
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
