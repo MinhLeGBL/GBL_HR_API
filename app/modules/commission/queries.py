@@ -181,7 +181,7 @@ class CommissionQueries:
                          AND di.VEND_CODE NOT IN ('TVL', 'TIT')
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
-                End
+                END
             ), 0) as ACTUAL_DISCOUNTED_REVENUE,
 
             -- Jewelry revenue: all jewelry vendor items (VHN, ROM, ATS, VIS, LUI, NAN, NAK, SPK, TED, BRT)

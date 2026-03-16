@@ -313,7 +313,7 @@ class TestGetRevenueBreakdown:
         # Adjustment: +100 on fashion_fp
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [('GL001', 'RWR', 'fashion_fp', 100)]
+        mock_cursor.fetchall.return_value = [('GL001', 'fashion_fp', 100)]
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 

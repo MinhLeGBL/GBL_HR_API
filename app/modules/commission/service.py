@@ -320,9 +320,6 @@ class CommissionService:
                               'upc': '', 'category': 'ADJ', 'department': 'HOME', 'use_with_vat': False},
             # other_fp/md: not injectable (COSM items only)
         }
-        # Track which hand_carry adjustment types were used
-        HC_ADJ_TYPES = ('hand_carry_fp', 'hand_carry_md')
-
         adj_sale_date = period_last_day + timedelta(days=1)
         rows = []
 
@@ -1421,25 +1418,9 @@ class CommissionService:
             store_settings_map = {s['store_code']: s for s in store_settings_result.get('stores', [])}
 
             # 3. Load revenue adjustments → {employee_code: {revenue_type: delta}}
-            adjustments_dict: Dict[str, Dict[str, int]] = {}
-            conn = get_postgres_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    # CR #28: Sum adjustments across all store_codes
-                    cursor.execute(
-                        'SELECT employee_code, revenue_type, SUM(adjustment) '
-                        'FROM commission_revenue_adjustments WHERE month = %s AND year = %s '
-                        'GROUP BY employee_code, revenue_type',
-                        (month, year)
-                    )
-                    for emp_code, rev_type, delta in cursor.fetchall():
-                        if emp_code not in adjustments_dict:
-                            adjustments_dict[emp_code] = {}
-                        adjustments_dict[emp_code][rev_type] = int(delta)
-                    cursor.close()
-                finally:
-                    conn.close()
+            # Load adjustments summed across stores
+            revenue_service = CommissionRevenueService()
+            adjustments_dict = revenue_service._load_adjustments(month, year, per_store=False)
 
             # 4. Compute period date range for store commission queries
             last_day_num = calendar.monthrange(year, month)[1]
@@ -2028,14 +2009,15 @@ class CommissionSettingsService:
 
         employee_sid, emp_is_active, emp_store_id, emp_department_id, emp_contract_type_id = emp
 
-        # Get latest snapshot to carry forward values
+        # Get nearest snapshot at or before target period to carry forward values
         cursor.execute('''
             SELECT is_active, store_id, department_id, contract_type_id, is_manager
             FROM employee_status_history
             WHERE employee_sid = %s
+              AND (period_year < %s OR (period_year = %s AND period_month <= %s))
             ORDER BY period_year DESC, period_month DESC
             LIMIT 1
-        ''', (employee_sid,))
+        ''', (employee_sid, year, year, month))
         latest = cursor.fetchone()
 
         if latest:
@@ -2524,23 +2506,27 @@ class CommissionRevenueService:
             return {}
         try:
             cursor = conn.cursor()
-            cursor.execute(
-                'SELECT employee_code, store_code, revenue_type, adjustment '
-                'FROM commission_revenue_adjustments WHERE month = %s AND year = %s',
-                (month, year)
-            )
             if per_store:
                 # CR #28: Per-store adjustments for store-view
+                cursor.execute(
+                    'SELECT employee_code, store_code, revenue_type, adjustment '
+                    'FROM commission_revenue_adjustments WHERE month = %s AND year = %s',
+                    (month, year)
+                )
                 result: Dict[str, Dict[str, Dict[str, int]]] = {}
                 for emp_code, sc, rev_type, delta in cursor.fetchall():
-                    result.setdefault(emp_code, {}).setdefault(sc, {})[rev_type] = delta
+                    result.setdefault(emp_code, {}).setdefault(sc, {})[rev_type] = int(delta)
             else:
-                # Summed across stores for employee-view / calculate
+                # Summed across stores via SQL GROUP BY
+                cursor.execute(
+                    'SELECT employee_code, revenue_type, SUM(adjustment) '
+                    'FROM commission_revenue_adjustments WHERE month = %s AND year = %s '
+                    'GROUP BY employee_code, revenue_type',
+                    (month, year)
+                )
                 result: Dict[str, Dict[str, int]] = {}
-                for emp_code, sc, rev_type, delta in cursor.fetchall():
-                    if emp_code not in result:
-                        result[emp_code] = {}
-                    result[emp_code][rev_type] = result[emp_code].get(rev_type, 0) + delta
+                for emp_code, rev_type, delta in cursor.fetchall():
+                    result.setdefault(emp_code, {})[rev_type] = int(delta)
             cursor.close()
             return result
         finally:
