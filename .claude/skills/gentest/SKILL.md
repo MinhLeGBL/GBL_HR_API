@@ -20,7 +20,7 @@ Filter the output to only files matching the domain-based module structure:
 - `app/modules/*/routes.py` (module route files)
 - `app/modules/*/user_routes.py` (additional route files like auth user_routes)
 - `app/modules/*/repository.py` (repository files)
-- `app/modules/*/sheets_service.py` (external service integrations)
+
 - `app/core/auth/service.py` (core auth service)
 - `app/core/auth/middleware.py` (core auth middleware)
 
@@ -36,7 +36,7 @@ For each changed file, check if a corresponding test file already exists. Tests 
 - `app/modules/<name>/routes.py` → `tests/unit/modules/<name>/test_<name>_routes.py`
 - `app/modules/<name>/user_routes.py` → `tests/unit/modules/<name>/test_user_routes.py`
 - `app/modules/<name>/repository.py` → `tests/unit/modules/<name>/test_<name>_repository.py`
-- `app/modules/<name>/sheets_service.py` → `tests/unit/modules/<name>/test_sheets_service.py`
+
 - `app/core/auth/service.py` → `tests/unit/core/test_auth_service.py`
 - `app/core/auth/middleware.py` → `tests/unit/core/test_auth_middleware.py`
 
