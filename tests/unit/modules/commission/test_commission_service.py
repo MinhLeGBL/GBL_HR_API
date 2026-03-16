@@ -27,429 +27,6 @@ def service(mock_repo):
     return CommissionService(repository=mock_repo)
 
 
-# ======================================================================
-# _check_store_eligibility
-# ======================================================================
-
-class TestCheckStoreEligibility:
-    """Tests for STEP 1: Store eligibility and achievement percentage."""
-
-    def test_missing_store_data_returns_ineligible(self, service):
-        result = service._check_store_eligibility(None, {'TARGET_REVENUE': 100})
-        assert result['eligible'] is False
-        assert 'Missing' in result['reason']
-        assert result['achievement_pct'] == 0
-
-    def test_missing_targets_returns_ineligible(self, service):
-        result = service._check_store_eligibility({'ACTUAL_REVENUE': 100}, None)
-        assert result['eligible'] is False
-        assert 'Missing' in result['reason']
-
-    def test_empty_store_data_returns_ineligible(self, service):
-        result = service._check_store_eligibility({}, {'TARGET_REVENUE': 100})
-        assert result['eligible'] is False
-        assert 'Missing' in result['reason']
-
-    def test_empty_targets_returns_ineligible(self, service):
-        result = service._check_store_eligibility({'ACTUAL_REVENUE': 100}, {})
-        assert result['eligible'] is False
-        assert 'Missing' in result['reason']
-
-    def test_zero_target_revenue_returns_ineligible(self, service):
-        store_data = {
-            'ACTUAL_REVENUE': 1_000_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 800_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        targets = {'TARGET_REVENUE': 0, 'TARGET_FP_RATIO': 0.7}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is False
-        assert 'zero' in result['reason'].lower()
-        assert result['achievement_pct'] == 0
-
-    def test_below_70_percent_fp_revenue_returns_ineligible(self, service):
-        """FP revenue must be >= 70% of target revenue."""
-        store_data = {
-            'ACTUAL_REVENUE': 800_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 600_000,  # 60% of 1M target
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.7}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is False
-        assert 'Full price revenue' in result['reason']
-        # Achievement is still calculated even when ineligible
-        assert result['achievement_pct'] == 80.0
-
-    def test_fp_ratio_below_target_with_insufficient_discount_compensation(self, service):
-        """When actual FP ratio < target, discounted revenue must compensate at 200%."""
-        # actual_fp_ratio = 700_000 / 1_000_000 = 0.70, target = 0.80
-        # fp_shortage = (0.80 - 0.70) * 1_000_000 = 100_000
-        # required_discounted = 100_000 * 2.0 = 200_000
-        # actual_discounted = 150_000 < 200_000 => ineligible
-        store_data = {
-            'ACTUAL_REVENUE': 1_000_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 700_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 150_000,
-        }
-        targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.80}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is False
-        assert 'Discounted revenue' in result['reason']
-        assert result['achievement_pct'] == 100.0
-
-    def test_fp_ratio_below_target_but_sufficient_discount_compensation(self, service):
-        """Store is eligible when discounted revenue compensates for FP shortfall."""
-        # actual_fp_ratio = 700_000 / 1_000_000 = 0.70, target = 0.80
-        # fp_shortage = (0.80 - 0.70) * 1_000_000 = 100_000
-        # required_discounted = 100_000 * 2.0 = 200_000
-        # actual_discounted = 250_000 >= 200_000 => eligible
-        store_data = {
-            'ACTUAL_REVENUE': 1_000_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 700_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 250_000,
-        }
-        targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.80}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is True
-        assert result['achievement_pct'] == 100.0
-
-    def test_eligible_store_above_fp_ratio_target(self, service):
-        """Store is eligible when FP ratio meets or exceeds target."""
-        store_data = {
-            'ACTUAL_REVENUE': 1_200_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 1_000_000,  # FP ratio ~0.833
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.80}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is True
-        assert result['achievement_pct'] == 120.0
-
-    def test_achievement_percentage_calculation(self, service):
-        """Verify achievement = (actual / target) * 100."""
-        store_data = {
-            'ACTUAL_REVENUE': 900_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 800_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-        }
-        targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.70}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is True
-        assert result['achievement_pct'] == pytest.approx(90.0)
-
-    def test_zero_actual_revenue_fp_ratio_defaults_to_zero(self, service):
-        """When actual revenue is 0, fp_ratio = 0 and 70% check fails first."""
-        store_data = {
-            'ACTUAL_REVENUE': 0,
-            'ACTUAL_FULL_PRICE_REVENUE': 0,
-            'ACTUAL_DISCOUNTED_REVENUE': 0,
-        }
-        targets = {'TARGET_REVENUE': 1_000_000, 'TARGET_FP_RATIO': 0.70}
-
-        result = service._check_store_eligibility(store_data, targets)
-        assert result['eligible'] is False
-        assert result['achievement_pct'] == 0.0
-
-
-# ======================================================================
-# _get_tier_rates
-# ======================================================================
-
-class TestGetTierRates:
-    """Tests for tenure-based commission tier rates."""
-
-    def test_new_employee_below_6_months(self, service):
-        rates = service._get_tier_rates(tenure_months=3, achievement_pct=85.0)
-        assert rates == {
-            '70-80': 0.0025,
-            '80-90': 0.0035,
-            '90-100': 0.0045,
-            '100+': 0.0055,
-        }
-
-    def test_new_employee_at_zero_months(self, service):
-        rates = service._get_tier_rates(tenure_months=0, achievement_pct=100.0)
-        assert rates['70-80'] == 0.0025
-        assert rates['100+'] == 0.0055
-
-    def test_experienced_employee_at_6_months(self, service):
-        rates = service._get_tier_rates(tenure_months=6, achievement_pct=85.0)
-        assert rates == {
-            '70-80': 0.0030,
-            '80-90': 0.0040,
-            '90-100': 0.0050,
-            '100+': 0.0060,
-        }
-
-    def test_experienced_employee_above_6_months(self, service):
-        rates = service._get_tier_rates(tenure_months=24, achievement_pct=95.0)
-        assert rates == {
-            '70-80': 0.0030,
-            '80-90': 0.0040,
-            '90-100': 0.0050,
-            '100+': 0.0060,
-        }
-
-    def test_boundary_at_5_months_is_new(self, service):
-        rates = service._get_tier_rates(tenure_months=5, achievement_pct=75.0)
-        assert rates['70-80'] == 0.0025  # new employee rate
-
-    def test_returns_four_tiers(self, service):
-        rates = service._get_tier_rates(tenure_months=12, achievement_pct=80.0)
-        assert set(rates.keys()) == {'70-80', '80-90', '90-100', '100+'}
-
-
-# ======================================================================
-# _allocate_revenue_to_tiers
-# ======================================================================
-
-class TestAllocateRevenueToTiers:
-    """Tests for revenue allocation across achievement tiers."""
-
-    def test_below_70_percent_all_zeros(self, service):
-        result = service._allocate_revenue_to_tiers(1_000_000, 65.0)
-        assert result == {'70-80': 0, '80-90': 0, '90-100': 0, '100+': 0}
-
-    def test_at_69_percent_all_zeros(self, service):
-        result = service._allocate_revenue_to_tiers(1_000_000, 69.9)
-        assert all(v == 0 for v in result.values())
-
-    def test_70_to_80_percent_range(self, service):
-        """70-80% achievement: 100% of revenue at tier 70-80."""
-        result = service._allocate_revenue_to_tiers(1_000_000, 75.0)
-        assert result['70-80'] == 1_000_000
-        assert result['80-90'] == 0
-        assert result['90-100'] == 0
-        assert result['100+'] == 0
-
-    def test_80_to_90_percent_range(self, service):
-        """80-90% achievement: 10% at 70-80, 90% at 80-90."""
-        result = service._allocate_revenue_to_tiers(1_000_000, 85.0)
-        assert result['70-80'] == pytest.approx(100_000)
-        assert result['80-90'] == pytest.approx(900_000)
-        assert result['90-100'] == 0
-        assert result['100+'] == 0
-
-    def test_90_to_100_percent_range(self, service):
-        """90-100% achievement: 10% at 70-80, 10% at 80-90, 80% at 90-100."""
-        result = service._allocate_revenue_to_tiers(1_000_000, 95.0)
-        assert result['70-80'] == pytest.approx(100_000)
-        assert result['80-90'] == pytest.approx(100_000)
-        assert result['90-100'] == pytest.approx(800_000)
-        assert result['100+'] == 0
-
-    def test_100_plus_percent(self, service):
-        """100%+ achievement: 10/10/10/70 split."""
-        result = service._allocate_revenue_to_tiers(1_000_000, 110.0)
-        assert result['70-80'] == pytest.approx(100_000)
-        assert result['80-90'] == pytest.approx(100_000)
-        assert result['90-100'] == pytest.approx(100_000)
-        assert result['100+'] == pytest.approx(700_000)
-
-    def test_exactly_100_percent(self, service):
-        """Exactly 100% triggers the >=100 branch."""
-        result = service._allocate_revenue_to_tiers(500_000, 100.0)
-        assert result['100+'] == pytest.approx(350_000)
-
-    def test_exactly_70_percent(self, service):
-        """Exactly 70% is in the 70-80 range (not below 70)."""
-        result = service._allocate_revenue_to_tiers(1_000_000, 70.0)
-        assert result['70-80'] == 1_000_000
-
-    def test_zero_revenue(self, service):
-        result = service._allocate_revenue_to_tiers(0, 85.0)
-        assert all(v == 0 for v in result.values())
-
-    def test_total_allocation_equals_input_at_100_plus(self, service):
-        """All allocated amounts should sum to total revenue."""
-        total = 2_000_000
-        result = service._allocate_revenue_to_tiers(total, 105.0)
-        assert sum(result.values()) == pytest.approx(total)
-
-
-# ======================================================================
-# _distribute_store_pool
-# ======================================================================
-
-class TestDistributeStorePool:
-    """Tests for STEP 4: Distributing store commission pool to employees."""
-
-    def test_empty_employees_returns_empty(self, service):
-        result = service._distribute_store_pool([], 100_000, 80.0)
-        assert result == []
-
-    def test_zero_pool_returns_empty(self, service):
-        employees = [
-            {
-                'employee_name': 'Alice',
-                'tenure_months': 12,
-                'is_manager': False,
-                'fp_revenue': 500_000,
-                'discounted_revenue': 100_000,
-                'contribution': 10_000,
-            }
-        ]
-        result = service._distribute_store_pool(employees, 0, 80.0)
-        assert result == []
-
-    def test_single_employee_70_30_split(self, service):
-        """Single employee gets 70% from contribution ratio + 30% equal share."""
-        employees = [
-            {
-                'employee_name': 'Alice',
-                'tenure_months': 12,
-                'is_manager': False,
-                'fp_revenue': 500_000,
-                'discounted_revenue': 100_000,
-                'contribution': 50_000,
-            }
-        ]
-        store_pool = 50_000
-
-        result = service._distribute_store_pool(employees, store_pool, 80.0)
-        assert len(result) == 1
-
-        alice = result[0]
-        # contribution_ratio = 50_000 / 50_000 = 1.0
-        # commission_70pct = 0.70 * 50_000 * 1.0 = 35_000
-        assert alice['commission_70pct'] == pytest.approx(35_000)
-        # commission_30pct = 0.30 * 50_000 / 1 = 15_000
-        assert alice['commission_30pct'] == pytest.approx(15_000)
-        assert alice['manager_bonus'] == 0
-        assert alice['total_commission'] == pytest.approx(50_000)
-
-    def test_two_employees_proportional_split(self, service):
-        """Two employees: 70% distributed by contribution ratio."""
-        employees = [
-            {
-                'employee_name': 'Alice',
-                'tenure_months': 12,
-                'is_manager': False,
-                'fp_revenue': 600_000,
-                'discounted_revenue': 0,
-                'contribution': 30_000,
-            },
-            {
-                'employee_name': 'Bob',
-                'tenure_months': 8,
-                'is_manager': False,
-                'fp_revenue': 400_000,
-                'discounted_revenue': 0,
-                'contribution': 20_000,
-            },
-        ]
-        store_pool = 50_000
-
-        result = service._distribute_store_pool(employees, store_pool, 85.0)
-        assert len(result) == 2
-
-        alice = result[0]
-        bob = result[1]
-
-        # Alice: ratio = 30_000/50_000 = 0.6
-        # Alice 70%: 0.70 * 50_000 * 0.6 = 21_000
-        assert alice['commission_70pct'] == pytest.approx(21_000)
-        # Alice 30%: 0.30 * 50_000 / 2 = 7_500
-        assert alice['commission_30pct'] == pytest.approx(7_500)
-        assert alice['total_commission'] == pytest.approx(28_500)
-
-        # Bob: ratio = 20_000/50_000 = 0.4
-        # Bob 70%: 0.70 * 50_000 * 0.4 = 14_000
-        assert bob['commission_70pct'] == pytest.approx(14_000)
-        assert bob['commission_30pct'] == pytest.approx(7_500)
-        assert bob['total_commission'] == pytest.approx(21_500)
-
-    def test_manager_bonus_at_100_percent_achievement(self, service):
-        """Manager receives 3,000,000 bonus when achievement >= 100%."""
-        employees = [
-            {
-                'employee_name': 'Manager',
-                'tenure_months': 24,
-                'is_manager': True,
-                'fp_revenue': 1_000_000,
-                'discounted_revenue': 0,
-                'contribution': 50_000,
-            }
-        ]
-        store_pool = 50_000
-
-        result = service._distribute_store_pool(employees, store_pool, 100.0)
-        assert result[0]['manager_bonus'] == 3_000_000
-        assert result[0]['total_commission'] == pytest.approx(50_000 + 3_000_000)
-
-    def test_manager_bonus_above_100_percent_achievement(self, service):
-        """Manager bonus also applies when achievement > 100%."""
-        employees = [
-            {
-                'employee_name': 'Manager',
-                'tenure_months': 24,
-                'is_manager': True,
-                'fp_revenue': 1_000_000,
-                'discounted_revenue': 0,
-                'contribution': 50_000,
-            }
-        ]
-        result = service._distribute_store_pool(employees, 50_000, 120.0)
-        assert result[0]['manager_bonus'] == 3_000_000
-
-    def test_no_manager_bonus_below_100_percent(self, service):
-        """Manager does NOT receive bonus when achievement < 100%."""
-        employees = [
-            {
-                'employee_name': 'Manager',
-                'tenure_months': 24,
-                'is_manager': True,
-                'fp_revenue': 1_000_000,
-                'discounted_revenue': 0,
-                'contribution': 50_000,
-            }
-        ]
-        result = service._distribute_store_pool(employees, 50_000, 99.9)
-        assert result[0]['manager_bonus'] == 0
-
-    def test_non_manager_never_gets_bonus(self, service):
-        """Non-manager employees never get a manager bonus."""
-        employees = [
-            {
-                'employee_name': 'Staff',
-                'tenure_months': 12,
-                'is_manager': False,
-                'fp_revenue': 1_000_000,
-                'discounted_revenue': 0,
-                'contribution': 50_000,
-            }
-        ]
-        result = service._distribute_store_pool(employees, 50_000, 110.0)
-        assert result[0]['manager_bonus'] == 0
-
-    def test_output_contains_all_expected_fields(self, service):
-        """Verify the result dict has all expected keys."""
-        employees = [
-            {
-                'employee_name': 'Alice',
-                'tenure_months': 6,
-                'is_manager': False,
-                'fp_revenue': 500_000,
-                'discounted_revenue': 50_000,
-                'contribution': 10_000,
-            }
-        ]
-        result = service._distribute_store_pool(employees, 10_000, 80.0)
-        expected_keys = {
-            'employee_code', 'employee_name', 'tenure_months', 'is_manager',
-            'fp_revenue', 'discounted_revenue', 'contribution',
-            'commission_70pct', 'commission_30pct',
-            'manager_bonus', 'total_commission',
-        }
-        assert set(result[0].keys()) == expected_keys
-
 
 # ======================================================================
 # calculate_store_commission_v2
@@ -457,6 +34,91 @@ class TestDistributeStorePool:
 
 class TestCalculateStoreCommissionV2:
     """Tests for the main store commission calculation method."""
+
+    _SALE_COUNTER = 0
+
+    @classmethod
+    def _next_sale_id(cls):
+        cls._SALE_COUNTER += 1
+        return cls._SALE_COUNTER
+
+    def _make_all_sales_df(self, store_code, store_rows=None, employee_rows=None):
+        """Build a unified all_sales_df DataFrame.
+
+        Args:
+            store_code: The store code for doc_store_code on all rows.
+            store_rows: List of dicts for store-level revenue (employee_username=None).
+                Each dict should have: revenue_with_vat, and optionally vendor_code,
+                is_jewelry, discount_rate, category, department.
+            employee_rows: List of dicts for employee-level data.
+                Each dict should have: employee_username, revenue_before_vat, and
+                optionally discount_rate, vendor_code, is_jewelry, department,
+                store_code (employee home store, defaults to store_code).
+        """
+        all_rows = []
+        defaults = {
+            'vendor_code': 'ABC', 'is_jewelry': 0, 'category': '',
+            'discount_rate': 0.0, 'department': 'RTW',
+        }
+
+        for row in (store_rows or []):
+            sid = self._next_sale_id()
+            r = {**defaults, **row}
+            all_rows.append({
+                'sale_id': sid,
+                'upc': str(100 + sid),
+                'upc_clean': str(100 + sid),
+                'bill_number': f'BILL{sid}',
+                'doc_store_code': store_code,
+                'sale_date': '2025-01-15',
+                'sale_time': '10:00:00',
+                'customer_sid': None,
+                'employee_sid': None,
+                'employee_username': None,
+                'store_code': None,
+                'vendor_code': r['vendor_code'],
+                'is_jewelry': r['is_jewelry'],
+                'category': r['category'],
+                'department': r['department'],
+                'discount_rate': r['discount_rate'],
+                'revenue_with_vat': r.get('revenue_with_vat', 0),
+                'revenue_before_vat': r.get('revenue_before_vat', 0),
+            })
+
+        for row in (employee_rows or []):
+            sid = self._next_sale_id()
+            r = {**defaults, **row}
+            emp_store = r.get('store_code', store_code)
+            all_rows.append({
+                'sale_id': sid,
+                'upc': str(100 + sid),
+                'upc_clean': str(100 + sid),
+                'bill_number': f'BILL{sid}',
+                'doc_store_code': r.get('doc_store_code', store_code),
+                'sale_date': '2025-01-15',
+                'sale_time': '10:00:00',
+                'customer_sid': None,
+                'employee_sid': None,
+                'employee_username': r['employee_username'],
+                'store_code': emp_store,
+                'vendor_code': r['vendor_code'],
+                'is_jewelry': r['is_jewelry'],
+                'category': r['category'],
+                'department': r['department'],
+                'discount_rate': r['discount_rate'],
+                'revenue_with_vat': r.get('revenue_with_vat', 0),
+                'revenue_before_vat': r.get('revenue_before_vat', 0),
+            })
+
+        if not all_rows:
+            return pd.DataFrame(columns=[
+                'sale_id', 'upc', 'upc_clean', 'bill_number', 'doc_store_code',
+                'sale_date', 'sale_time', 'customer_sid', 'employee_sid',
+                'employee_username', 'store_code', 'vendor_code', 'is_jewelry',
+                'category', 'department', 'discount_rate', 'revenue_with_vat',
+                'revenue_before_vat',
+            ])
+        return pd.DataFrame(all_rows)
 
     def _make_query_date(self):
         return {
@@ -483,11 +145,10 @@ class TestCalculateStoreCommissionV2:
 
     def test_store_below_70_percent_is_ineligible(self, service, mock_repo):
         """Store with achievement < 70% returns ineligible."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 600_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 500_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-        }
+        all_sales_df = self._make_all_sales_df('HBT', store_rows=[
+            {'revenue_with_vat': 500_000, 'discount_rate': 0.0},   # FP
+            {'revenue_with_vat': 100_000, 'discount_rate': 0.5},   # markdown
+        ])
 
         result = service.calculate_store_commission_v2(
             store_code='HBT',
@@ -495,6 +156,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=self._make_employees(2),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is False
@@ -502,15 +164,18 @@ class TestCalculateStoreCommissionV2:
         assert result['employees'] == []
 
     def test_store_with_insufficient_fp_ratio_compensation(self, service, mock_repo):
-        """Store with low FP ratio and insufficient discount compensation is ineligible."""
-        # actual_fp_ratio = 700_000 / 1_000_000 = 0.70, target = 0.80
-        # fp_shortage = (0.80 - 0.70) * 1_000_000 = 100_000
-        # required_discounted = 200_000, actual = 150_000
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_000_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 700_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 150_000,
-        }
+        """Store with low FP ratio and insufficient discount compensation is ineligible.
+        CR #27: FP = sum of FP from ALL categories, MD = sum of MD from ALL categories.
+        """
+        # All items at >30% discount → all classified as MD
+        # actual_fp = 0, actual_md = 1_000_000
+        # actual_fp_ratio = 0, target = 0.80 → fp_shortage = 800_000
+        # required_discounted = 1_600_000, actual = 1_000_000 → ineligible
+        all_sales_df = self._make_all_sales_df('HBT', store_rows=[
+            {'revenue_with_vat': 700_000, 'discount_rate': 0.5},              # fashion MD
+            {'revenue_with_vat': 150_000, 'discount_rate': 0.5},              # fashion MD
+            {'revenue_with_vat': 150_000, 'is_jewelry': 1, 'vendor_code': 'ATS', 'discount_rate': 0.5},  # jewelry MD
+        ])
 
         result = service.calculate_store_commission_v2(
             store_code='HBT',
@@ -518,6 +183,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.80,
             query_date=self._make_query_date(),
             employees=self._make_employees(2),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is False
@@ -525,23 +191,18 @@ class TestCalculateStoreCommissionV2:
 
     def test_eligible_store_with_employees(self, service, mock_repo):
         """Eligible store returns commission data for each employee."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 900_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 750_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 150_000,
-        }
-        mock_repo.get_employee_sales_data.return_value = [
-            {
-                'EMPLOYEE_USERNAME': 'user1',
-                'EMPLOYEE_FP_REVENUE': 400_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 80_000,
-            },
-            {
-                'EMPLOYEE_USERNAME': 'user2',
-                'EMPLOYEE_FP_REVENUE': 300_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 70_000,
-            },
-        ]
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 750_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 150_000, 'discount_rate': 0.5},   # markdown
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 400_000, 'discount_rate': 0.1},   # FP
+                {'employee_username': 'user1', 'revenue_before_vat': 80_000, 'discount_rate': 0.5},    # discounted
+                {'employee_username': 'user2', 'revenue_before_vat': 300_000, 'discount_rate': 0.1},   # FP
+                {'employee_username': 'user2', 'revenue_before_vat': 70_000, 'discount_rate': 0.5},    # discounted
+            ],
+        )
 
         result = service.calculate_store_commission_v2(
             store_code='HBT',
@@ -549,6 +210,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=self._make_employees(2),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
@@ -557,34 +219,25 @@ class TestCalculateStoreCommissionV2:
         assert result['store_pool'] > 0
 
     def test_rhn_rwp_combined_store_logic(self, service, mock_repo):
-        """RHN/RWP stores fetch sales from both stores and combine them."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_200_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 1_000_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        # get_employee_sales_data is called twice (RHN + RWP)
-        mock_repo.get_employee_sales_data.side_effect = [
-            [  # RHN sales
-                {
-                    'EMPLOYEE_USERNAME': 'user1',
-                    'EMPLOYEE_FP_REVENUE': 300_000,
-                    'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
-                },
+        """RHN/RWP stores combine employee sales from both stores."""
+        # Store revenue from doc_store_code=RHN (store-level rows)
+        all_sales_df = self._make_all_sales_df('RHN',
+            store_rows=[
+                {'revenue_with_vat': 1_000_000, 'discount_rate': 0.0},  # FP
+                {'revenue_with_vat': 200_000, 'discount_rate': 0.5},    # markdown
             ],
-            [  # RWP sales
-                {
-                    'EMPLOYEE_USERNAME': 'user1',
-                    'EMPLOYEE_FP_REVENUE': 200_000,
-                    'EMPLOYEE_DISCOUNTED_REVENUE': 30_000,
-                },
-                {
-                    'EMPLOYEE_USERNAME': 'user2',
-                    'EMPLOYEE_FP_REVENUE': 400_000,
-                    'EMPLOYEE_DISCOUNTED_REVENUE': 100_000,
-                },
+            employee_rows=[
+                # user1 sold at RHN (home store RHN)
+                {'employee_username': 'user1', 'revenue_before_vat': 300_000, 'discount_rate': 0.1, 'store_code': 'RHN', 'doc_store_code': 'RHN'},
+                {'employee_username': 'user1', 'revenue_before_vat': 50_000, 'discount_rate': 0.5, 'store_code': 'RHN', 'doc_store_code': 'RHN'},
+                # user1 sold at RWP (home store RHN, cross-store)
+                {'employee_username': 'user1', 'revenue_before_vat': 200_000, 'discount_rate': 0.1, 'store_code': 'RHN', 'doc_store_code': 'RWP'},
+                {'employee_username': 'user1', 'revenue_before_vat': 30_000, 'discount_rate': 0.5, 'store_code': 'RHN', 'doc_store_code': 'RWP'},
+                # user2 sold at RWP (home store RWP)
+                {'employee_username': 'user2', 'revenue_before_vat': 400_000, 'discount_rate': 0.1, 'store_code': 'RWP', 'doc_store_code': 'RWP'},
+                {'employee_username': 'user2', 'revenue_before_vat': 100_000, 'discount_rate': 0.5, 'store_code': 'RWP', 'doc_store_code': 'RWP'},
             ],
-        ]
+        )
 
         result = service.calculate_store_commission_v2(
             store_code='RHN',
@@ -592,14 +245,10 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=self._make_employees(2),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
-        # Verify get_employee_sales_data was called for both RHN and RWP
-        calls = mock_repo.get_employee_sales_data.call_args_list
-        assert len(calls) == 2
-        assert calls[0][0][0] == 'RHN'
-        assert calls[1][0][0] == 'RWP'
 
         # user1 revenue should be combined: 300k + 200k = 500k FP
         emp1 = next(e for e in result['employees'] if e['employee_code'] == 'EMP001')
@@ -607,15 +256,21 @@ class TestCalculateStoreCommissionV2:
 
     def test_rwp_also_triggers_combined_logic(self, service, mock_repo):
         """RWP store code also triggers the combined RHN/RWP logic."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_200_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 1_000_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        mock_repo.get_employee_sales_data.side_effect = [
-            [{'EMPLOYEE_USERNAME': 'user1', 'EMPLOYEE_FP_REVENUE': 600_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 100_000}],
-            [{'EMPLOYEE_USERNAME': 'user2', 'EMPLOYEE_FP_REVENUE': 400_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 80_000}],
-        ]
+        # Store revenue based on doc_store_code=RWP
+        all_sales_df = self._make_all_sales_df('RWP',
+            store_rows=[
+                {'revenue_with_vat': 1_000_000, 'discount_rate': 0.0},  # FP
+                {'revenue_with_vat': 200_000, 'discount_rate': 0.5},    # markdown
+            ],
+            employee_rows=[
+                # user1 sold at RHN (home store RHN, cross-store into RWP group)
+                {'employee_username': 'user1', 'revenue_before_vat': 600_000, 'discount_rate': 0.1, 'store_code': 'RHN', 'doc_store_code': 'RHN'},
+                {'employee_username': 'user1', 'revenue_before_vat': 100_000, 'discount_rate': 0.5, 'store_code': 'RHN', 'doc_store_code': 'RHN'},
+                # user2 sold at RWP (home store RWP)
+                {'employee_username': 'user2', 'revenue_before_vat': 400_000, 'discount_rate': 0.1, 'store_code': 'RWP', 'doc_store_code': 'RWP'},
+                {'employee_username': 'user2', 'revenue_before_vat': 80_000, 'discount_rate': 0.5, 'store_code': 'RWP', 'doc_store_code': 'RWP'},
+            ],
+        )
 
         result = service.calculate_store_commission_v2(
             store_code='RWP',
@@ -623,32 +278,25 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=self._make_employees(2),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
-        calls = mock_repo.get_employee_sales_data.call_args_list
-        assert calls[0][0][0] == 'RHN'
-        assert calls[1][0][0] == 'RWP'
 
     def test_manager_bonus_at_100_plus_achievement(self, service, mock_repo):
         """Manager receives 3M bonus when store achievement >= 100%."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_100_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 900_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        mock_repo.get_employee_sales_data.return_value = [
-            {
-                'EMPLOYEE_USERNAME': 'user1',
-                'EMPLOYEE_FP_REVENUE': 600_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 100_000,
-            },
-            {
-                'EMPLOYEE_USERNAME': 'user2',
-                'EMPLOYEE_FP_REVENUE': 400_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 100_000,
-            },
-        ]
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 900_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 200_000, 'discount_rate': 0.5},   # markdown
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 600_000, 'discount_rate': 0.1},
+                {'employee_username': 'user1', 'revenue_before_vat': 100_000, 'discount_rate': 0.5},
+                {'employee_username': 'user2', 'revenue_before_vat': 400_000, 'discount_rate': 0.1},
+                {'employee_username': 'user2', 'revenue_before_vat': 100_000, 'discount_rate': 0.5},
+            ],
+        )
 
         result = service.calculate_store_commission_v2(
             store_code='HBT',
@@ -656,6 +304,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=self._make_employees(2, manager_index=0),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
@@ -669,23 +318,18 @@ class TestCalculateStoreCommissionV2:
 
     def test_manager_bonus_between_70_and_100(self, service, mock_repo):
         """Manager receives 750k bonus when 70% <= achievement < 100%."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 850_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 750_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-        }
-        mock_repo.get_employee_sales_data.return_value = [
-            {
-                'EMPLOYEE_USERNAME': 'user1',
-                'EMPLOYEE_FP_REVENUE': 500_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
-            },
-            {
-                'EMPLOYEE_USERNAME': 'user2',
-                'EMPLOYEE_FP_REVENUE': 300_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
-            },
-        ]
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 750_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 100_000, 'discount_rate': 0.5},   # markdown
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 500_000, 'discount_rate': 0.1},
+                {'employee_username': 'user1', 'revenue_before_vat': 50_000, 'discount_rate': 0.5},
+                {'employee_username': 'user2', 'revenue_before_vat': 300_000, 'discount_rate': 0.1},
+                {'employee_username': 'user2', 'revenue_before_vat': 50_000, 'discount_rate': 0.5},
+            ],
+        )
 
         result = service.calculate_store_commission_v2(
             store_code='HBT',
@@ -693,6 +337,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=self._make_employees(2, manager_index=0),
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
@@ -703,23 +348,18 @@ class TestCalculateStoreCommissionV2:
 
     def test_probation_employee_gets_equal_share_only(self, service, mock_repo):
         """Probation employee only receives the equal share, not individual share or manager bonus."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_100_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 900_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        mock_repo.get_employee_sales_data.return_value = [
-            {
-                'EMPLOYEE_USERNAME': 'user1',
-                'EMPLOYEE_FP_REVENUE': 600_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 100_000,
-            },
-            {
-                'EMPLOYEE_USERNAME': 'user2',
-                'EMPLOYEE_FP_REVENUE': 400_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 100_000,
-            },
-        ]
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 900_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 200_000, 'discount_rate': 0.5},   # markdown
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 600_000, 'discount_rate': 0.1},
+                {'employee_username': 'user1', 'revenue_before_vat': 100_000, 'discount_rate': 0.5},
+                {'employee_username': 'user2', 'revenue_before_vat': 400_000, 'discount_rate': 0.1},
+                {'employee_username': 'user2', 'revenue_before_vat': 100_000, 'discount_rate': 0.5},
+            ],
+        )
 
         employees = self._make_employees(2, manager_index=0, probation_indices=[1])
 
@@ -729,6 +369,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=employees,
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
@@ -740,23 +381,18 @@ class TestCalculateStoreCommissionV2:
 
     def test_seniority_affects_tier_category(self, service, mock_repo):
         """Employees with seniority >= 3 years are Senior, otherwise Junior."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 900_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 750_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 150_000,
-        }
-        mock_repo.get_employee_sales_data.return_value = [
-            {
-                'EMPLOYEE_USERNAME': 'user1',
-                'EMPLOYEE_FP_REVENUE': 500_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 75_000,
-            },
-            {
-                'EMPLOYEE_USERNAME': 'user2',
-                'EMPLOYEE_FP_REVENUE': 300_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 75_000,
-            },
-        ]
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 750_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 150_000, 'discount_rate': 0.5},   # markdown
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 500_000, 'discount_rate': 0.1},
+                {'employee_username': 'user1', 'revenue_before_vat': 75_000, 'discount_rate': 0.5},
+                {'employee_username': 'user2', 'revenue_before_vat': 300_000, 'discount_rate': 0.1},
+                {'employee_username': 'user2', 'revenue_before_vat': 75_000, 'discount_rate': 0.5},
+            ],
+        )
 
         employees = [
             {
@@ -787,6 +423,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=employees,
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
@@ -794,19 +431,20 @@ class TestCalculateStoreCommissionV2:
 
     def test_rhn_rwp_equal_share_uses_working_day_ratio(self, service, mock_repo):
         """RHN/RWP stores distribute the 30% equal share by working day ratio."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 1_200_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 1_000_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 200_000,
-        }
-        mock_repo.get_employee_sales_data.side_effect = [
-            [  # RHN
-                {'EMPLOYEE_USERNAME': 'user1', 'EMPLOYEE_FP_REVENUE': 600_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 100_000},
+        all_sales_df = self._make_all_sales_df('RHN',
+            store_rows=[
+                {'revenue_with_vat': 1_000_000, 'discount_rate': 0.0},  # FP
+                {'revenue_with_vat': 200_000, 'discount_rate': 0.5},    # markdown
             ],
-            [  # RWP
-                {'EMPLOYEE_USERNAME': 'user2', 'EMPLOYEE_FP_REVENUE': 400_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 100_000},
+            employee_rows=[
+                # user1 at RHN (home store RHN)
+                {'employee_username': 'user1', 'revenue_before_vat': 600_000, 'discount_rate': 0.1, 'store_code': 'RHN', 'doc_store_code': 'RHN'},
+                {'employee_username': 'user1', 'revenue_before_vat': 100_000, 'discount_rate': 0.5, 'store_code': 'RHN', 'doc_store_code': 'RHN'},
+                # user2 at RWP (home store RWP)
+                {'employee_username': 'user2', 'revenue_before_vat': 400_000, 'discount_rate': 0.1, 'store_code': 'RWP', 'doc_store_code': 'RWP'},
+                {'employee_username': 'user2', 'revenue_before_vat': 100_000, 'discount_rate': 0.5, 'store_code': 'RWP', 'doc_store_code': 'RWP'},
             ],
-        ]
+        )
 
         employees = [
             {
@@ -837,6 +475,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=employees,
+            all_sales_df=all_sales_df,
         )
 
         emp1 = next(e for e in result['employees'] if e['employee_code'] == 'EMP001')
@@ -850,18 +489,16 @@ class TestCalculateStoreCommissionV2:
 
     def test_employee_without_username_gets_zero_revenue(self, service, mock_repo):
         """Employee without employee_username still participates but has 0 revenue."""
-        mock_repo.get_store_sales_data.return_value = {
-            'ACTUAL_REVENUE': 900_000,
-            'ACTUAL_FULL_PRICE_REVENUE': 750_000,
-            'ACTUAL_DISCOUNTED_REVENUE': 150_000,
-        }
-        mock_repo.get_employee_sales_data.return_value = [
-            {
-                'EMPLOYEE_USERNAME': 'user1',
-                'EMPLOYEE_FP_REVENUE': 750_000,
-                'EMPLOYEE_DISCOUNTED_REVENUE': 150_000,
-            },
-        ]
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 750_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 150_000, 'discount_rate': 0.5},   # markdown
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 750_000, 'discount_rate': 0.1},
+                {'employee_username': 'user1', 'revenue_before_vat': 150_000, 'discount_rate': 0.5},
+            ],
+        )
 
         employees = [
             {
@@ -892,6 +529,7 @@ class TestCalculateStoreCommissionV2:
             store_fp_ratio_target=0.70,
             query_date=self._make_query_date(),
             employees=employees,
+            all_sales_df=all_sales_df,
         )
 
         assert result['eligible'] is True
@@ -920,14 +558,15 @@ class TestCalculateCombinedCommission:
                 'employee_code': code,
                 'fullname': f'Employee {i+1}',
                 'store_code': 'HBT',
-                'commission_100_and_below_fp': 10_000 * (i + 1),
-                'commission_100_and_below_discount': 2_000 * (i + 1),
+                'commission_fashion_fp': 10_000 * (i + 1),
+                'commission_fashion_md': 2_000 * (i + 1),
                 'commission_over_100': 5_000 * (i + 1),
                 'commission_jewelry': 3_000 * (i + 1),
                 'commission_vhernier': 1_000 * (i + 1),
                 'commission_rosa_maria': 500 * (i + 1),
                 'commission_suitcase': 500_000 * (i + 1),
                 'commission_hand_carry': 2_000 * (i + 1),
+                'commission_home_decor': 0,
                 'total': 522_500 * (i + 1),
             })
         return pd.DataFrame(rows)
@@ -1040,14 +679,15 @@ class TestCalculateCombinedCommission:
             'store_achievement_pct',
             'store_commission_70pct', 'store_commission_30pct',
             'manager_bonus', 'total_store_commission',
-            'personal_commission_fp_under_100',
-            'personal_commission_discount_under_100',
+            'personal_commission_fashion_fp',
+            'personal_commission_fashion_md',
             'personal_commission_over_100',
             'personal_commission_jewelry',
             'personal_commission_vhernier',
             'personal_commission_rosa_maria',
             'personal_commission_suitcase',
             'personal_commission_hand_carry',
+            'personal_commission_home_decor',
             'personal_commission_total',
             'total_handout_commission',
         ]
@@ -1079,249 +719,6 @@ class TestCalculateCombinedCommission:
 
 
 # ======================================================================
-# calculate_batch_store_commissions
-# ======================================================================
-
-class TestCalculateBatchStoreCommissions:
-    """Tests for batch processing of multiple stores."""
-
-    def test_empty_employees_returns_error(self, service):
-        result = service.calculate_batch_store_commissions(
-            employees=[], stores=[{'store_code': 'HBT'}],
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-        assert result['success'] is False
-        assert 'required' in result['error'].lower()
-
-    def test_empty_stores_returns_error(self, service):
-        result = service.calculate_batch_store_commissions(
-            employees=[{'employee_code': 'E1'}], stores=[],
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-        assert result['success'] is False
-
-    def test_none_employees_returns_error(self, service):
-        result = service.calculate_batch_store_commissions(
-            employees=None, stores=[{'store_code': 'HBT'}],
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-        assert result['success'] is False
-
-    def test_store_config_missing_marks_employees_ineligible(self, service, mock_repo):
-        """Employees whose store has no config get marked ineligible."""
-        employees = [
-            {
-                'employee_code': 'EMP001',
-                'employee_name': 'Alice',
-                'store_code': 'UNKNOWN',
-            }
-        ]
-        stores = [
-            {'store_code': 'HBT', 'target_revenue': 1_000_000, 'target_fp_ratio': 0.70}
-        ]
-
-        mock_repo.get_multiple_stores_sales_data.return_value = {}
-        mock_repo.get_multiple_stores_employee_sales_data.return_value = {}
-
-        result = service.calculate_batch_store_commissions(
-            employees=employees, stores=stores,
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-
-        assert result['success'] is True
-        assert len(result['employees']) == 1
-        assert result['employees'][0]['eligible'] is False
-        assert 'not provided' in result['employees'][0]['reason'].lower()
-
-    def test_ineligible_store_all_employees_get_zero(self, service, mock_repo):
-        """All employees in an ineligible store get 0 commission."""
-        employees = [
-            {'employee_code': 'EMP001', 'employee_name': 'Alice', 'store_code': 'HBT'},
-            {'employee_code': 'EMP002', 'employee_name': 'Bob', 'store_code': 'HBT'},
-        ]
-        stores = [
-            {'store_code': 'HBT', 'store_name': 'HBT Store', 'target_revenue': 1_000_000, 'target_fp_ratio': 0.70}
-        ]
-
-        # Store data shows below 70% achievement
-        mock_repo.get_multiple_stores_sales_data.return_value = {
-            'HBT': {
-                'ACTUAL_REVENUE': 500_000,
-                'ACTUAL_FULL_PRICE_REVENUE': 400_000,
-                'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-            }
-        }
-        mock_repo.get_multiple_stores_employee_sales_data.return_value = {}
-
-        result = service.calculate_batch_store_commissions(
-            employees=employees, stores=stores,
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-
-        assert result['success'] is True
-        assert result['summary']['ineligible_employees'] == 2
-        for emp in result['employees']:
-            assert emp['eligible'] is False
-            assert emp['total_commission'] == 0
-
-    def test_eligible_store_with_employee_sales(self, service, mock_repo):
-        """Eligible store produces commission for employees with sales data."""
-        employees = [
-            {
-                'employee_code': 'EMP001',
-                'employee_name': 'Alice',
-                'store_code': 'HBT',
-                'seniority': 12,
-            },
-        ]
-        stores = [
-            {
-                'store_code': 'HBT',
-                'store_name': 'HBT Store',
-                'target_revenue': 1_000_000,
-                'target_fp_ratio': 0.70,
-            }
-        ]
-
-        mock_repo.get_multiple_stores_sales_data.return_value = {
-            'HBT': {
-                'ACTUAL_REVENUE': 900_000,
-                'ACTUAL_FULL_PRICE_REVENUE': 800_000,
-                'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-            }
-        }
-        mock_repo.get_multiple_stores_employee_sales_data.return_value = {
-            'HBT': [
-                {
-                    'EMPLOYEE_CODE': 'EMP001',
-                    'EMPLOYEE_FULL_NAME': 'Alice',
-                    'EMPLOYEE_FP_REVENUE': 500_000,
-                    'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
-                }
-            ]
-        }
-
-        result = service.calculate_batch_store_commissions(
-            employees=employees, stores=stores,
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-
-        assert result['success'] is True
-        assert result['summary']['eligible_employees'] >= 1
-        eligible_emps = [e for e in result['employees'] if e.get('eligible')]
-        assert len(eligible_emps) >= 1
-        assert eligible_emps[0]['total_commission'] > 0
-
-    def test_multiple_stores_mixed_eligibility(self, service, mock_repo):
-        """Batch with one eligible and one ineligible store."""
-        employees = [
-            {'employee_code': 'EMP001', 'employee_name': 'Alice', 'store_code': 'HBT', 'seniority': 12},
-            {'employee_code': 'EMP002', 'employee_name': 'Bob', 'store_code': 'HDG', 'seniority': 8},
-        ]
-        stores = [
-            {'store_code': 'HBT', 'store_name': 'HBT Store', 'target_revenue': 1_000_000, 'target_fp_ratio': 0.70},
-            {'store_code': 'HDG', 'store_name': 'HDG Store', 'target_revenue': 1_000_000, 'target_fp_ratio': 0.70},
-        ]
-
-        mock_repo.get_multiple_stores_sales_data.return_value = {
-            'HBT': {
-                'ACTUAL_REVENUE': 900_000,
-                'ACTUAL_FULL_PRICE_REVENUE': 800_000,
-                'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-            },
-            'HDG': {
-                'ACTUAL_REVENUE': 400_000,    # Below 70%
-                'ACTUAL_FULL_PRICE_REVENUE': 300_000,
-                'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-            },
-        }
-        mock_repo.get_multiple_stores_employee_sales_data.return_value = {
-            'HBT': [
-                {
-                    'EMPLOYEE_CODE': 'EMP001',
-                    'EMPLOYEE_FULL_NAME': 'Alice',
-                    'EMPLOYEE_FP_REVENUE': 500_000,
-                    'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
-                }
-            ],
-            'HDG': [
-                {
-                    'EMPLOYEE_CODE': 'EMP002',
-                    'EMPLOYEE_FULL_NAME': 'Bob',
-                    'EMPLOYEE_FP_REVENUE': 200_000,
-                    'EMPLOYEE_DISCOUNTED_REVENUE': 50_000,
-                }
-            ],
-        }
-
-        result = service.calculate_batch_store_commissions(
-            employees=employees, stores=stores,
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-
-        assert result['success'] is True
-        assert result['summary']['eligible_stores'] == 1
-        assert result['summary']['total_stores'] == 2
-
-        alice = next(e for e in result['employees'] if e['employee_code'] == 'EMP001')
-        bob = next(e for e in result['employees'] if e['employee_code'] == 'EMP002')
-        assert alice['eligible'] is True
-        assert bob['eligible'] is False
-        assert bob['total_commission'] == 0
-
-    def test_result_structure(self, service, mock_repo):
-        """Verify the output contains expected top-level keys."""
-        employees = [
-            {'employee_code': 'EMP001', 'employee_name': 'Alice', 'store_code': 'HBT', 'seniority': 12}
-        ]
-        stores = [
-            {'store_code': 'HBT', 'store_name': 'HBT', 'target_revenue': 1_000_000, 'target_fp_ratio': 0.70}
-        ]
-
-        mock_repo.get_multiple_stores_sales_data.return_value = {
-            'HBT': {
-                'ACTUAL_REVENUE': 900_000,
-                'ACTUAL_FULL_PRICE_REVENUE': 800_000,
-                'ACTUAL_DISCOUNTED_REVENUE': 100_000,
-            }
-        }
-        mock_repo.get_multiple_stores_employee_sales_data.return_value = {
-            'HBT': [
-                {'EMPLOYEE_CODE': 'EMP001', 'EMPLOYEE_FULL_NAME': 'Alice', 'EMPLOYEE_FP_REVENUE': 500_000, 'EMPLOYEE_DISCOUNTED_REVENUE': 50_000}
-            ]
-        }
-
-        result = service.calculate_batch_store_commissions(
-            employees=employees, stores=stores,
-            year=2025, month=1,
-            start_date='2025-01-01 00:00:00',
-            end_date='2025-01-31 23:59:59',
-        )
-
-        assert 'success' in result
-        assert 'period' in result
-        assert 'summary' in result
-        assert 'stores' in result
-        assert 'employees' in result
-        assert result['period']['year'] == 2025
-        assert result['period']['month'] == 1
-
-
-# ======================================================================
 # calculate_personal_commissions
 # ======================================================================
 
@@ -1331,12 +728,13 @@ class TestCalculatePersonalCommissions:
     def _make_sales_df(self, rows):
         """Helper to create a sales DataFrame with required columns."""
         columns = [
-            'SALE_ID', 'UPC', 'EMPLOYEE_CODE', 'EMPLOYEE_USERNAME', 'EMPLOYEE_SID',
-            'BILL_NUMBER', 'STORE_CODE', 'SALE_DATE', 'SALE_TIME',
-            'REVENUE_WITH_VAT', 'REVENUE_BEFORE_VAT', 'DISCOUNT_RATE',
-            'IS_JEWELRY', 'VENDOR_CODE', 'CATEGORY', 'DEPARTMENT',
+            'sale_id', 'upc', 'bill_number', 'doc_store_code', 'sale_date', 'sale_time',
+            'customer_sid', 'employee_sid', 'employee_username', 'store_code',
+            'vendor_code', 'is_jewelry', 'category', 'department', 'discount_rate',
+            'revenue_with_vat', 'revenue_before_vat',
         ]
         df = pd.DataFrame(rows, columns=columns)
+        df['upc_clean'] = df['upc'].astype(str).str.strip()
         return df
 
     def test_missing_month_returns_error_df(self, service, mock_repo):
@@ -1366,10 +764,11 @@ class TestCalculatePersonalCommissions:
     def test_employee_without_code_gets_zero(self, service, mock_repo):
         """Employee with None employee_code gets zero commission."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             1_100_000, 1_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_100_000, 1_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1391,10 +790,11 @@ class TestCalculatePersonalCommissions:
     def test_employee_without_username_gets_zero(self, service, mock_repo):
         """Employee without username cannot match to sales data."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             1_100_000, 1_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_100_000, 1_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1415,10 +815,11 @@ class TestCalculatePersonalCommissions:
     def test_employee_below_50_percent_gets_no_personal_commission(self, service, mock_repo):
         """Below 50% achievement: no personal commission (but jewelry/hand_carry/suitcase still paid)."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             400_000, 363_636, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 400_000, 363_636],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1436,8 +837,8 @@ class TestCalculatePersonalCommissions:
         )
         emp = result.iloc[0]
         # No FP or discount personal commission at < 50%
-        assert emp['commission_100_and_below_fp'] == 0
-        assert emp['commission_100_and_below_discount'] == 0
+        assert emp['commission_fashion_fp'] == 0
+        assert emp['commission_fashion_md'] == 0
         assert emp['commission_over_100'] == 0
 
     def test_tier1_50_to_70_percent_commission(self, service, mock_repo):
@@ -1445,13 +846,15 @@ class TestCalculatePersonalCommissions:
         # target = 1,000,000. revenue_with_vat = 600,000 => 60% achievement
         sales_df = self._make_sales_df([
             # Full price item (discount_rate <= 0.30)
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             600_000, 500_000, 0.10, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.10, 600_000, 500_000],
             # Discounted item (discount_rate > 0.30)
-            [2, 'UPC002', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
-             0, 200_000, 0.50, 0, 'ABC', 'PANTS', 'RTW'],
+            [2, 'UPC002', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'PANTS', 'RTW', 0.50, 0, 200_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1469,18 +872,20 @@ class TestCalculatePersonalCommissions:
         )
         emp = result.iloc[0]
         # Standard tier1 rates: FP 0.25%, discount 0.125%
-        assert emp['commission_100_and_below_fp'] == pytest.approx(500_000 * 0.0025)
-        assert emp['commission_100_and_below_discount'] == pytest.approx(200_000 * 0.00125)
+        assert emp['commission_fashion_fp'] == pytest.approx(500_000 * 0.0025)
+        assert emp['commission_fashion_md'] == pytest.approx(200_000 * 0.00125)
 
     def test_tier2_70_to_100_percent_commission(self, service, mock_repo):
         """Tier 2 (70-100%): FP at 0.5%, discount at 0.25% (standard rates)."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             800_000, 700_000, 0.10, 0, 'ABC', 'SHIRTS', 'RTW'],
-            [2, 'UPC002', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
-             0, 100_000, 0.50, 0, 'ABC', 'PANTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.10, 800_000, 700_000],
+            [2, 'UPC002', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'PANTS', 'RTW', 0.50, 0, 100_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1497,20 +902,22 @@ class TestCalculatePersonalCommissions:
             month=1, year=2025, employees=employees
         )
         emp = result.iloc[0]
-        assert emp['commission_100_and_below_fp'] == pytest.approx(700_000 * 0.005)
-        assert emp['commission_100_and_below_discount'] == pytest.approx(100_000 * 0.0025)
+        assert emp['commission_fashion_fp'] == pytest.approx(700_000 * 0.005)
+        assert emp['commission_fashion_md'] == pytest.approx(100_000 * 0.0025)
 
     def test_jewelry_commission_regardless_of_achievement(self, service, mock_repo):
         """Jewelry commission is paid regardless of achievement rate."""
         sales_df = self._make_sales_df([
             # VHN jewelry: 1% on revenue_before_vat
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             300_000, 272_727, 0.0, 1, 'VHN', 'RINGS', 'JWL'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'VHN', 1, 'RINGS', 'JWL', 0.0, 300_000, 272_727],
             # ROM EARRINGS: 3%
-            [2, 'UPC002', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
-             200_000, 181_818, 0.0, 1, 'ROM', 'EARRINGS', 'JWL'],
+            [2, 'UPC002', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ROM', 1, 'EARRINGS', 'JWL', 0.0, 200_000, 181_818],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1535,12 +942,14 @@ class TestCalculatePersonalCommissions:
     def test_suitcase_commission_flat_rate(self, service, mock_repo):
         """TVL/TIT items earn 500,000 VND per item regardless of achievement."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             5_000_000, 4_545_454, 0.0, 0, 'TVL', 'LUGGAGE', 'ACC'],
-            [2, 'UPC002', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
-             3_000_000, 2_727_272, 0.0, 0, 'TIT', 'LUGGAGE', 'ACC'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'TVL', 0, 'LUGGAGE', 'ACC', 0.0, 5_000_000, 4_545_454],
+            [2, 'UPC002', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
+             None, 'SID1', 'user1', 'HBT',
+             'TIT', 0, 'LUGGAGE', 'ACC', 0.0, 3_000_000, 2_727_272],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1565,16 +974,19 @@ class TestCalculatePersonalCommissions:
 
         sales_df = self._make_sales_df([
             # 1% vendor (ATQ) hand carry
-            [1, 'HC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             1_000_000, 909_090, 0.0, 0, 'ATQ', 'BAGS', 'ACC'],
+            [1, 'HC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ATQ', 0, 'BAGS', 'ACC', 0.0, 1_000_000, 909_090],
             # 2% vendor (CGI) hand carry
-            [2, 'HC002', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
-             2_000_000, 1_818_181, 0.0, 0, 'CGI', 'BAGS', 'ACC'],
+            [2, 'HC002', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
+             None, 'SID1', 'user1', 'HBT',
+             'CGI', 0, 'BAGS', 'ACC', 0.0, 2_000_000, 1_818_181],
             # ROM EARRINGS hand carry: 3%
-            [3, 'HC003', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:02:00',
-             500_000, 454_545, 0.0, 1, 'ROM', 'EARRINGS', 'JWL'],
+            [3, 'HC003', 'BILL1', 'HBT', '2025-01-15', '10:02:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ROM', 1, 'EARRINGS', 'JWL', 0.0, 500_000, 454_545],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = hand_carry_upcs
 
         employees = [
@@ -1596,17 +1008,19 @@ class TestCalculatePersonalCommissions:
         expected_hc = (1_000_000 * 0.01) + (2_000_000 * 0.02) + (500_000 * 0.03)
         assert emp['commission_hand_carry'] == pytest.approx(expected_hc)
 
-    def test_cosm_excluded_from_commission_but_counts_for_achievement(self, service, mock_repo):
-        """COSM items count toward achievement but earn no commission."""
+    def test_cosm_hea_excluded_from_commission_but_counts_for_achievement(self, service, mock_repo):
+        """COSM+HEA items count toward achievement but earn no commission."""
         sales_df = self._make_sales_df([
             # Regular RTW item
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             500_000, 454_545, 0.10, 0, 'ABC', 'SHIRTS', 'RTW'],
-            # COSM item (should be excluded from commission calc)
-            [2, 'UPC002', 'E1', 'user1', 'SID1', 'BILL2', 'HBT', '2025-01-15', '11:00:00',
-             300_000, 272_727, 0.10, 0, 'COS', 'CREAM', 'COSM'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.10, 500_000, 454_545],
+            # COSM+HEA item (excluded from commission — only HEA vendor)
+            [2, 'UPC002', 'BILL2', 'HBT', '2025-01-15', '11:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'HEA', 0, 'CREAM', 'COSM', 0.10, 300_000, 272_727],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1626,15 +1040,49 @@ class TestCalculatePersonalCommissions:
 
         # FP commission only on non-COSM item (454,545 * tier2 rate)
         # Achievement = (500k + 300k) / 1M = 80% -> tier2 rate 0.005
-        assert emp['commission_100_and_below_fp'] == pytest.approx(454_545 * 0.005)
+        assert emp['commission_fashion_fp'] == pytest.approx(454_545 * 0.005)
+
+    def test_cosm_non_hea_earns_fashion_commission(self, service, mock_repo):
+        """COSM items with non-HEA vendor are classified as fashion and earn commission."""
+        sales_df = self._make_sales_df([
+            # Regular RTW item
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.10, 500_000, 454_545],
+            # COSM+NBP item (non-HEA → earns fashion commission)
+            [2, 'UPC002', 'BILL2', 'HBT', '2025-01-15', '11:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'NBP', 0, 'OTHER', 'COSM', 0.10, 300_000, 272_727],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [
+            {
+                'employee_code': 'EMP001',
+                'employee_username': 'user1',
+                'personal_target': 1_000_000,  # 800k/1M = 80% -> tier2
+                'full_name': 'COSM Non-HEA Test',
+                'store_code': 'HBT',
+            }
+        ]
+
+        result = service.calculate_personal_commissions(
+            month=1, year=2025, employees=employees
+        )
+        emp = result.iloc[0]
+
+        # Both items earn FP commission: (454,545 + 272,727) * tier2 rate 0.005
+        assert emp['commission_fashion_fp'] == pytest.approx((454_545 + 272_727) * 0.005)
 
     def test_rwd_store_uses_special_rates(self, service, mock_repo):
         """RWD store uses special commission rates when ENABLE_RWD_SPECIAL_RATES is True."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'RWD', '2025-01-15', '10:00:00',
-             600_000, 500_000, 0.10, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'RWD', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'RWD',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.10, 600_000, 500_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1654,15 +1102,16 @@ class TestCalculatePersonalCommissions:
 
         emp = result.iloc[0]
         # RWD tier1 FP rate = 0.00375 (vs standard 0.0025)
-        assert emp['commission_100_and_below_fp'] == pytest.approx(500_000 * 0.00375)
+        assert emp['commission_fashion_fp'] == pytest.approx(500_000 * 0.00375)
 
     def test_output_dataframe_columns(self, service, mock_repo):
         """Verify the output DataFrame has all expected columns."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             1_000_000, 909_090, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_000_000, 909_090],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1681,10 +1130,11 @@ class TestCalculatePersonalCommissions:
 
         expected_columns = [
             'employee_code', 'fullname', 'store_code',
-            'commission_100_and_below_fp', 'commission_100_and_below_discount',
+            'commission_fashion_fp', 'commission_fashion_md',
             'commission_over_100', 'commission_jewelry',
             'commission_vhernier', 'commission_rosa_maria',
-            'commission_suitcase', 'commission_hand_carry', 'total',
+            'commission_suitcase', 'commission_hand_carry',
+            'commission_home_decor', 'total',
         ]
         assert list(result.columns) == expected_columns
 
@@ -1692,10 +1142,11 @@ class TestCalculatePersonalCommissions:
         """Employee whose SID is in sales df but has zero actual rows gets zero."""
         # Sales df has user1 data but user2 has no rows
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', 'SID1', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             1_000_000, 909_090, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_000_000, 909_090],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [
@@ -1742,22 +1193,23 @@ class TestEmployeeCommissionException:
     def _make_sales_df(self, rows):
         """Sales DataFrame with customer_sid column for exception tests."""
         columns = [
-            'SALE_ID', 'UPC', 'EMPLOYEE_CODE', 'EMPLOYEE_USERNAME', 'EMPLOYEE_SID',
-            'CUSTOMER_SID', 'BILL_NUMBER', 'STORE_CODE', 'SALE_DATE', 'SALE_TIME',
-            'REVENUE_WITH_VAT', 'REVENUE_BEFORE_VAT', 'DISCOUNT_RATE',
-            'IS_JEWELRY', 'VENDOR_CODE', 'CATEGORY', 'DEPARTMENT',
+            'sale_id', 'upc', 'bill_number', 'doc_store_code', 'sale_date', 'sale_time',
+            'customer_sid', 'employee_sid', 'employee_username', 'store_code',
+            'vendor_code', 'is_jewelry', 'category', 'department', 'discount_rate',
+            'revenue_with_vat', 'revenue_before_vat',
         ]
         df = pd.DataFrame(rows, columns=columns)
+        df['upc_clean'] = df['upc'].astype(str).str.strip()
         return df
 
     def test_flat_rate_qualifying_customer(self, service, mock_repo):
         """Non-jewelry sales to qualifying customer earn 0.7% flat in FP bucket."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.QUALIFYING_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             11_000_000, 10_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.QUALIFYING_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 11_000_000, 10_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [{
@@ -1771,19 +1223,19 @@ class TestEmployeeCommissionException:
         result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
         row = result.iloc[0]
 
-        assert row['commission_100_and_below_fp'] == 10_000_000 * 0.007  # 70,000
-        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_fashion_fp'] == 10_000_000 * 0.007  # 70,000
+        assert row['commission_fashion_md'] == 0
         assert row['commission_over_100'] == 0
         assert row['total'] == 10_000_000 * 0.007
 
     def test_non_qualifying_customer_no_commission(self, service, mock_repo):
         """Non-jewelry sales to other customers earn zero FP/discount commission."""
         sales_df = self._make_sales_df([
-            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.OTHER_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             11_000_000, 10_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.OTHER_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 11_000_000, 10_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [{
@@ -1797,19 +1249,19 @@ class TestEmployeeCommissionException:
         result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
         row = result.iloc[0]
 
-        assert row['commission_100_and_below_fp'] == 0
-        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_fashion_fp'] == 0
+        assert row['commission_fashion_md'] == 0
         assert row['total'] == 0
 
     def test_jewelry_still_earned_regardless_of_customer(self, service, mock_repo):
         """Jewelry commission is calculated normally, no customer filter."""
         sales_df = self._make_sales_df([
             # VHN jewelry sale to a NON-qualifying customer — should still earn commission
-            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.OTHER_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             5_500_000, 5_000_000, 0.0, 1, 'VHN', 'NECKLACE', 'WJEW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.OTHER_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'VHN', 1, 'NECKLACE', 'WJEW', 0.0, 5_500_000, 5_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [{
@@ -1825,18 +1277,18 @@ class TestEmployeeCommissionException:
 
         assert row['commission_vhernier'] == 5_000_000 * 0.01  # 50,000
         assert row['commission_jewelry'] == 5_000_000 * 0.01
-        assert row['commission_100_and_below_fp'] == 0  # No qualifying non-jewelry
+        assert row['commission_fashion_fp'] == 0  # No qualifying non-jewelry
         assert row['total'] == 5_000_000 * 0.01
 
     def test_hand_carry_still_earned_regardless_of_customer(self, service, mock_repo):
         """Hand carry commission is calculated normally, no customer filter."""
         sales_df = self._make_sales_df([
             # Hand carry item (ATQ, 1% vendor) sold to non-qualifying customer
-            [1, 'HC_UPC', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.OTHER_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             2_200_000, 2_000_000, 0.0, 0, 'ATQ', 'BAGS', 'RTW'],
+            [1, 'HC_UPC', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.OTHER_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'ATQ', 0, 'BAGS', 'RTW', 0.0, 2_200_000, 2_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = ['HC_UPC']
 
         employees = [{
@@ -1852,7 +1304,7 @@ class TestEmployeeCommissionException:
 
         # Hand carry uses revenue_with_vat, ATQ = 1%
         assert row['commission_hand_carry'] == 2_200_000 * 0.01  # 22,000
-        assert row['commission_100_and_below_fp'] == 0  # No qualifying non-jewelry
+        assert row['commission_fashion_fp'] == 0  # No qualifying non-jewelry
         assert row['total'] == 2_200_000 * 0.01
 
     def test_mixed_customers(self, service, mock_repo):
@@ -1860,19 +1312,19 @@ class TestEmployeeCommissionException:
         sales to other customers are excluded from FP commission."""
         sales_df = self._make_sales_df([
             # Non-jewelry to qualifying customer — should earn commission
-            [1, 'UPC001', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.QUALIFYING_CUSTOMER, 'BILL1', 'HBT', '2025-01-15', '10:00:00',
-             11_000_000, 10_000_000, 0.0, 0, 'ABC', 'SHIRTS', 'RTW'],
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.QUALIFYING_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 11_000_000, 10_000_000],
             # Non-jewelry to OTHER customer — should NOT earn commission
-            [2, 'UPC002', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.OTHER_CUSTOMER, 'BILL2', 'HBT', '2025-01-15', '11:00:00',
-             5_500_000, 5_000_000, 0.0, 0, 'DEF', 'PANTS', 'RTW'],
+            [2, 'UPC002', 'BILL2', 'HBT', '2025-01-15', '11:00:00',
+             self.OTHER_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'DEF', 0, 'PANTS', 'RTW', 0.0, 5_500_000, 5_000_000],
             # Jewelry to OTHER customer — should still earn commission (no customer filter)
-            [3, 'UPC003', 'E1', 'user1', self.EXCEPTION_EMP_SID,
-             self.OTHER_CUSTOMER, 'BILL3', 'HBT', '2025-01-15', '12:00:00',
-             3_300_000, 3_000_000, 0.0, 1, 'VHN', 'RING', 'WJEW'],
+            [3, 'UPC003', 'BILL3', 'HBT', '2025-01-15', '12:00:00',
+             self.OTHER_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'VHN', 1, 'RING', 'WJEW', 0.0, 3_300_000, 3_000_000],
         ])
-        mock_repo.get_personal_commission_sales_data.return_value = sales_df
+        mock_repo.get_all_sales_data.return_value = sales_df
         mock_repo.get_hand_carry_upcs.return_value = []
 
         employees = [{
@@ -1887,8 +1339,8 @@ class TestEmployeeCommissionException:
         row = result.iloc[0]
 
         # Only 10M qualifying non-jewelry earns flat 0.7%, 5M excluded
-        assert row['commission_100_and_below_fp'] == 10_000_000 * 0.007  # 70,000
-        assert row['commission_100_and_below_discount'] == 0
+        assert row['commission_fashion_fp'] == 10_000_000 * 0.007  # 70,000
+        assert row['commission_fashion_md'] == 0
         # VHN jewelry (1%)
         assert row['commission_vhernier'] == 3_000_000 * 0.01  # 30,000
         assert row['commission_jewelry'] == 3_000_000 * 0.01

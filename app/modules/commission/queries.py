@@ -97,7 +97,7 @@ class CommissionQueries:
         #         AND d2.invc_post_date <= :end_date
         #   )))
     """
-    
+
     # Store sales summary query
     STORE_SALES_SUMMARY = """
         SELECT
@@ -116,49 +116,91 @@ class CommissionQueries:
         WHERE d.STATUS = 4
           AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
+          -- All sales and returns within the query period count
           AND d.invc_post_date >= :start_date
           AND d.invc_post_date <= :end_date
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.invc_post_date >= :start_date
-                AND d2.invc_post_date <= :end_date
-          )))
+          -- FUTURE: To also include next-month returns for same-period sales, replace
+          -- the date filter above with:
+          -- AND (
+          --     (d.invc_post_date >= :start_date AND d.invc_post_date <= :end_date)
+          --     OR
+          --     (di.ITEM_TYPE = 2
+          --      AND d.invc_post_date > :end_date
+          --      AND d.invc_post_date <= :next_month_end
+          --      AND EXISTS (
+          --          SELECT 1 FROM DOCUMENT d2
+          --          JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
+          --          WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
+          --            AND d2.invc_post_date >= :start_date
+          --            AND d2.invc_post_date <= :end_date
+          --     ))
+          -- )
         GROUP BY d.STORE_CODE, st.STORE_NAME, TO_CHAR(d.invc_post_date, 'YYYY-MM')
         ORDER BY d.STORE_CODE, YEAR_MONTH
     """
 
-    # Get store sales data with revenue breakdown
+    # Get store sales data with revenue breakdown (location-based, CR #21)
+    #
+    # Purpose: Sum classified sales at a physical store register for store achievement/eligibility.
+    # Unlike ALL_SALES_DATA (which returns row-level), this pre-aggregates into 4 vendor-based buckets.
+    #
+    # Design decisions:
+    # - No INVN_SBS_ITEM/DCS JOINs: sysadmin and non-standard entries may lack inventory
+    #   records. INNER JOIN would silently drop them. We don't need department info here.
+    # - Revenue is broken into 4 vendor-based buckets: full_price, markdown, jewelry, suitcase.
+    #   ACTUAL_REVENUE is computed in Python as the sum of these 4 (7-type filtered).
+    #   Items with NULL VEND_CODE are excluded (Oracle NOT IN returns NULL for NULLs).
+    # - ACTUAL_FULL_PRICE_REVENUE: non-jewelry, non-suitcase, discount <= 30%.
+    #   Uses di.VEND_CODE (on DOCUMENT_ITEM) for vendor classification — no JOIN needed.
+    # - Hand carry items (UPC-based at employee level) are counted by their vendor code
+    #   at store level — they're already included in one of the vendor categories.
+    #
+    # NOTE: Kept for backward compatibility. New code should use ALL_SALES_DATA + service-layer
+    # classification via _compute_revenue_by_type() for consistent 7-type breakdown.
     STORE_SALES_DATA = """
         SELECT
             d.STORE_CODE,
             st.STORE_NAME,
-            -- Total revenue
-            ROUND(SUM(
-                CASE WHEN di.item_type = 2
-                THEN di.qty * -1
-                ELSE di.qty END * di.price
-            ), 0) as ACTUAL_REVENUE,
 
-            -- Full price revenue (items with less or equal than 30% discount)
+            -- Full price revenue: non-jewelry, non-suitcase items with discount <= 30%
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
+                         AND di.VEND_CODE NOT IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                         AND di.VEND_CODE NOT IN ('TVL', 'TIT')
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
             ), 0) as ACTUAL_FULL_PRICE_REVENUE,
 
-            -- Discounted revenue (items with discount)
+            -- Discounted revenue: non-jewelry, non-suitcase items with discount > 30%
             ROUND(SUM(
                 CASE
                     WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
+                         AND di.VEND_CODE NOT IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                         AND di.VEND_CODE NOT IN ('TVL', 'TIT')
                     THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
                     ELSE 0
                 END
-            ), 0) as ACTUAL_DISCOUNTED_REVENUE
+            ), 0) as ACTUAL_DISCOUNTED_REVENUE,
+
+            -- Jewelry revenue: all jewelry vendor items (VHN, ROM, ATS, VIS, LUI, NAN, NAK, SPK, TED, BRT)
+            ROUND(SUM(
+                CASE
+                    WHEN di.VEND_CODE IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
+                    ELSE 0
+                END
+            ), 0) as ACTUAL_JEWELRY_REVENUE,
+
+            -- Suitcase revenue: suitcase vendor items (TVL, TIT)
+            ROUND(SUM(
+                CASE
+                    WHEN di.VEND_CODE IN ('TVL', 'TIT')
+                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * di.price
+                    ELSE 0
+                END
+            ), 0) as ACTUAL_SUITCASE_REVENUE
 
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
@@ -166,94 +208,84 @@ class CommissionQueries:
         WHERE d.STATUS = 4
           AND d.receipt_type in (0, 1)
           AND di.ITEM_TYPE in (1, 2)
+          AND d.STORE_CODE = :store_code
+          -- All sales and returns within the query period count
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          AND d.STORE_CODE = :store_code
-          -- Exclude returns that reference sales from outside the query period
-          AND (di.ITEM_TYPE = 1 OR (di.ITEM_TYPE = 2 AND EXISTS (
-              SELECT 1 FROM DOCUMENT d2
-              JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
-              WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
-                AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
-                AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          )))
+          -- FUTURE: To also include next-month returns for same-period sales, replace
+          -- the date filter above with:
+          -- AND (
+          --     (d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          --      AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS'))
+          --     OR
+          --     (di.ITEM_TYPE = 2
+          --      AND d.invc_post_date > TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          --      AND d.invc_post_date <= TO_DATE(:next_month_end, 'YYYY-MM-DD HH24:MI:SS')
+          --      AND EXISTS (
+          --          SELECT 1 FROM DOCUMENT d2
+          --          JOIN DOCUMENT_ITEM di2 ON d2.SID = di2.DOC_SID
+          --          WHERE di2.SID = di.RETURNED_ITEM_INVOICE_SID
+          --            AND d2.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
+          --            AND d2.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+          --     ))
+          -- )
         GROUP BY d.STORE_CODE, st.STORE_NAME
     """
 
-    # Get employee sales data for a specific store
-    # UPDATED: Now uses EMPLOYEE table with CUSTOMER and STORE joins instead of EMPLOYEE_LIST_V
-    # Returns employee_username (emp.USER_NAME) as the primary identifier for matching
-    EMPLOYEE_SALES_DATA = """
+    # Unified sales data query — single source of truth for ALL transaction line items
+    # in a period. Returns every row with both location data and employee data (when available).
+    #
+    # Replaces STORE_SALES_DETAIL, EMPLOYEE_SALES_DATA, and PERSONAL_COMMISSION_SALES_DATA.
+    #
+    # The service layer filters this single DataFrame for different views:
+    #   - Store view:    filter by doc_store_code → _compute_revenue_by_type()
+    #   - Employee view: filter by employee_username + store logic → FP/discounted/7-type
+    #   - Personal commission: filter by employee_username
+    #   - Hand carry:    filter by UPC
+    #
+    # JOINs:
+    #   - LEFT JOIN EMPLOYEE: keeps non-employee transactions (SYSADMIN, walk-ins)
+    #   - LEFT JOIN STORE:    keeps employees with NULL BASE_STORE_SID (SYSADMIN)
+    #   - LEFT JOIN INVN_SBS_ITEM: keeps items without inventory records
+    #   - LEFT JOIN DCS:      keeps items without department classification
+    ALL_SALES_DATA = """
         SELECT
-            cust.UDF4_STRING as EMPLOYEE_CODE,
-            emp.SID as EMPLOYEE_SID,
-            emp.USER_NAME as EMPLOYEE_USERNAME,
-            emp_store.STORE_CODE as EMPLOYEE_STORE_CODE,
-            cust.FIRST_NAME as EMPLOYEE_FULL_NAME,
-
-            -- Total revenue by employee (excluding tax, after discount)
-            ROUND(SUM(
-                CASE WHEN di.item_type = 2
-                THEN di.qty * -1
-                ELSE di.qty END * (di.price - di.tax_amt)
-            ), 0) as EMPLOYEE_REVENUE,
-
-            -- Full price revenue by employee (items with <= 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
-            -- Exception: RHN and RWP employees can count transactions from both RHN and RWP stores
-            ROUND(SUM(
-                CASE
-                    WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) <= 0.3
-                         AND dep.D_LONG_NAME NOT IN ('WJEW')
-                         AND (
-                             (emp_store.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
-                             OR
-                             (emp_store.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = emp_store.STORE_CODE)
-                         )
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
-                    ELSE 0
-                END
-            ), 0) as EMPLOYEE_FP_REVENUE,
-
-            -- Discounted revenue by employee (items with > 30% total discount, excluding WJEW and MJEW departments, and sales from other stores)
-            -- Exception: RHN and RWP employees can count transactions from both RHN and RWP stores
-            ROUND(SUM(
-                CASE
-                    WHEN (1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) > 0.3
-                         AND dep.D_LONG_NAME NOT IN ('WJEW')
-                         AND (
-                             (emp_store.STORE_CODE IN ('RHN', 'RWP') AND d.STORE_CODE IN ('RHN', 'RWP'))
-                             OR
-                             (emp_store.STORE_CODE NOT IN ('RHN', 'RWP') AND d.STORE_CODE = emp_store.STORE_CODE)
-                         )
-                    THEN (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) * (di.price - di.tax_amt)
-                    ELSE 0
-                END
-            ), 0) as EMPLOYEE_DISCOUNTED_REVENUE
-
+            di.SID                                                                as sale_id,
+            di.SCAN_UPC                                                           as upc,
+            d.DOC_NO                                                              as bill_number,
+            d.STORE_CODE                                                          as doc_store_code,
+            TRUNC(d.invc_post_date)                                               as sale_date,
+            TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
+            d.BT_CUID                                                             as customer_sid,
+            emp.SID                                                               as employee_sid,
+            emp.USER_NAME                                                         as employee_username,
+            s.STORE_CODE                                                          as store_code,
+            di.VEND_CODE                                                          as vendor_code,
+            CASE
+                WHEN di.VEND_CODE IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
+                THEN 1
+                ELSE 0
+            END                                                                   as is_jewelry,
+            SUBSTR(i.DESCRIPTION2, INSTR(i.DESCRIPTION2, '-', -1) + 1)            as category,
+            dep.D_LONG_NAME                                                       as department,
+            ROUND((1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) * 100, 2) / 100
+                                                                                  as discount_rate,
+            ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
+                  di.price, 0)                                                    as revenue_with_vat,
+            -- CR #20: flat 10% VAT (di.price / 1.1) instead of actual rate (di.price - di.tax_amt)
+            ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
+                  di.price / 1.1, 0)                                              as revenue_before_vat
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
-        JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
-        JOIN DCS dep ON dep.SID = i.DCS_SID
-        JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID
-        JOIN CUSTOMER cust ON emp.CUST_SID = cust.SID
-        JOIN STORE emp_store ON emp.BASE_STORE_SID = emp_store.SID
+        LEFT JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID
+        LEFT JOIN STORE s ON emp.BASE_STORE_SID = s.SID
+        LEFT JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
+        LEFT JOIN DCS dep ON dep.SID = i.DCS_SID
         WHERE d.STATUS = 4
-          AND d.receipt_type in (0, 1)
-          AND di.ITEM_TYPE in (1, 2)
-          AND emp.USER_NAME IS NOT NULL
-          AND di.EMPLOYEE1_LOGIN_NAME IS NOT NULL
+          AND d.receipt_type IN (0, 1)
+          AND di.ITEM_TYPE IN (1, 2)
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
-          -- Special handling for RHN and RWP stores: employees can overlap/work in both stores
-          -- For RHN/RWP: include both RHN and RWP employees and sales from both stores
-          -- For other stores: filter by employee's assigned store
-          AND (
-              (:store_code IN ('RHN', 'RWP') AND d.STORE_CODE = :store_code AND emp_store.STORE_CODE IN ('RHN', 'RWP'))
-              OR
-              (:store_code NOT IN ('RHN', 'RWP') AND emp_store.STORE_CODE = :store_code)
-          )
-        GROUP BY cust.UDF4_STRING, emp.SID, emp.USER_NAME, emp_store.STORE_CODE, cust.FIRST_NAME
-        ORDER BY EMPLOYEE_REVENUE DESC
     """
 
     # Get employee information including tenure
@@ -269,47 +301,4 @@ class CommissionQueries:
         WHERE s.STORE_CODE = :store_code
           AND emp.USER_NAME IS NOT NULL
         ORDER BY cust.UDF4_STRING
-    """
-
-    # Personal commission sales data query
-    # Returns ALL sales data (jewelry + non-jewelry) for personal commission calculation
-    # Returns DataFrame with columns matching pseudocode specification
-    PERSONAL_COMMISSION_SALES_DATA = """
-        SELECT
-            di.SID                                                                as sale_id,
-            di.SCAN_UPC                                                           as upc,
-            emp.SID                                                               as employee_sid,
-            emp.USER_NAME                                                         as employee_username,
-            d.BT_CUID                                                             as customer_sid,
-            d.DOC_NO                                                              as bill_number,
-            s.STORE_CODE                                                          as store_code,
-            TRUNC(d.invc_post_date)                                               as sale_date,
-            TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
-            ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
-                  di.price, 0)                                                    as revenue_with_vat,
-            ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
-                  (di.price - di.tax_amt), 0)                                     as revenue_before_vat,
-            ROUND((1 - (1 - di.DISC_PERC / 100) * (1 - d.DISC_PERC / 100)) * 100, 2) / 100
-                                                                                  as discount_rate,
-            CASE
-                WHEN di.VEND_CODE IN ('VHN', 'ROM', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT')
-                THEN 1
-                ELSE 0
-            END                                                                   as is_jewelry,
-            di.VEND_CODE                                                          as vendor_code,
-            SUBSTR(i.DESCRIPTION2, INSTR(i.DESCRIPTION2, '-', -1) + 1)            as category,
-            dep.D_LONG_NAME                                                       as department
-        FROM DOCUMENT d
-        JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
-        JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
-        JOIN DCS dep ON dep.SID = i.DCS_SID
-        JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID
-        JOIN STORE s ON emp.BASE_STORE_SID = s.SID
-        WHERE 1 = 1
-          AND d.STATUS = 4
-          AND di.ITEM_TYPE in (1, 2)
-          AND emp.USER_NAME IS NOT NULL
-          AND di.EMPLOYEE1_LOGIN_NAME IS NOT NULL
-          AND TO_CHAR(d.invc_post_date, 'YYYY-MM') = :year_month
-        ORDER BY emp.SID, d.invc_post_date, d.DOC_NO
     """
