@@ -828,7 +828,7 @@ class CommissionService:
                             amount_over_vat = first_crossing['item_running_total'] - target
 
                             # First crossing item: proportional share if FP qualifying
-                            if first_crossing['is_ot_qualifying']:
+                            if first_crossing['is_ot_qualifying'] and first_crossing['revenue_with_vat'] != 0:
                                 proportional_before_vat = first_crossing['revenue_before_vat'] * (
                                     amount_over_vat / first_crossing['revenue_with_vat']
                                 )
@@ -2384,7 +2384,7 @@ class CommissionRevenueService:
                     END IF;
                 END $$;
             ''')
-            # CR #28: Migration — delete old rows without store_code (Option B)
+            # CR #28: Migration — delete pre-CR#28 rows that lack store_code
             cursor.execute('''
                 DELETE FROM commission_revenue_adjustments WHERE store_code = ''
             ''')

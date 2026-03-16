@@ -79,6 +79,7 @@ def _safe_int(value, field_name):
 
 
 @commission_bp.route('/personal/calculate', methods=['POST'])
+@manager_required
 def calculate_personal_commission():
     """
     Calculate personal commissions for employees
@@ -157,6 +158,7 @@ def calculate_personal_commission():
 
 
 @commission_bp.route('/store/calculate-v2', methods=['POST'])
+@manager_required
 def calculate_store_commission_v2():
     """
     Calculate store commission following the updated pseudocode algorithm
