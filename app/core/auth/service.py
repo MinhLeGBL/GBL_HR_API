@@ -314,10 +314,10 @@ class AuthService:
             if dept_id:
                 department = {'id': dept_id, 'code': dept_code, 'name': dept_name}
 
-            # Get permissions
+            # Get permissions (v2 flat model)
             from app.modules.permissions.service import PermissionService
             permission_service = PermissionService()
-            permissions = permission_service.get_user_permissions(role, department_id)
+            permissions = permission_service.get_user_permissions_v2(sid, role, dept_code)
 
             return {
                 'success': True,

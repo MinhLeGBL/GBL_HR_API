@@ -59,8 +59,7 @@ def create_app():
                 'commission': '/api/v1/commission',
                 'auth': '/api/v1/auth',
                 'departments': '/api/v1/departments',
-                'sections': '/api/v1/sections',
-                'section_groups': '/api/v1/section-groups',
+                'sections_permissions': '/api/v1/sections/permissions',
                 'permissions': '/api/v1/permissions',
                 'dashboard': '/api/v1/dashboard',
                 'users': '/api/v1/users'
