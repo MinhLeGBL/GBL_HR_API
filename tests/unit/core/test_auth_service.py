@@ -137,15 +137,16 @@ class TestAuthenticate:
         # cursor.fetchone() is called once for the user SELECT
         mock_cursor.fetchone.return_value = (
             100000001, 'a@b.com', hashed, 'Alice', 'ADMIN', True,
-            400000001,                  # department_id
-            400000001, 'IT', 'IT Dept', # dept fields
-            300000001, 'MQ027', join_dt # employee fields
+            400000001,                   # department_id
+            400000001, 'IT', 'IT Dept',  # dept fields
+            300000001, 'MQ027', join_dt, # employee fields
+            False                        # must_change_password
         )
 
         # PermissionService is imported locally inside authenticate(), so patch it
         # at its origin module.
         with patch('app.modules.permissions.service.PermissionService') as MockPermSvc:
-            MockPermSvc.return_value.get_user_permissions.return_value = []
+            MockPermSvc.return_value.get_user_permissions_v2.return_value = []
             result = auth_service.authenticate('a@b.com', 'pass123')
 
         assert result['success'] is True
@@ -172,7 +173,7 @@ class TestAuthenticate:
         hashed = auth_service.hash_password('correct')
         mock_cursor.fetchone.return_value = (
             100000001, 'a@b.com', hashed, 'Alice', 'ADMIN', True,
-            400000001, 400000001, 'IT', 'IT Dept', None, None, None,
+            400000001, 400000001, 'IT', 'IT Dept', None, None, None, False,
         )
 
         result = auth_service.authenticate('a@b.com', 'wrong')
@@ -187,7 +188,7 @@ class TestAuthenticate:
         hashed = auth_service.hash_password('pass')
         mock_cursor.fetchone.return_value = (
             100000001, 'a@b.com', hashed, 'Alice', 'ADMIN', False,
-            400000001, 400000001, 'IT', 'IT Dept', None, None, None,
+            400000001, 400000001, 'IT', 'IT Dept', None, None, None, False,
         )
 
         result = auth_service.authenticate('a@b.com', 'pass')
@@ -230,7 +231,8 @@ class TestCreateUser:
             (100000002, 'new@b.com', 'New User', 'STAFF', True,
              created_at, None,           # created_at, last_login
              400000001, 400000001, 'HR', 'Human Resources',  # dept fields
-             None, None, None),          # employee fields
+             None, None, None,           # employee fields
+             True),                      # must_change_password
         ]
 
         result = auth_service.create_user(
@@ -291,7 +293,7 @@ class TestGetUserBySid:
             100000001, 'a@b.com', 'Alice', 'ADMIN', True,
             created_at, None,
             400000001, 400000001, 'IT', 'IT Dept',
-            None, None, None,
+            None, None, None, False,
         )
 
         result = auth_service.get_user_by_sid(100000001)
@@ -332,7 +334,7 @@ class TestGetAllUsers:
             (100000001, 'a@b.com', 'Alice', 'ADMIN', True,
              created_at, None,
              400000001, 400000001, 'IT', 'IT Dept',
-             None, None, None),
+             None, None, None, False),
         ]
 
         result = auth_service.get_all_users()
