@@ -105,6 +105,7 @@ class AuthService:
                     department_id BIGINT REFERENCES departments(id),
                     employee_sid BIGINT REFERENCES employees(sid),
                     is_active BOOLEAN DEFAULT TRUE,
+                    must_change_password BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_login TIMESTAMP
@@ -130,10 +131,10 @@ class AuthService:
 
                     cursor.execute('''
                         INSERT INTO users (sid, email, password_hash, full_name, role_id,
-                                           department_id, employee_sid, is_active)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                           department_id, employee_sid, is_active, must_change_password)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (user_sid, emp_email, password_hash, emp_name, admin_role_id,
-                          emp_dept_id, emp_sid, True))
+                          emp_dept_id, emp_sid, True, False))
 
             conn.commit()
             cursor.close()
@@ -273,7 +274,8 @@ class AuthService:
                 SELECT u.sid, u.email, u.password_hash, u.full_name, r.code AS role,
                        u.is_active, u.department_id,
                        d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
-                       u.employee_sid, e.employee_code, e.join_date
+                       u.employee_sid, e.employee_code, e.join_date,
+                       u.must_change_password
                 FROM users u
                 JOIN roles r ON u.role_id = r.id
                 LEFT JOIN departments d ON u.department_id = d.id
@@ -286,7 +288,7 @@ class AuthService:
             if not user:
                 return {'success': False, 'error': 'Invalid email or password'}
 
-            sid, email, password_hash, full_name, role, is_active, department_id, dept_id, dept_code, dept_name, employee_sid, employee_code, join_date = user
+            sid, email, password_hash, full_name, role, is_active, department_id, dept_id, dept_code, dept_name, employee_sid, employee_code, join_date, must_change_password = user
 
             # Check if user is active
             if not is_active:
@@ -334,7 +336,8 @@ class AuthService:
                     'role': role,
                     'department_id': department_id,
                     'department': department,
-                    'is_active': is_active
+                    'is_active': is_active,
+                    'must_change_password': must_change_password if must_change_password is not None else True
                 },
                 'permissions': permissions
             }
@@ -405,7 +408,8 @@ class AuthService:
         SELECT u.sid, u.email, u.full_name, r.code AS role, u.is_active,
                u.created_at, u.last_login,
                u.department_id, d.id AS dept_id, d.code AS dept_code, d.name AS dept_name,
-               u.employee_sid, e.employee_code, e.join_date
+               u.employee_sid, e.employee_code, e.join_date,
+               u.must_change_password
         FROM users u
         JOIN roles r ON u.role_id = r.id
         LEFT JOIN departments d ON u.department_id = d.id
@@ -430,7 +434,8 @@ class AuthService:
             'department': department,
             'employee_sid': user[11],
             'employee_code': user[12],
-            'join_date': user[13].isoformat() if user[13] else None
+            'join_date': user[13].isoformat() if user[13] else None,
+            'must_change_password': user[14] if user[14] is not None else True
         }
 
     def get_user_by_sid_result(self, cursor, sid: int) -> Dict[str, Any]:
@@ -572,10 +577,11 @@ class AuthService:
             if not self.verify_password(old_password, current_hash):
                 return {'success': False, 'error': 'Current password is incorrect'}
 
-            # Hash new password and update
+            # Hash new password and update, clear must_change_password flag
             new_hash = self.hash_password(new_password)
             cursor.execute('''
-                UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP
+                UPDATE users SET password_hash = %s, must_change_password = FALSE,
+                updated_at = CURRENT_TIMESTAMP
                 WHERE sid = %s
             ''', (new_hash, sid))
 
