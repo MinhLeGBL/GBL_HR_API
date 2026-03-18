@@ -1,14 +1,14 @@
 """
 Permission Service
-Handles departments, section groups, sections, and permission management
+Handles departments, sections, and permission management
 
-Permission Model (Two Layers):
-  Layer 1: Section Group Access (department-based)
-    - Controls which departments can see a sidebar group (MAIN, COMMISSION, REPORTS)
-    - admin role bypasses this
-  Layer 2: Item-Level Access (role-based, within a group)
-    - Controls which roles can view/access specific section items
-    - admin role bypasses this
+Permission Model (v2 — Flat Sections):
+  Per-section access control with 4 dimensions:
+    - Departments: which departments can access
+    - Roles: which roles can access
+    - Inclusions: specific users granted access regardless of dept/role
+    - Exclusions: specific users denied access even if dept/role allows
+  Admin bypasses all checks. DASHBOARD accessible to all authenticated users.
 """
 from typing import Optional, Dict, Any, List
 from app.core.database.connection import get_postgres_connection
@@ -21,14 +21,10 @@ class PermissionService:
 
     def init_permission_tables(self) -> Dict[str, Any]:
         """
-        Initialize all permission tables in dependency order:
+        Initialize permission tables in dependency order:
         1. departments
-        2. section_groups
-        3. sections (FK → section_groups)
-        4. section_group_permissions (FK → section_groups)
-        5. section_permissions (FK → sections)
-        6. section_department_access (FK → sections, departments)
-        7. section_exclusions (FK → sections, departments, employees)
+        2. sections
+        3. section_departments, section_roles, section_inclusions, section_exclusions_v2
         """
         conn = None
         try:
@@ -58,75 +54,51 @@ class PermissionService:
                 )
             ''')
 
-            # ── 2. Section Groups ──
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS section_groups (
-                    id SERIAL PRIMARY KEY,
-                    code VARCHAR(50) UNIQUE NOT NULL,
-                    name VARCHAR(100) NOT NULL,
-                    description TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # ── 3. Sections (FK → section_groups) ──
+            # ── 2. Sections ──
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS sections (
                     id SERIAL PRIMARY KEY,
                     code VARCHAR(50) UNIQUE NOT NULL,
                     name VARCHAR(100) NOT NULL,
                     description TEXT,
-                    group_id INTEGER REFERENCES section_groups(id),
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
-            # ── 4. Section Group Permissions (department-based group access) ──
+            # ── 3. Per-section department access ──
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS section_group_permissions (
-                    id SERIAL PRIMARY KEY,
-                    group_id INTEGER REFERENCES section_groups(id) ON DELETE CASCADE,
-                    department_code VARCHAR(20) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(group_id, department_code)
+                CREATE TABLE IF NOT EXISTS section_departments (
+                    section_code VARCHAR(50) REFERENCES sections(code),
+                    department_code VARCHAR(10) REFERENCES departments(code),
+                    PRIMARY KEY (section_code, department_code)
                 )
             ''')
 
-            # ── 5. Section Permissions (role-based item access) ──
+            # ── 4. Per-section role access ──
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS section_permissions (
-                    id SERIAL PRIMARY KEY,
-                    section_id INTEGER REFERENCES sections(id) ON DELETE CASCADE,
-                    role VARCHAR(20) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(section_id, role)
+                CREATE TABLE IF NOT EXISTS section_roles (
+                    section_code VARCHAR(50) REFERENCES sections(code),
+                    role_code VARCHAR(20) REFERENCES roles(code),
+                    PRIMARY KEY (section_code, role_code)
                 )
             ''')
 
-            # ── 6. Section Department Access (per-department staff toggle) ──
+            # ── 5. Per-section user inclusions ──
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS section_department_access (
-                    id SERIAL PRIMARY KEY,
-                    section_id INTEGER REFERENCES sections(id) ON DELETE CASCADE,
-                    department_id BIGINT REFERENCES departments(id) ON DELETE CASCADE,
-                    staff_allowed BOOLEAN DEFAULT true,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(section_id, department_id)
+                CREATE TABLE IF NOT EXISTS section_inclusions (
+                    section_code VARCHAR(50) REFERENCES sections(code),
+                    user_sid BIGINT REFERENCES users(sid),
+                    PRIMARY KEY (section_code, user_sid)
                 )
             ''')
 
-            # ── 7. Section Exclusions (per-department employee exclusions) ──
+            # ── 6. Per-section user exclusions ──
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS section_exclusions (
-                    id SERIAL PRIMARY KEY,
-                    section_id INTEGER REFERENCES sections(id) ON DELETE CASCADE,
-                    department_id BIGINT REFERENCES departments(id) ON DELETE CASCADE,
-                    employee_sid BIGINT REFERENCES employees(sid) ON DELETE CASCADE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(section_id, department_id, employee_sid)
+                CREATE TABLE IF NOT EXISTS section_exclusions_v2 (
+                    section_code VARCHAR(50) REFERENCES sections(code),
+                    user_sid BIGINT REFERENCES users(sid),
+                    PRIMARY KEY (section_code, user_sid)
                 )
             ''')
 
@@ -145,49 +117,22 @@ class PermissionService:
                     ('BOD', 'Management Board', 'Management Board')
                 ''')
 
-            # Section Groups
-            cursor.execute('SELECT COUNT(*) FROM section_groups')
-            if cursor.fetchone()[0] == 0:
-                cursor.execute('''
-                    INSERT INTO section_groups (code, name, description) VALUES
-                    ('MAIN', 'Main', 'Dashboard and general overview'),
-                    ('COMMISSION', 'Commission', 'Commission data, store commission, and sales performance'),
-                    ('REPORTS', 'Reports', 'Report generation and analytics'),
-                    ('ADMINISTRATION', 'Administration', 'User management, employee data, master data, settings')
-                ''')
-
-            # Sections (linked to groups via group_id)
+            # Sections
             cursor.execute('SELECT COUNT(*) FROM sections')
             if cursor.fetchone()[0] == 0:
-                cursor.execute("SELECT id, code FROM section_groups")
-                groups = {row[1]: row[0] for row in cursor.fetchall()}
+                cursor.execute('''
+                    INSERT INTO sections (code, name, description) VALUES
+                    ('DASHBOARD', 'Dashboard', 'Main dashboard'),
+                    ('COMMISSION_DATA', 'Commission Data', 'Commission data management'),
+                    ('USER_MANAGEMENT', 'User Management', 'User administration'),
+                    ('EMPLOYEE_DATA', 'Employee Data', 'Employee information'),
+                    ('ACCESS_MANAGEMENT', 'Access Management', 'Permission and access control')
+                ''')
 
-                section_data = [
-                    ('DASHBOARD', 'Dashboard', 'Main dashboard', 'MAIN'),
-                    ('COMMISSION_DATA', 'Commission Data', 'Commission data management', 'COMMISSION'),
-                    ('STORE_COMMISSION', 'Store Commission', 'Store commission calculations', 'COMMISSION'),
-                    ('SALES_PERFORMANCE', 'Sales Performance', 'Sales performance metrics', 'COMMISSION'),
-                    ('REPORTS', 'Reports', 'Report generation', 'REPORTS'),
-                    ('USER_MANAGEMENT', 'User Management', 'User administration', 'ADMINISTRATION'),
-                    ('EMPLOYEE_DATA', 'Employee Data', 'Employee information', 'ADMINISTRATION'),
-                    ('MASTER_DATA', 'Master Data', 'Master data configuration', 'ADMINISTRATION'),
-                    ('SETTINGS', 'Settings', 'System settings', 'ADMINISTRATION'),
-                ]
-                for code, name, desc, group_code in section_data:
-                    cursor.execute('''
-                        INSERT INTO sections (code, name, description, group_id)
-                        VALUES (%s, %s, %s, %s)
-                    ''', (code, name, desc, groups.get(group_code)))
-
-            # Section Group Permissions (which departments see which group)
-            cursor.execute('SELECT COUNT(*) FROM section_group_permissions')
+            # Section permissions seed (runs after roles/users tables exist)
+            cursor.execute('SELECT COUNT(*) FROM section_departments')
             if cursor.fetchone()[0] == 0:
-                self._seed_group_permissions(cursor)
-
-            # Section Permissions (which roles see which item)
-            cursor.execute('SELECT COUNT(*) FROM section_permissions')
-            if cursor.fetchone()[0] == 0:
-                self._seed_section_permissions(cursor)
+                self._seed_v2_permissions(cursor)
 
             conn.commit()
             cursor.close()
@@ -202,74 +147,35 @@ class PermissionService:
             if conn:
                 conn.close()
 
-    def _seed_group_permissions(self, cursor):
-        """Seed which departments can access which section groups"""
-        cursor.execute("SELECT id, code FROM section_groups")
-        groups = {row[1]: row[0] for row in cursor.fetchall()}
+    def _seed_v2_permissions(self, cursor):
+        """Seed v2 flat permission tables with default access config."""
+        # Section → departments mapping
+        section_depts = {
+            'COMMISSION_DATA': ['HR'],
+            'USER_MANAGEMENT': ['IT', 'HR'],
+            'EMPLOYEE_DATA': ['HR'],
+            'ACCESS_MANAGEMENT': ['IT'],
+        }
+        for section_code, depts in section_depts.items():
+            for dept in depts:
+                cursor.execute(
+                    'INSERT INTO section_departments (section_code, department_code) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                    (section_code, dept)
+                )
 
-        all_departments = ['HR', 'ACC', 'IT', 'MKT', 'LOG', 'BOD']
-
-        # MAIN - All departments
-        if 'MAIN' in groups:
-            for dept in all_departments:
-                cursor.execute('''
-                    INSERT INTO section_group_permissions (group_id, department_code)
-                    VALUES (%s, %s)
-                ''', (groups['MAIN'], dept))
-
-        # COMMISSION - HR only
-        if 'COMMISSION' in groups:
-            for dept in ['HR']:
-                cursor.execute('''
-                    INSERT INTO section_group_permissions (group_id, department_code)
-                    VALUES (%s, %s)
-                ''', (groups['COMMISSION'], dept))
-
-        # REPORTS - All departments
-        if 'REPORTS' in groups:
-            for dept in all_departments:
-                cursor.execute('''
-                    INSERT INTO section_group_permissions (group_id, department_code)
-                    VALUES (%s, %s)
-                ''', (groups['REPORTS'], dept))
-
-        # ADMINISTRATION - No rows (IT access is hardcoded in frontend)
-
-    def _seed_section_permissions(self, cursor):
-        """Seed which roles can access which section items"""
-        cursor.execute('SELECT id, code FROM sections')
-        sections = {row[1]: row[0] for row in cursor.fetchall()}
-
-        # (section_code, role) — if a row exists, that role can access the item
-        default_permissions = [
-            ('DASHBOARD', 'admin'),
-            ('DASHBOARD', 'manager'),
-            ('DASHBOARD', 'staff'),
-            ('COMMISSION_DATA', 'admin'),
-            ('COMMISSION_DATA', 'manager'),
-            ('COMMISSION_DATA', 'staff'),
-            ('STORE_COMMISSION', 'admin'),
-            ('STORE_COMMISSION', 'manager'),
-            ('SALES_PERFORMANCE', 'admin'),
-            ('SALES_PERFORMANCE', 'manager'),
-            ('SALES_PERFORMANCE', 'staff'),
-            ('REPORTS', 'admin'),
-            ('REPORTS', 'manager'),
-            ('USER_MANAGEMENT', 'admin'),
-            ('EMPLOYEE_DATA', 'admin'),
-            ('EMPLOYEE_DATA', 'manager'),
-            ('MASTER_DATA', 'admin'),
-            ('SETTINGS', 'admin'),
-        ]
-
-        for section_code, role in default_permissions:
-            section_id = sections.get(section_code)
-            if section_id:
-                cursor.execute('''
-                    INSERT INTO section_permissions (section_id, role)
-                    VALUES (%s, %s)
-                    ON CONFLICT (section_id, role) DO NOTHING
-                ''', (section_id, role))
+        # Section → roles mapping
+        section_roles = {
+            'COMMISSION_DATA': ['ADMIN', 'MANAGER', 'STAFF'],
+            'USER_MANAGEMENT': ['ADMIN'],
+            'EMPLOYEE_DATA': ['ADMIN', 'MANAGER'],
+            'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER'],
+        }
+        for section_code, roles in section_roles.items():
+            for role in roles:
+                cursor.execute(
+                    'INSERT INTO section_roles (section_code, role_code) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                    (section_code, role)
+                )
 
     # ==================== Department Management ====================
 
@@ -464,10 +370,13 @@ class PermissionService:
             if conn:
                 conn.close()
 
-    # ==================== Section Management ====================
+    # ==================== V2 Flat Permission Model ====================
 
-    def get_all_sections(self) -> Dict[str, Any]:
-        """Get all sections grouped by section_group, with their role access"""
+    def get_all_section_permissions(self) -> Dict[str, Any]:
+        """
+        Get all sections with their full access config (v2 flat model).
+        Excludes DASHBOARD (accessible to all, no permission config).
+        """
         conn = None
         try:
             conn = get_postgres_connection()
@@ -476,28 +385,65 @@ class PermissionService:
 
             cursor = conn.cursor()
 
+            # Get all active sections except DASHBOARD
             cursor.execute('''
-                SELECT s.id, s.code, s.name, s.description, s.is_active,
-                       sg.code AS group_code, sg.name AS group_name,
-                       COALESCE(array_agg(sp.role) FILTER (WHERE sp.role IS NOT NULL), '{}') AS allowed_roles
-                FROM sections s
-                LEFT JOIN section_groups sg ON s.group_id = sg.id
-                LEFT JOIN section_permissions sp ON s.id = sp.section_id
-                GROUP BY s.id, s.code, s.name, s.description, s.is_active, sg.id, sg.code, sg.name
-                ORDER BY sg.id, s.id
+                SELECT code, name FROM sections
+                WHERE is_active = TRUE AND code != 'DASHBOARD'
+                ORDER BY id
             ''')
+            sections_rows = cursor.fetchall()
 
             sections = []
-            for row in cursor.fetchall():
+            for section_code, section_name in sections_rows:
+                # Allowed departments
+                cursor.execute('''
+                    SELECT department_code FROM section_departments
+                    WHERE section_code = %s ORDER BY department_code
+                ''', (section_code,))
+                allowed_departments = [r[0] for r in cursor.fetchall()]
+
+                # Allowed roles
+                cursor.execute('''
+                    SELECT role_code FROM section_roles
+                    WHERE section_code = %s ORDER BY role_code
+                ''', (section_code,))
+                allowed_roles = [r[0] for r in cursor.fetchall()]
+
+                # Included users
+                cursor.execute('''
+                    SELECT u.sid, u.full_name, e.employee_code
+                    FROM section_inclusions si
+                    JOIN users u ON si.user_sid = u.sid
+                    LEFT JOIN employees e ON u.employee_sid = e.sid
+                    WHERE si.section_code = %s
+                    ORDER BY u.full_name
+                ''', (section_code,))
+                included_users = [
+                    {'sid': r[0], 'full_name': r[1], 'employee_code': r[2]}
+                    for r in cursor.fetchall()
+                ]
+
+                # Excluded users
+                cursor.execute('''
+                    SELECT u.sid, u.full_name, e.employee_code
+                    FROM section_exclusions_v2 sev
+                    JOIN users u ON sev.user_sid = u.sid
+                    LEFT JOIN employees e ON u.employee_sid = e.sid
+                    WHERE sev.section_code = %s
+                    ORDER BY u.full_name
+                ''', (section_code,))
+                excluded_users = [
+                    {'sid': r[0], 'full_name': r[1], 'employee_code': r[2]}
+                    for r in cursor.fetchall()
+                ]
+
                 sections.append({
-                    'id': row[0],
-                    'code': row[1],
-                    'name': row[2],
-                    'description': row[3],
-                    'is_active': row[4],
-                    'group_code': row[5],
-                    'group_name': row[6],
-                    'allowed_roles': list(row[7]) if row[7] else []
+                    'section_code': section_code,
+                    'section_name': section_name,
+                    'allowed_departments': allowed_departments,
+                    'allowed_roles': allowed_roles,
+                    'included_users': included_users,
+                    'excluded_users': excluded_users,
                 })
 
             cursor.close()
@@ -509,84 +455,12 @@ class PermissionService:
             if conn:
                 conn.close()
 
-    # ==================== Permission Management ====================
-
-    def get_user_permissions(self, user_role: str, department_id: int = None,
-                             department_code: str = None) -> List[Dict[str, Any]]:
+    def update_section_access(self, section_code: str, allowed_departments: List[str],
+                              allowed_roles: List[str], included_user_sids: List[int],
+                              excluded_user_sids: List[int]) -> Dict[str, Any]:
         """
-        Get accessible section groups and items for a user.
-
-        Layer 1: Filter groups by department (via section_group_permissions)
-        Layer 2: Filter items by role (via section_permissions)
-        Admin bypasses both layers.
-        """
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            if not conn:
-                return []
-
-            cursor = conn.cursor()
-
-            # Resolve department_code if not provided
-            if not department_code and department_id:
-                cursor.execute('SELECT code FROM departments WHERE id = %s', (department_id,))
-                row = cursor.fetchone()
-                department_code = row[0] if row else None
-
-            if user_role == 'admin':
-                # Admin sees all groups and all items
-                cursor.execute('''
-                    SELECT sg.code AS group_code, sg.name AS group_name,
-                           s.code AS section_code, s.name AS section_name
-                    FROM section_groups sg
-                    LEFT JOIN sections s ON s.group_id = sg.id AND s.is_active = TRUE
-                    ORDER BY sg.id, s.id
-                ''')
-            else:
-                # Non-admin: filter by department (group level) and role (item level)
-                cursor.execute('''
-                    SELECT sg.code AS group_code, sg.name AS group_name,
-                           s.code AS section_code, s.name AS section_name
-                    FROM section_groups sg
-                    JOIN section_group_permissions sgp ON sg.id = sgp.group_id
-                    LEFT JOIN sections s ON s.group_id = sg.id AND s.is_active = TRUE
-                    LEFT JOIN section_permissions sp ON s.id = sp.section_id AND sp.role = %s
-                    WHERE sgp.department_code = %s
-                      AND (s.id IS NULL OR sp.id IS NOT NULL)
-                    ORDER BY sg.id, s.id
-                ''', (user_role, department_code))
-
-            # Build grouped result
-            groups = {}
-            for row in cursor.fetchall():
-                group_code = row[0]
-                if group_code not in groups:
-                    groups[group_code] = {
-                        'group_code': row[0],
-                        'group_name': row[1],
-                        'sections': []
-                    }
-                if row[2]:  # section exists
-                    groups[group_code]['sections'].append({
-                        'section_code': row[2],
-                        'section_name': row[3]
-                    })
-
-            cursor.close()
-            return list(groups.values())
-
-        except Exception as e:
-            print(f"Error getting user permissions: {e}")
-            return []
-        finally:
-            if conn:
-                conn.close()
-
-    def update_section_roles(self, section_code: str, roles: List[str]) -> Dict[str, Any]:
-        """
-        Update which roles can access a section item.
-        Replaces all existing role access for the section.
+        Replace the full access config for a section (v2 flat model).
+        All 4 arrays are overwritten.
         """
         conn = None
         try:
@@ -596,142 +470,82 @@ class PermissionService:
 
             cursor = conn.cursor()
 
-            # Get section ID
-            cursor.execute('SELECT id FROM sections WHERE code = %s', (section_code,))
-            section = cursor.fetchone()
-            if not section:
+            # Verify section exists and is not DASHBOARD
+            cursor.execute('SELECT code FROM sections WHERE code = %s', (section_code,))
+            if not cursor.fetchone():
                 return {'success': False, 'error': 'Section not found'}
 
-            section_id = section[0]
+            # Validate departments
+            if allowed_departments:
+                cursor.execute(
+                    'SELECT code FROM departments WHERE code = ANY(%s)',
+                    (allowed_departments,)
+                )
+                valid_depts = {r[0] for r in cursor.fetchall()}
+                invalid = set(allowed_departments) - valid_depts
+                if invalid:
+                    return {'success': False, 'error': f'Invalid departments: {", ".join(invalid)}'}
 
-            # Delete existing role permissions
-            cursor.execute('DELETE FROM section_permissions WHERE section_id = %s', (section_id,))
+            # Validate roles
+            if allowed_roles:
+                cursor.execute(
+                    'SELECT code FROM roles WHERE code = ANY(%s)',
+                    (allowed_roles,)
+                )
+                valid_roles = {r[0] for r in cursor.fetchall()}
+                invalid = set(allowed_roles) - valid_roles
+                if invalid:
+                    return {'success': False, 'error': f'Invalid roles: {", ".join(invalid)}'}
 
-            # Insert new role permissions
-            valid_roles = ['admin', 'manager', 'staff']
-            for role in roles:
-                if role.lower() in valid_roles:
-                    cursor.execute('''
-                        INSERT INTO section_permissions (section_id, role)
-                        VALUES (%s, %s)
-                        ON CONFLICT (section_id, role) DO NOTHING
-                    ''', (section_id, role.lower()))
+            # Validate user SIDs
+            all_sids = list(set(included_user_sids + excluded_user_sids))
+            if all_sids:
+                cursor.execute(
+                    'SELECT sid FROM users WHERE sid = ANY(%s)',
+                    (all_sids,)
+                )
+                valid_sids = {r[0] for r in cursor.fetchall()}
+                invalid_included = set(included_user_sids) - valid_sids
+                invalid_excluded = set(excluded_user_sids) - valid_sids
+                if invalid_included:
+                    return {'success': False, 'error': f'Invalid included user SIDs: {list(invalid_included)}'}
+                if invalid_excluded:
+                    return {'success': False, 'error': f'Invalid excluded user SIDs: {list(invalid_excluded)}'}
 
-            conn.commit()
-            cursor.close()
+            # Replace departments
+            cursor.execute('DELETE FROM section_departments WHERE section_code = %s', (section_code,))
+            for dept in allowed_departments:
+                cursor.execute(
+                    'INSERT INTO section_departments (section_code, department_code) VALUES (%s, %s)',
+                    (section_code, dept)
+                )
 
-            return {'success': True, 'message': 'Section roles updated successfully'}
+            # Replace roles
+            cursor.execute('DELETE FROM section_roles WHERE section_code = %s', (section_code,))
+            for role in allowed_roles:
+                cursor.execute(
+                    'INSERT INTO section_roles (section_code, role_code) VALUES (%s, %s)',
+                    (section_code, role)
+                )
 
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            return {'success': False, 'error': str(e)}
-        finally:
-            if conn:
-                conn.close()
+            # Replace inclusions
+            cursor.execute('DELETE FROM section_inclusions WHERE section_code = %s', (section_code,))
+            for sid in included_user_sids:
+                cursor.execute(
+                    'INSERT INTO section_inclusions (section_code, user_sid) VALUES (%s, %s)',
+                    (section_code, sid)
+                )
 
-    # ==================== Section Groups Management ====================
-
-    def get_section_group_permissions(self) -> Dict[str, Any]:
-        """
-        Get all section group permissions with their sections and role access.
-        Excludes ADMINISTRATION (hardcoded to IT in frontend).
-        """
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            if not conn:
-                return {'success': False, 'error': 'Failed to connect to database'}
-
-            cursor = conn.cursor()
-
-            # Get groups with department access
-            cursor.execute('''
-                SELECT sg.id, sg.code, sg.name,
-                       COALESCE(array_agg(sgp.department_code)
-                           FILTER (WHERE sgp.department_code IS NOT NULL), '{}') as departments
-                FROM section_groups sg
-                LEFT JOIN section_group_permissions sgp ON sg.id = sgp.group_id
-                WHERE sg.code != 'ADMINISTRATION'
-                GROUP BY sg.id, sg.code, sg.name
-                ORDER BY sg.id
-            ''')
-
-            permissions = []
-            for row in cursor.fetchall():
-                group_id = row[0]
-
-                # Get sections within this group with their role access
-                cursor.execute('''
-                    SELECT s.code, s.name,
-                           COALESCE(array_agg(sp.role)
-                               FILTER (WHERE sp.role IS NOT NULL), '{}') AS allowed_roles
-                    FROM sections s
-                    LEFT JOIN section_permissions sp ON s.id = sp.section_id
-                    WHERE s.group_id = %s AND s.is_active = TRUE
-                    GROUP BY s.id, s.code, s.name
-                    ORDER BY s.id
-                ''', (group_id,))
-
-                sections = []
-                for sec_row in cursor.fetchall():
-                    sections.append({
-                        'code': sec_row[0],
-                        'name': sec_row[1],
-                        'allowed_roles': list(sec_row[2]) if sec_row[2] else []
-                    })
-
-                permissions.append({
-                    'group_code': row[1],
-                    'group_name': row[2],
-                    'allowed_departments': list(row[3]) if row[3] else [],
-                    'sections': sections
-                })
-
-            cursor.close()
-            return {'success': True, 'permissions': permissions}
-
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-        finally:
-            if conn:
-                conn.close()
-
-    def update_section_group_departments(self, group_code: str,
-                                          allowed_departments: List[str]) -> Dict[str, Any]:
-        """
-        Update the allowed departments for a section group.
-        Empty list means admin-only access (no departments selected).
-        """
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            if not conn:
-                return {'success': False, 'error': 'Failed to connect to database'}
-
-            cursor = conn.cursor()
-
-            # Get group ID
-            cursor.execute('SELECT id FROM section_groups WHERE code = %s', (group_code,))
-            group = cursor.fetchone()
-            if not group:
-                return {'success': False, 'error': 'Section group not found'}
-
-            group_id = group[0]
-
-            # Delete existing permissions for this group
-            cursor.execute('DELETE FROM section_group_permissions WHERE group_id = %s', (group_id,))
-
-            # Insert new permissions
-            for dept_code in allowed_departments:
-                cursor.execute('''
-                    INSERT INTO section_group_permissions (group_id, department_code)
-                    VALUES (%s, %s)
-                ''', (group_id, dept_code.upper()))
+            # Replace exclusions
+            cursor.execute('DELETE FROM section_exclusions_v2 WHERE section_code = %s', (section_code,))
+            for sid in excluded_user_sids:
+                cursor.execute(
+                    'INSERT INTO section_exclusions_v2 (section_code, user_sid) VALUES (%s, %s)',
+                    (section_code, sid)
+                )
 
             conn.commit()
             cursor.close()
-
             return {'success': True}
 
         except Exception as e:
@@ -742,237 +556,98 @@ class PermissionService:
             if conn:
                 conn.close()
 
-    # ==================== Per-Department Access Management ====================
-
-    def get_department_permissions(self, department_code: str) -> Dict[str, Any]:
+    def get_user_permissions_v2(self, user_sid: int, user_role: str,
+                                department_code: str = None) -> List[Dict[str, Any]]:
         """
-        Get groups accessible by a department with per-department staff status
-        and exclusions per section.
-        Only returns groups where the department has Layer 1 access.
+        Get accessible sections for a user (v2 flat model).
+
+        Resolution order:
+        1. Admin → all sections
+        2. DASHBOARD → always included
+        3. Excluded via section_exclusions_v2 → denied
+        4. Included via section_inclusions → allowed
+        5. Department in section_departments AND role in section_roles → allowed
+        6. Otherwise → denied
         """
         conn = None
         try:
             conn = get_postgres_connection()
             if not conn:
-                return {'success': False, 'error': 'Failed to connect to database'}
+                return []
 
             cursor = conn.cursor()
 
-            # Resolve department_code to department_id
-            cursor.execute('SELECT id FROM departments WHERE code = %s', (department_code,))
-            dept_row = cursor.fetchone()
-            if not dept_row:
-                return {'success': False, 'error': 'Department not found'}
-            department_id = dept_row[0]
-
-            # Get groups where this department has Layer 1 access
+            # Get all active sections
             cursor.execute('''
-                SELECT sg.id, sg.code, sg.name
-                FROM section_groups sg
-                JOIN section_group_permissions sgp ON sg.id = sgp.group_id
-                WHERE sgp.department_code = %s
-                ORDER BY sg.id
-            ''', (department_code,))
+                SELECT code, name FROM sections
+                WHERE is_active = TRUE ORDER BY id
+            ''')
+            all_sections = cursor.fetchall()
 
-            permissions = []
-            for group_row in cursor.fetchall():
-                group_id, group_code, group_name = group_row
+            if user_role == 'admin':
+                cursor.close()
+                return [
+                    {'section_code': code, 'section_name': name}
+                    for code, name in all_sections
+                ]
 
-                # Get sections with per-department staff_allowed
-                cursor.execute('''
-                    SELECT s.id, s.code, s.name,
-                           COALESCE(sda.staff_allowed, true) AS staff_allowed
-                    FROM sections s
-                    LEFT JOIN section_department_access sda
-                        ON s.id = sda.section_id AND sda.department_id = %s
-                    WHERE s.group_id = %s AND s.is_active = TRUE
-                    ORDER BY s.id
-                ''', (department_id, group_id))
+            # Build sets for efficient lookup
+            # Excluded sections for this user
+            cursor.execute(
+                'SELECT section_code FROM section_exclusions_v2 WHERE user_sid = %s',
+                (user_sid,)
+            )
+            excluded = {r[0] for r in cursor.fetchall()}
 
-                sections = []
-                for sec_row in cursor.fetchall():
-                    section_id, section_code, section_name, staff_allowed = sec_row
+            # Included sections for this user
+            cursor.execute(
+                'SELECT section_code FROM section_inclusions WHERE user_sid = %s',
+                (user_sid,)
+            )
+            included = {r[0] for r in cursor.fetchall()}
 
-                    # Get excluded employees for this section+department
-                    cursor.execute('''
-                        SELECT e.sid, e.employee_code, e.full_name
-                        FROM section_exclusions se
-                        JOIN employees e ON se.employee_sid = e.sid
-                        WHERE se.section_id = %s AND se.department_id = %s
-                        ORDER BY e.full_name
-                    ''', (section_id, department_id))
+            # Sections where user's department is allowed
+            dept_sections = set()
+            if department_code:
+                cursor.execute(
+                    'SELECT section_code FROM section_departments WHERE department_code = %s',
+                    (department_code,)
+                )
+                dept_sections = {r[0] for r in cursor.fetchall()}
 
-                    excluded_employees = [
-                        {'sid': row[0], 'employee_code': row[1], 'full_name': row[2]}
-                        for row in cursor.fetchall()
-                    ]
+            # Sections where user's role is allowed
+            cursor.execute(
+                'SELECT section_code FROM section_roles WHERE role_code = %s',
+                (user_role.upper(),)
+            )
+            role_sections = {r[0] for r in cursor.fetchall()}
 
-                    sections.append({
-                        'code': section_code,
-                        'name': section_name,
-                        'staff_allowed': staff_allowed,
-                        'excluded_employees': excluded_employees
-                    })
+            result = []
+            for code, name in all_sections:
+                # DASHBOARD always included
+                if code == 'DASHBOARD':
+                    result.append({'section_code': code, 'section_name': name})
+                    continue
 
-                permissions.append({
-                    'group_code': group_code,
-                    'group_name': group_name,
-                    'sections': sections
-                })
+                # Exclusion check
+                if code in excluded:
+                    continue
+
+                # Inclusion check
+                if code in included:
+                    result.append({'section_code': code, 'section_name': name})
+                    continue
+
+                # Department + role check
+                if code in dept_sections and code in role_sections:
+                    result.append({'section_code': code, 'section_name': name})
 
             cursor.close()
-            return {
-                'success': True,
-                'department_code': department_code,
-                'permissions': permissions
-            }
+            return result
 
         except Exception as e:
-            return {'success': False, 'error': str(e)}
-        finally:
-            if conn:
-                conn.close()
-
-    def update_department_staff_access(self, section_code: str, department_code: str,
-                                       staff_allowed: bool) -> Dict[str, Any]:
-        """Toggle whether staff of a specific department can access a section."""
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            if not conn:
-                return {'success': False, 'error': 'Failed to connect to database'}
-
-            cursor = conn.cursor()
-
-            # Get section ID
-            cursor.execute('SELECT id FROM sections WHERE code = %s', (section_code,))
-            section = cursor.fetchone()
-            if not section:
-                return {'success': False, 'error': 'Section not found'}
-            section_id = section[0]
-
-            # Get department ID
-            cursor.execute('SELECT id FROM departments WHERE code = %s', (department_code,))
-            dept = cursor.fetchone()
-            if not dept:
-                return {'success': False, 'error': 'Department not found'}
-            department_id = dept[0]
-
-            # Upsert
-            cursor.execute('''
-                INSERT INTO section_department_access (section_id, department_id, staff_allowed)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (section_id, department_id)
-                DO UPDATE SET staff_allowed = %s, updated_at = CURRENT_TIMESTAMP
-            ''', (section_id, department_id, staff_allowed, staff_allowed))
-
-            conn.commit()
-            cursor.close()
-
-            return {'success': True, 'message': 'Department staff access updated successfully'}
-
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            return {'success': False, 'error': str(e)}
-        finally:
-            if conn:
-                conn.close()
-
-    def get_section_exclusions(self, section_code: str, department_code: str) -> Dict[str, Any]:
-        """Get employees excluded from a section within a department."""
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            if not conn:
-                return {'success': False, 'error': 'Failed to connect to database'}
-
-            cursor = conn.cursor()
-
-            # Get section ID
-            cursor.execute('SELECT id FROM sections WHERE code = %s', (section_code,))
-            section = cursor.fetchone()
-            if not section:
-                return {'success': False, 'error': 'Section not found'}
-            section_id = section[0]
-
-            # Get department ID
-            cursor.execute('SELECT id FROM departments WHERE code = %s', (department_code,))
-            dept = cursor.fetchone()
-            if not dept:
-                return {'success': False, 'error': 'Department not found'}
-            department_id = dept[0]
-
-            cursor.execute('''
-                SELECT e.sid, e.employee_code, e.full_name
-                FROM section_exclusions se
-                JOIN employees e ON se.employee_sid = e.sid
-                WHERE se.section_id = %s AND se.department_id = %s
-                ORDER BY e.full_name
-            ''', (section_id, department_id))
-
-            exclusions = [
-                {'sid': row[0], 'employee_code': row[1], 'full_name': row[2]}
-                for row in cursor.fetchall()
-            ]
-
-            cursor.close()
-            return {'success': True, 'exclusions': exclusions}
-
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-        finally:
-            if conn:
-                conn.close()
-
-    def update_section_exclusions(self, section_code: str, department_code: str,
-                                   excluded_employee_sids: List[int]) -> Dict[str, Any]:
-        """Replace all exclusions for a section+department combination."""
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            if not conn:
-                return {'success': False, 'error': 'Failed to connect to database'}
-
-            cursor = conn.cursor()
-
-            # Get section ID
-            cursor.execute('SELECT id FROM sections WHERE code = %s', (section_code,))
-            section = cursor.fetchone()
-            if not section:
-                return {'success': False, 'error': 'Section not found'}
-            section_id = section[0]
-
-            # Get department ID
-            cursor.execute('SELECT id FROM departments WHERE code = %s', (department_code,))
-            dept = cursor.fetchone()
-            if not dept:
-                return {'success': False, 'error': 'Department not found'}
-            department_id = dept[0]
-
-            # Delete existing exclusions for this section+department
-            cursor.execute('''
-                DELETE FROM section_exclusions
-                WHERE section_id = %s AND department_id = %s
-            ''', (section_id, department_id))
-
-            # Insert new exclusions
-            for employee_sid in excluded_employee_sids:
-                cursor.execute('''
-                    INSERT INTO section_exclusions (section_id, department_id, employee_sid)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (section_id, department_id, employee_sid) DO NOTHING
-                ''', (section_id, department_id, employee_sid))
-
-            conn.commit()
-            cursor.close()
-
-            return {'success': True, 'message': 'Exclusions updated successfully'}
-
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            return {'success': False, 'error': str(e)}
+            print(f"Error getting user permissions v2: {e}")
+            return []
         finally:
             if conn:
                 conn.close()
