@@ -598,6 +598,42 @@ class AuthService:
             if conn:
                 conn.close()
 
+    DEFAULT_PASSWORD = '123456'
+
+    def reset_password(self, sid: int) -> Dict[str, Any]:
+        """Reset user password to default and set must_change_password = TRUE."""
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to database'}
+
+            cursor = conn.cursor()
+
+            cursor.execute('SELECT sid FROM users WHERE sid = %s', (sid,))
+            if not cursor.fetchone():
+                return {'success': False, 'error': 'User not found'}
+
+            new_hash = self.hash_password(self.DEFAULT_PASSWORD)
+            cursor.execute('''
+                UPDATE users SET password_hash = %s, must_change_password = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+                WHERE sid = %s
+            ''', (new_hash, sid))
+
+            conn.commit()
+            cursor.close()
+
+            return {'success': True}
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {'success': False, 'error': str(e)}
+        finally:
+            if conn:
+                conn.close()
+
     # ==================== Lookup Endpoints ====================
 
     def get_roles(self) -> Dict[str, Any]:
