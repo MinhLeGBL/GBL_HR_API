@@ -203,6 +203,23 @@ def update_user(sid):
     return jsonify(result), 400
 
 
+@user_bp.route('/<int:sid>/reset-password', methods=['POST'])
+@token_required
+def reset_user_password(sid):
+    """
+    Reset a user's password to default (123456) and force password change on next login.
+    Auth: Admin or Manager.
+    """
+    if g.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        return jsonify({'success': False, 'error': 'Only admin or manager can reset passwords'}), 403
+
+    result = auth_service.reset_password(sid)
+
+    if result['success']:
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
 @user_bp.route('/<int:sid>', methods=['DELETE'])
 @token_required
 def delete_user(sid):

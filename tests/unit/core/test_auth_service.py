@@ -438,6 +438,38 @@ class TestChangePassword:
 
 
 # ======================================================================
+# reset_password()
+# ======================================================================
+
+class TestResetPassword:
+    @patch('app.core.auth.service.get_postgres_connection')
+    def test_success(self, mock_get_conn, auth_service):
+        mock_conn, mock_cursor = _mock_conn_cursor()
+        mock_get_conn.return_value = mock_conn
+        mock_cursor.fetchone.return_value = (100000002,)
+
+        result = auth_service.reset_password(100000002)
+        assert result['success'] is True
+        mock_conn.commit.assert_called_once()
+
+    @patch('app.core.auth.service.get_postgres_connection')
+    def test_user_not_found(self, mock_get_conn, auth_service):
+        mock_conn, mock_cursor = _mock_conn_cursor()
+        mock_get_conn.return_value = mock_conn
+        mock_cursor.fetchone.return_value = None
+
+        result = auth_service.reset_password(999)
+        assert result['success'] is False
+        assert 'not found' in result['error'].lower()
+
+    @patch('app.core.auth.service.get_postgres_connection')
+    def test_db_failure(self, mock_get_conn, auth_service):
+        mock_get_conn.return_value = None
+        result = auth_service.reset_password(1)
+        assert result['success'] is False
+
+
+# ======================================================================
 # get_roles()
 # ======================================================================
 
