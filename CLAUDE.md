@@ -108,6 +108,11 @@ Each branch only carries tests relevant to its scope:
 2. Keep `tests/conftest.py`, `tests/unit/core/`, and `tests/unit/modules/__init__.py`
 3. Create `tests/unit/modules/<your-module>/` for your new tests
 
+**When merging a feature branch back to staging:**
+- Only commit your module's test additions/changes — do NOT include deletions of other modules' tests
+- If your branch deleted other modules' tests (step 1 above), ensure those deletions are **not staged** before merging
+- Staging must always retain the full set of tests from all modules
+
 **CI behavior:**
 - `feature.yml` — runs only the tests present on the feature branch
 - `staging.yml` — runs full regression (all module tests merged together)
