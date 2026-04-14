@@ -51,7 +51,7 @@ class TestGetProducts:
         data = resp.get_json()
         assert data['success'] is True
         assert data['total'] == 1
-        mock_svc.assert_called_once_with(brand=None, search=None)
+        mock_svc.assert_called_once_with(brand=None, search=None, page=None, per_page=100)
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
@@ -63,7 +63,7 @@ class TestGetProducts:
         resp = client.get(f'{self.URL}?brand=paffoni', headers=_auth_headers())
 
         assert resp.status_code == 200
-        mock_svc.assert_called_once_with(brand='paffoni', search=None)
+        mock_svc.assert_called_once_with(brand='paffoni', search=None, page=None, per_page=100)
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
@@ -75,7 +75,37 @@ class TestGetProducts:
         resp = client.get(f'{self.URL}?search=mixer', headers=_auth_headers())
 
         assert resp.status_code == 200
-        mock_svc.assert_called_once_with(brand=None, search='mixer')
+        mock_svc.assert_called_once_with(brand=None, search='mixer', page=None, per_page=100)
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.bathroom.routes.bathroom_service.get_products')
+    def test_with_pagination(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.return_value = {
+            'success': True, 'products': [], 'total': 250,
+            'page': 2, 'per_page': 50, 'pages': 5
+        }
+
+        resp = client.get(f'{self.URL}?page=2&per_page=50', headers=_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['page'] == 2
+        assert data['pages'] == 5
+        mock_svc.assert_called_once_with(brand=None, search=None, page=2, per_page=50)
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.bathroom.routes.bathroom_service.get_products')
+    def test_per_page_clamped_to_500(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.return_value = {'success': True, 'products': [], 'total': 0}
+
+        resp = client.get(f'{self.URL}?page=1&per_page=9999', headers=_auth_headers())
+
+        assert resp.status_code == 200
+        mock_svc.assert_called_once_with(brand=None, search=None, page=1, per_page=500)
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')

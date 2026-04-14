@@ -377,7 +377,8 @@ class BathroomService:
             if conn:
                 conn.close()
 
-    def get_products(self, brand: Optional[str] = None, search: Optional[str] = None) -> Dict[str, Any]:
+    def get_products(self, brand: Optional[str] = None, search: Optional[str] = None,
+                     page: Optional[int] = None, per_page: int = 100) -> Dict[str, Any]:
         conn = None
         try:
             conn = get_postgres_connection()
@@ -386,24 +387,34 @@ class BathroomService:
 
             cursor = conn.cursor()
 
-            query = """
-                SELECT brand, model_code, description, material,
-                       base_price_eur, collection, finish
-                FROM bathroom_products
-                WHERE is_active = TRUE
-            """
+            where_clause = "WHERE is_active = TRUE"
             params = []
 
             if brand:
-                query += " AND LOWER(brand) = LOWER(%s)"
+                where_clause += " AND LOWER(brand) = LOWER(%s)"
                 params.append(brand)
 
             if search:
-                query += " AND (model_code ILIKE %s OR description ILIKE %s)"
+                where_clause += " AND (model_code ILIKE %s OR description ILIKE %s)"
                 search_pattern = f"%{search}%"
                 params.extend([search_pattern, search_pattern])
 
-            query += " ORDER BY brand, model_code"
+            # Get total count
+            cursor.execute(f"SELECT COUNT(*) FROM bathroom_products {where_clause}", params)
+            total = cursor.fetchone()[0]
+
+            query = f"""
+                SELECT brand, model_code, description, material,
+                       base_price_eur, collection, finish
+                FROM bathroom_products
+                {where_clause}
+                ORDER BY brand, model_code
+            """
+
+            if page is not None:
+                offset = (page - 1) * per_page
+                query += " LIMIT %s OFFSET %s"
+                params.extend([per_page, offset])
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
@@ -422,7 +433,12 @@ class BathroomService:
                 for row in rows
             ]
 
-            return {'success': True, 'products': products, 'total': len(products)}
+            result = {'success': True, 'products': products, 'total': total}
+            if page is not None:
+                result['page'] = page
+                result['per_page'] = per_page
+                result['pages'] = (total + per_page - 1) // per_page
+            return result
 
         except Exception as e:
             return {'success': False, 'error': str(e)}

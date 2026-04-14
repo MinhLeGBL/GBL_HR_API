@@ -28,6 +28,7 @@ class TestGetProducts:
     def test_get_all_products(self, mock_conn, service):
         mock_cursor = MagicMock()
         mock_conn.return_value.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (2,)
         mock_cursor.fetchall.return_value = [
             ('paffoni', 'ZDUP129CR', 'Basin Mixer', 'Metal', Decimal('18.00'), 'ACCESSORIES', 'Chrome'),
             ('dolomite', 'A005001', 'Cabinet', 'Other', Decimal('398.00'), 'LAUNDRY', 'White'),
@@ -40,11 +41,13 @@ class TestGetProducts:
         assert result['products'][0]['brand'] == 'Paffoni'
         assert result['products'][0]['price'] == 18.0
         assert result['products'][0]['color'] == 'Chrome'
+        assert 'page' not in result
 
     @patch('app.modules.bathroom.service.get_postgres_connection')
     def test_filter_by_brand(self, mock_conn, service):
         mock_cursor = MagicMock()
         mock_conn.return_value.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (1,)
         mock_cursor.fetchall.return_value = [
             ('paffoni', 'ZDUP129CR', 'Basin Mixer', 'Metal', Decimal('18.00'), 'ACCESSORIES', 'Chrome'),
         ]
@@ -52,7 +55,8 @@ class TestGetProducts:
         result = service.get_products(brand='paffoni')
 
         assert result['success'] is True
-        call_args = mock_cursor.execute.call_args
+        # Second execute call is the SELECT query
+        call_args = mock_cursor.execute.call_args_list[1]
         assert 'LOWER(brand) = LOWER(%s)' in call_args[0][0]
         assert 'paffoni' in call_args[0][1]
 
@@ -60,14 +64,50 @@ class TestGetProducts:
     def test_filter_by_search(self, mock_conn, service):
         mock_cursor = MagicMock()
         mock_conn.return_value.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (0,)
         mock_cursor.fetchall.return_value = []
 
         result = service.get_products(search='mixer')
 
         assert result['success'] is True
-        call_args = mock_cursor.execute.call_args
+        call_args = mock_cursor.execute.call_args_list[1]
         assert 'model_code ILIKE' in call_args[0][0]
         assert '%mixer%' in call_args[0][1]
+
+    @patch('app.modules.bathroom.service.get_postgres_connection')
+    def test_pagination(self, mock_conn, service):
+        mock_cursor = MagicMock()
+        mock_conn.return_value.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (250,)
+        mock_cursor.fetchall.return_value = [
+            ('paffoni', 'ZDUP129CR', 'Basin Mixer', 'Metal', Decimal('18.00'), 'ACCESSORIES', 'Chrome'),
+        ]
+
+        result = service.get_products(page=2, per_page=100)
+
+        assert result['success'] is True
+        assert result['total'] == 250
+        assert result['page'] == 2
+        assert result['per_page'] == 100
+        assert result['pages'] == 3
+        # SELECT query should have LIMIT and OFFSET
+        call_args = mock_cursor.execute.call_args_list[1]
+        assert 'LIMIT' in call_args[0][0]
+        assert 100 in call_args[0][1]  # per_page
+        assert 100 in call_args[0][1]  # offset = (2-1) * 100
+
+    @patch('app.modules.bathroom.service.get_postgres_connection')
+    def test_no_pagination_metadata_without_page(self, mock_conn, service):
+        mock_cursor = MagicMock()
+        mock_conn.return_value.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (5,)
+        mock_cursor.fetchall.return_value = []
+
+        result = service.get_products()
+
+        assert 'page' not in result
+        assert 'per_page' not in result
+        assert 'pages' not in result
 
     @patch('app.modules.bathroom.service.get_postgres_connection')
     def test_db_connection_failure(self, mock_conn, service):
