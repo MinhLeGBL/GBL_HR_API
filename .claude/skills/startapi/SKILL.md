@@ -1,5 +1,5 @@
 ---
-name: start
+name: startapi
 description: Start or restart the GBL HR API locally (kill stale processes, start server, verify health + SSH tunnel)
 ---
 
