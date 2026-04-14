@@ -37,7 +37,7 @@ class TestGetProducts:
 
         assert result['success'] is True
         assert result['total'] == 2
-        assert result['products'][0]['brand'] == 'paffoni'
+        assert result['products'][0]['brand'] == 'Paffoni'
         assert result['products'][0]['price'] == 18.0
         assert result['products'][0]['color'] == 'Chrome'
 

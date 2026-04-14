@@ -89,6 +89,17 @@ class BathroomService:
                     ON bathroom_products USING GIN (specs)
             """)
 
+            # Trigram indexes for ILIKE search performance
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bp_model_code_trgm
+                    ON bathroom_products USING GIN (model_code gin_trgm_ops)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bp_description_trgm
+                    ON bathroom_products USING GIN (description gin_trgm_ops)
+            """)
+
             # Brand settings table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bathroom_brand_settings (
@@ -400,7 +411,7 @@ class BathroomService:
 
             products = [
                 {
-                    'brand': row[0],
+                    'brand': row[0].title() if row[0] else row[0],
                     'model_code': row[1],
                     'description': row[2],
                     'material': row[3],
@@ -447,7 +458,6 @@ class BathroomService:
 
             for brand in brands:
                 if brand['name'] not in existing_brands:
-                    cursor.close()
                     return {'success': False, 'error': f'Invalid brand name: {brand["name"]}'}
 
             # Upsert brands
