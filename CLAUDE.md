@@ -191,6 +191,7 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 | `feature/employee*` | `cr/employees.md` |
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
+| `feature/bathroom*` | `cr/bathroom-price-check.md` |
 
 ### Status markers
 

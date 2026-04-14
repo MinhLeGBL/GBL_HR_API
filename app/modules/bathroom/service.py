@@ -89,6 +89,52 @@ class BathroomService:
                     ON bathroom_products USING GIN (specs)
             """)
 
+            # Brand settings table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bathroom_brand_settings (
+                    id SERIAL PRIMARY KEY,
+                    brand VARCHAR(50) NOT NULL UNIQUE,
+                    discount NUMERIC(6,4) NOT NULL,
+                    transport NUMERIC(6,4) NOT NULL,
+                    margin NUMERIC(6,4) NOT NULL,
+                    insurance NUMERIC(6,4) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Tax rates table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bathroom_tax_rates (
+                    id SERIAL PRIMARY KEY,
+                    material_type VARCHAR(50) NOT NULL UNIQUE,
+                    rate NUMERIC(6,4) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Seed default brand settings if empty
+            cursor.execute("SELECT COUNT(*) FROM bathroom_brand_settings")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    INSERT INTO bathroom_brand_settings (brand, discount, transport, margin, insurance)
+                    VALUES
+                        ('Valsir',   0.7000, 0.0800, 0.2000, 0.0035),
+                        ('Dolomite', 0.5950, 0.0800, 0.2000, 0.0035),
+                        ('Paffoni',  0.6390, 0.0500, 0.2000, 0.0035)
+                """)
+
+            # Seed default tax rates if empty
+            cursor.execute("SELECT COUNT(*) FROM bathroom_tax_rates")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    INSERT INTO bathroom_tax_rates (material_type, rate)
+                    VALUES
+                        ('ceramic', 0.0870),
+                        ('other',   0.2000)
+                """)
+
             conn.commit()
             cursor.close()
             return {'success': True, 'message': 'Bathroom products tables initialized'}
@@ -166,7 +212,7 @@ class BathroomService:
                 'shorten_code': shorten_code,
                 'category': None,
                 'description': str(row_dict.get('description', '') or '').strip() or None,
-                'material': str(row_dict.get('material', '') or '').strip() or None,
+                'material': str(row_dict.get('material', '') or '').strip() or 'Other',
                 'base_price_eur': price,
                 'warranty': str(row_dict.get('warranty', '') or '').strip() or None,
                 'section': str(row_dict.get('section', '') or '').strip() or None,
@@ -220,7 +266,7 @@ class BathroomService:
                         'shorten_code': shorten_code,
                         'category': (row.get('category') or '').strip() or None,
                         'description': (row.get('description') or '').strip() or None,
-                        'material': (row.get('material') or '').strip() or None,
+                        'material': (row.get('material') or '').strip() or 'Other',
                         'base_price_eur': price,
                         'warranty': (row.get('warranty') or '').strip() or None,
                         'section': (row.get('section') or '').strip() or None,
@@ -315,6 +361,167 @@ class BathroomService:
         except Exception as e:
             if conn:
                 conn.rollback()
+            return {'success': False, 'error': str(e)}
+        finally:
+            if conn:
+                conn.close()
+
+    def get_products(self, brand: Optional[str] = None, search: Optional[str] = None) -> Dict[str, Any]:
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to database'}
+
+            cursor = conn.cursor()
+
+            query = """
+                SELECT brand, model_code, description, material,
+                       base_price_eur, collection, finish
+                FROM bathroom_products
+                WHERE is_active = TRUE
+            """
+            params = []
+
+            if brand:
+                query += " AND LOWER(brand) = LOWER(%s)"
+                params.append(brand)
+
+            if search:
+                query += " AND (model_code ILIKE %s OR description ILIKE %s)"
+                search_pattern = f"%{search}%"
+                params.extend([search_pattern, search_pattern])
+
+            query += " ORDER BY brand, model_code"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            products = [
+                {
+                    'brand': row[0],
+                    'model_code': row[1],
+                    'description': row[2],
+                    'material': row[3],
+                    'price': float(row[4]),
+                    'collection': row[5],
+                    'color': row[6]
+                }
+                for row in rows
+            ]
+
+            return {'success': True, 'products': products, 'total': len(products)}
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+        finally:
+            if conn:
+                conn.close()
+
+    def update_brand_settings(self, brands: List[Dict], tax_rates: Dict[str, float]) -> Dict[str, Any]:
+        conn = None
+        try:
+            # Validate numeric values
+            rate_fields = ['discount', 'transport', 'margin', 'insurance']
+            for brand in brands:
+                name = brand.get('name', '')
+                for field in rate_fields:
+                    val = brand.get(field)
+                    if val is None or not isinstance(val, (int, float)) or val < 0 or val > 1:
+                        return {'success': False, 'error': f'Invalid {field} for {name}: must be between 0 and 1'}
+
+            for material_type, rate in tax_rates.items():
+                if not isinstance(rate, (int, float)) or rate < 0 or rate > 1:
+                    return {'success': False, 'error': f'Invalid tax rate for {material_type}: must be between 0 and 1'}
+
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to database'}
+
+            cursor = conn.cursor()
+
+            # Validate brand names exist
+            cursor.execute("SELECT brand FROM bathroom_brand_settings")
+            existing_brands = {row[0] for row in cursor.fetchall()}
+
+            for brand in brands:
+                if brand['name'] not in existing_brands:
+                    cursor.close()
+                    return {'success': False, 'error': f'Invalid brand name: {brand["name"]}'}
+
+            # Upsert brands
+            for brand in brands:
+                cursor.execute("""
+                    UPDATE bathroom_brand_settings
+                    SET discount = %s, transport = %s, margin = %s, insurance = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE brand = %s
+                """, (brand['discount'], brand['transport'], brand['margin'],
+                      brand['insurance'], brand['name']))
+
+            # Upsert tax rates
+            for material_type, rate in tax_rates.items():
+                cursor.execute("""
+                    INSERT INTO bathroom_tax_rates (material_type, rate, updated_at)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (material_type) DO UPDATE SET
+                        rate = EXCLUDED.rate,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (material_type, rate))
+
+            conn.commit()
+            cursor.close()
+            return {'success': True}
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {'success': False, 'error': str(e)}
+        finally:
+            if conn:
+                conn.close()
+
+    def get_brand_settings(self) -> Dict[str, Any]:
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            if not conn:
+                return {'success': False, 'error': 'Failed to connect to database'}
+
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT brand, discount, transport, margin, insurance
+                FROM bathroom_brand_settings
+                ORDER BY brand
+            """)
+            brand_rows = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT material_type, rate
+                FROM bathroom_tax_rates
+                ORDER BY material_type
+            """)
+            tax_rows = cursor.fetchall()
+            cursor.close()
+
+            brands = [
+                {
+                    'name': row[0],
+                    'discount': float(row[1]),
+                    'transport': float(row[2]),
+                    'margin': float(row[3]),
+                    'insurance': float(row[4])
+                }
+                for row in brand_rows
+            ]
+
+            tax_rates = {row[0]: float(row[1]) for row in tax_rows}
+
+            return {'success': True, 'brands': brands, 'tax_rates': tax_rates}
+
+        except Exception as e:
             return {'success': False, 'error': str(e)}
         finally:
             if conn:
