@@ -18,6 +18,7 @@ app/
     permissions/           # Departments, sections, role-based permissions
     dashboard/             # Dashboard config and widgets
     health/                # Health check endpoints
+    bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -40,6 +41,7 @@ tests/                     # Mirrors module structure
 | `modules/permissions` | `permission_bp` | `/api/v1` | `PermissionService` | Departments, sections, group permissions |
 | `modules/dashboard` | `dashboard_bp` | `/api/v1/dashboard` | `DashboardService` | Dashboard config, widget data |
 | `modules/health` | `health_bp` | `/api/v1/health` | — | API + database health checks |
+| `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
 
 ## Import Rules
 
@@ -189,6 +191,7 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 | `feature/employee*` | `cr/employees.md` |
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
+| `feature/bathroom*` | `cr/bathroom-price-check.md` |
 
 ### Status markers
 
@@ -209,6 +212,7 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 
 - `/checkcr` — Reads the CR file for the current branch, checks pending items against backend code
 - `/responsecr` — Updates the CR file for the current branch to reflect backend implementation status
+- `/importbathroom` — Check bathroom data import status, then prompt for next action (import collection, update prices, reimport from source)
 
 ## Running the API Locally (dev/staging/feature branches)
 

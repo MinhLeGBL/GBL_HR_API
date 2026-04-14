@@ -18,6 +18,7 @@ Update the frontend CR documentation to reflect the current backend implementati
 | `feature/employee*` | `cr/employees.md` |
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
+| `feature/bathroom*` | `cr/bathroom-price-check.md` |
 
 ## Branch-sensitive updating
 

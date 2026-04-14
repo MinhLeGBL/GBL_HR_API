@@ -11,6 +11,7 @@ from app.modules.auth.routes import auth_bp
 from app.modules.permissions.routes import permission_bp
 from app.modules.dashboard.routes import dashboard_bp
 from app.modules.auth.user_routes import user_bp
+from app.modules.bathroom.routes import bathroom_bp
 
 
 def create_app():
@@ -43,6 +44,7 @@ def create_app():
     app.register_blueprint(permission_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(user_bp)
+    app.register_blueprint(bathroom_bp)
 
     # Root endpoint
     @app.route('/')
@@ -62,7 +64,8 @@ def create_app():
                 'sections_permissions': '/api/v1/sections/permissions',
                 'permissions': '/api/v1/permissions',
                 'dashboard': '/api/v1/dashboard',
-                'users': '/api/v1/users'
+                'users': '/api/v1/users',
+                'bathroom': '/api/v1/bathroom'
             }
         }), 200
 
