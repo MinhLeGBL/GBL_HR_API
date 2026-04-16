@@ -5,7 +5,7 @@ description: Auto-generate unit tests for changed services and routes on the cur
 
 Generate unit tests for all module files that have changed on the current feature branch but don't yet have corresponding unit tests.
 
-**Branch-test strategy:** Each feature branch only carries tests for its own modules + core tests. Only generate tests for modules that belong to the current branch. Do NOT generate tests for modules owned by other feature branches — those tests will exist on their respective branches and merge into staging.
+**Branch-test strategy:** Every branch carries the full test suite. Generate tests only for modules whose source files were *changed on this branch* (use the diff in Step 1 as the authority). Do not modify or regenerate tests for modules untouched by the current diff.
 
 ## Step 1: Identify changed files
 
