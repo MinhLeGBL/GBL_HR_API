@@ -38,6 +38,8 @@ class CRMQueries:
     # -----------------------------------------------------------------
     # Returns one row per customer who has at least 1 purchase in the
     # rolling 24-month window. CUSTOMER metadata pulled inline.
+    # Uses SYSDATE for the daily recompute. For backfill, use
+    # as_of_query() which replaces SYSDATE with a bind variable.
     CUSTOMER_RFM_AGGREGATES = """
         SELECT
             c.SID                                                          AS customer_sid,
@@ -53,6 +55,7 @@ class CRMQueries:
         JOIN DOCUMENT d        ON d.BT_CUID = c.SID
         JOIN DOCUMENT_ITEM di  ON di.DOC_SID = d.SID
         WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
           AND di.ITEM_TYPE = 1
           AND c.ACTIVE = 1
           AND c.SID IS NOT NULL
@@ -62,20 +65,25 @@ class CRMQueries:
     """
 
     # -----------------------------------------------------------------
-    # 2. Top brand and top category per customer
+    # 2. Top brand and top category per customer (CR #42)
     # -----------------------------------------------------------------
-    # Joins DOCUMENT_ITEM → VENDOR (for brand name) and DCS (for D_NAME, the
-    # top-level category). For each customer, finds the brand and category
-    # with the highest spend in the 24-month window. Two ROW_NUMBER scans
-    # in parallel keep this as a single round-trip.
+    # Uses composite affinity score instead of pure monetary ranking:
+    #   affinity = 0.6 × norm_frequency + 0.4 × norm_monetary
+    # where norm_frequency = brand_purchases / total_purchases,
+    #       norm_monetary  = brand_spend / total_spend.
     #
-    # Returns one row per customer with both top_brand and top_category.
+    # Category uses C_NAME (class level: Handbags, Shoes, RTW, etc.)
+    # instead of D_NAME (gender: WOMEN, MEN, KID). category_breadth
+    # also counts distinct C_NAME values.
+    #
+    # Returns one row per customer with top_brand, top_category, category_breadth.
     CUSTOMER_TOP_BRAND_CATEGORY = """
         WITH customer_sales AS (
             SELECT
                 d.BT_CUID                                                  AS customer_sid,
                 NVL(v.VEND_NAME, di.VEND_CODE)                             AS brand_name,
-                NVL(dcs.D_NAME, '(Unknown)')                               AS category_name,
+                NVL(dcs.C_NAME, '(Unknown)')                               AS category_name,
+                d.SID                                                      AS doc_sid,
                 (di.PRICE - NVL(di.TAX_AMT, 0))
                   * (1 - NVL(di.DISC_PERC, 0) / 100)
                   * (1 - NVL(d.DISC_PERC, 0) / 100)                        AS net_revenue
@@ -84,6 +92,7 @@ class CRMQueries:
             LEFT JOIN VENDOR v    ON v.VEND_CODE = di.VEND_CODE
             LEFT JOIN DCS dcs     ON dcs.DCS_CODE = di.DCS_CODE
             WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+              AND d.invc_post_date <= SYSDATE
               AND di.ITEM_TYPE = 1
               AND d.BT_CUID IS NOT NULL
               AND d.BT_CUID NOT IN (
@@ -91,25 +100,48 @@ class CRMQueries:
                   WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
               )
         ),
-        brand_totals AS (
-            SELECT customer_sid, brand_name, SUM(net_revenue) AS spend,
-                   ROW_NUMBER() OVER (PARTITION BY customer_sid
-                                      ORDER BY SUM(net_revenue) DESC, brand_name) AS rn
+        customer_totals AS (
+            SELECT customer_sid,
+                   COUNT(DISTINCT doc_sid)   AS total_purchases,
+                   SUM(net_revenue)          AS total_spend
             FROM customer_sales
-            GROUP BY customer_sid, brand_name
+            GROUP BY customer_sid
         ),
-        category_totals AS (
-            SELECT customer_sid, category_name, SUM(net_revenue) AS spend,
-                   ROW_NUMBER() OVER (PARTITION BY customer_sid
-                                      ORDER BY SUM(net_revenue) DESC, category_name) AS rn
-            FROM customer_sales
-            GROUP BY customer_sid, category_name
+        brand_affinity AS (
+            SELECT
+                cs.customer_sid,
+                cs.brand_name,
+                0.6 * (COUNT(DISTINCT cs.doc_sid) / ct.total_purchases)
+              + 0.4 * (SUM(cs.net_revenue) / NULLIF(ct.total_spend, 0))    AS affinity,
+                ROW_NUMBER() OVER (PARTITION BY cs.customer_sid
+                                   ORDER BY
+                                     0.6 * (COUNT(DISTINCT cs.doc_sid) / ct.total_purchases)
+                                   + 0.4 * (SUM(cs.net_revenue) / NULLIF(ct.total_spend, 0)) DESC,
+                                   cs.brand_name)                          AS rn
+            FROM customer_sales cs
+            JOIN customer_totals ct ON ct.customer_sid = cs.customer_sid
+            GROUP BY cs.customer_sid, cs.brand_name, ct.total_purchases, ct.total_spend
+        ),
+        category_affinity AS (
+            SELECT
+                cs.customer_sid,
+                cs.category_name,
+                0.6 * (COUNT(DISTINCT cs.doc_sid) / ct.total_purchases)
+              + 0.4 * (SUM(cs.net_revenue) / NULLIF(ct.total_spend, 0))    AS affinity,
+                ROW_NUMBER() OVER (PARTITION BY cs.customer_sid
+                                   ORDER BY
+                                     0.6 * (COUNT(DISTINCT cs.doc_sid) / ct.total_purchases)
+                                   + 0.4 * (SUM(cs.net_revenue) / NULLIF(ct.total_spend, 0)) DESC,
+                                   cs.category_name)                       AS rn
+            FROM customer_sales cs
+            JOIN customer_totals ct ON ct.customer_sid = cs.customer_sid
+            GROUP BY cs.customer_sid, cs.category_name, ct.total_purchases, ct.total_spend
         ),
         top_brand AS (
-            SELECT customer_sid, brand_name FROM brand_totals WHERE rn = 1
+            SELECT customer_sid, brand_name FROM brand_affinity WHERE rn = 1
         ),
         top_category AS (
-            SELECT customer_sid, category_name FROM category_totals WHERE rn = 1
+            SELECT customer_sid, category_name FROM category_affinity WHERE rn = 1
         ),
         breadth AS (
             SELECT customer_sid, COUNT(DISTINCT category_name) AS category_breadth
@@ -146,9 +178,28 @@ class CRMQueries:
             WHERE d.BT_CUID IS NOT NULL
               AND d.BT_PRIMARY_PHONE_NO IS NOT NULL
               AND d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+              AND d.invc_post_date <= SYSDATE
               AND d.BT_CUID NOT IN (
                   SELECT SID FROM CUSTOMER
                   WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
               )
         ) WHERE rn = 1
     """
+
+    @classmethod
+    def as_of_query(cls, query_name: str) -> str:
+        """
+        Return a query with SYSDATE replaced by :as_of_date bind variable.
+
+        Used by the backfill script to compute RFM "as of" a historical date.
+        The caller must pass {'as_of_date': datetime} when executing.
+
+        Args:
+            query_name: One of 'CUSTOMER_RFM_AGGREGATES',
+                        'CUSTOMER_TOP_BRAND_CATEGORY', 'CUSTOMER_PHONE'.
+
+        Returns:
+            Modified SQL string with :as_of_date in place of SYSDATE.
+        """
+        sql = getattr(cls, query_name)
+        return sql.replace('SYSDATE', ':as_of_date')

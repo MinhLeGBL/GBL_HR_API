@@ -6,7 +6,7 @@ Two distinct responsibilities:
   - get_*    : read scored/cached data from Postgres (used by API endpoints)
   - persist_*: write computed scores back to Postgres (used by recompute job only)
 """
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from app.core.database import get_oracle_connection, get_postgres_connection
@@ -91,6 +91,56 @@ class CRMRepository:
             conn.close()
 
         return {int(r[0]): r[1] for r in rows}
+
+    # ==================================================================
+    # Oracle reads — backfill (parameterized date)
+    # ==================================================================
+
+    def fetch_customer_aggregates_as_of(self, as_of_date: datetime) -> List[Dict[str, Any]]:
+        """Same as fetch_customer_aggregates but computed 'as of' a historical date."""
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+            sql = CRMQueries.as_of_query('CUSTOMER_RFM_AGGREGATES')
+            cur.execute(sql, {'as_of_date': as_of_date})
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+
+        return [
+            {
+                'customer_sid':       int(r[0]),
+                'name':               (r[1] or '').strip(),
+                'email':              r[2],
+                'recency':            int(r[3]),
+                'frequency':          int(r[4]),
+                'monetary':           int(r[5] or 0),
+                'last_purchase_date': r[6].date() if hasattr(r[6], 'date') else r[6],
+            }
+            for r in rows
+        ]
+
+    def fetch_top_brand_category_as_of(self, as_of_date: datetime) -> Dict[int, Dict[str, Any]]:
+        """Same as fetch_top_brand_category but computed 'as of' a historical date."""
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+            sql = CRMQueries.as_of_query('CUSTOMER_TOP_BRAND_CATEGORY')
+            cur.execute(sql, {'as_of_date': as_of_date})
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+
+        return {
+            int(r[0]): {
+                'top_brand':        r[1],
+                'top_category':     r[2],
+                'category_breadth': int(r[3] or 0),
+            }
+            for r in rows
+        }
 
     # ==================================================================
     # PostgreSQL writes (recompute job)
