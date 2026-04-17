@@ -19,6 +19,7 @@ app/
     dashboard/             # Dashboard config and widgets
     health/                # Health check endpoints
     bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
+    crm/                   # Customer RFM segmentation (luxury hybrid approach)
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -42,6 +43,7 @@ tests/                     # Mirrors module structure
 | `modules/dashboard` | `dashboard_bp` | `/api/v1/dashboard` | `DashboardService` | Dashboard config, widget data |
 | `modules/health` | `health_bp` | `/api/v1/health` | — | API + database health checks |
 | `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
+| `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
 
 ## Import Rules
 
@@ -97,37 +99,39 @@ from .service import <Name>Service
 
 ### Branch-Test Strategy
 
-Each branch only carries tests relevant to its scope:
+The full test suite lives on every branch. Never delete tests when creating or
+merging a feature branch — additive merges only.
 
-| Branch | Tests included | Purpose |
-|--------|---------------|---------|
-| `feature/<name>` | `tests/unit/core/` + `tests/unit/modules/<name>/` only | Feature-specific tests + shared core |
-| `staging` | All tests from all feature branches | Full regression suite |
-| `deployment` | Tests in git but removed from server by deploy.yml | Production has no test files |
+| Branch | Test files | What CI runs |
+|--------|-----------|--------------|
+| `feature/<name>` | All tests | Core tests + path-filtered module tests (only modules touched by the diff) |
+| `staging` | All tests | Full regression suite |
+| `deployment` | All tests in git | None — `tests/` removed from server by `deploy.yml` |
 
 **When creating a new feature branch from staging:**
-1. Remove test directories for modules you're NOT working on
-2. Keep `tests/conftest.py`, `tests/unit/core/`, and `tests/unit/modules/__init__.py`
-3. Create `tests/unit/modules/<your-module>/` for your new tests
+1. Branch as normal — do NOT delete or prune any test directories
+2. If the feature is for an existing module, add new tests to `tests/unit/modules/<name>/`
+3. If the feature is a new module, create `tests/unit/modules/<name>/` with `__init__.py`
+4. After creating a new module, update the path filter in [.github/workflows/feature.yml](.github/workflows/feature.yml) so CI knows about it
 
 **When merging a feature branch back to staging:**
-- Only commit your module's test additions/changes — do NOT include deletions of other modules' tests
-- If your branch deleted other modules' tests (step 1 above), ensure those deletions are **not staged** before merging
-- Staging must always retain the full set of tests from all modules
+- Test additions and modifications merge naturally — no special handling needed
+- Test removals require deliberate justification (test was wrong, code was deleted, etc.)
+- Removal commits must use the prefix `test(remove):` so reviewers can spot them in `git log`
 
 **CI behavior:**
-- `feature.yml` — runs only the tests present on the feature branch
-- `staging.yml` — runs full regression (all module tests merged together)
+- `feature.yml` — uses path filtering: always runs `tests/unit/core/`, plus tests for modules whose source files changed in the diff
+- `staging.yml` — runs full regression (all tests, every push to staging)
 - `deploy.yml` — no tests run; `tests/` removed from server after pull
 
 ### Structure
 ```
 tests/
   unit/
-    core/                          # Core tests (kept on all feature branches)
-    modules/<name>/                # Module tests (only on owning feature branch)
-  integration/                     # Integration tests (real DB)
-  conftest.py                      # Shared fixtures (kept on all branches)
+    core/                          # Core tests (always run by CI)
+    modules/<name>/                # Module tests (run when module source changes)
+  integration/                     # Integration tests (real DB, not run in CI)
+  conftest.py                      # Shared fixtures
 ```
 
 ### Mock targets
@@ -192,6 +196,7 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
 | `feature/bathroom*` | `cr/bathroom-price-check.md` |
+| `feature/crm*` | `cr/crm.md` |
 
 ### Status markers
 

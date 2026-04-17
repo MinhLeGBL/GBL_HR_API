@@ -7,16 +7,101 @@ on:
     branches: [staging]
 
 jobs:
-  test:
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.changes.outputs.core }}
+      auth: ${{ steps.changes.outputs.auth }}
+      bathroom: ${{ steps.changes.outputs.bathroom }}
+      commission: ${{ steps.changes.outputs.commission }}
+      crm: ${{ steps.changes.outputs.crm }}
+      dashboard: ${{ steps.changes.outputs.dashboard }}
+      employees: ${{ steps.changes.outputs.employees }}
+      health: ${{ steps.changes.outputs.health }}
+      permissions: ${{ steps.changes.outputs.permissions }}
+      stores: ${{ steps.changes.outputs.stores }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          # 'core' acts as a global trigger: any change here forces all module tests to run.
+          filters: |
+            core:
+              - 'app/core/**'
+              - 'tests/unit/core/**'
+              - 'tests/conftest.py'
+              - 'requirements.txt'
+              - 'app/main.py'
+              - 'config/**'
+              - '.github/workflows/feature.yml'
+            auth:
+              - 'app/modules/auth/**'
+              - 'tests/unit/modules/auth/**'
+            bathroom:
+              - 'app/modules/bathroom/**'
+              - 'tests/unit/modules/bathroom/**'
+            commission:
+              - 'app/modules/commission/**'
+              - 'tests/unit/modules/commission/**'
+            crm:
+              - 'app/modules/crm/**'
+              - 'tests/unit/modules/crm/**'
+            dashboard:
+              - 'app/modules/dashboard/**'
+              - 'tests/unit/modules/dashboard/**'
+            employees:
+              - 'app/modules/employees/**'
+              - 'tests/unit/modules/employees/**'
+            health:
+              - 'app/modules/health/**'
+              - 'tests/unit/modules/health/**'
+            permissions:
+              - 'app/modules/permissions/**'
+              - 'tests/unit/modules/permissions/**'
+            stores:
+              - 'app/modules/stores/**'
+              - 'tests/unit/modules/stores/**'
+
+  test:
+    needs: detect
+    runs-on: ubuntu-latest
+    env:
+      FLASK_ENV: testing
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Run all tests
-        run: pytest tests/ -x --ignore=tests/integration -v
-        env:
-          FLASK_ENV: testing
-          PYTHONPATH: .
+
+      # Always run core tests on every feature push.
+      - name: Run core tests
+        run: pytest tests/unit/core -x -v
+
+      # If 'core' changed (shared infra), run the full module suite — anything could break.
+      - name: Run full module suite (core changed)
+        if: needs.detect.outputs.core == 'true'
+        run: pytest tests/unit/modules -x -v
+
+      # Otherwise, run only the module test directories whose source changed.
+      - name: Run affected module tests (path-filtered)
+        if: needs.detect.outputs.core != 'true'
+        run: |
+          PATHS=""
+          [ "${{ needs.detect.outputs.auth }}" = "true" ]        && PATHS="$PATHS tests/unit/modules/auth"
+          [ "${{ needs.detect.outputs.bathroom }}" = "true" ]    && PATHS="$PATHS tests/unit/modules/bathroom"
+          [ "${{ needs.detect.outputs.commission }}" = "true" ]  && PATHS="$PATHS tests/unit/modules/commission"
+          [ "${{ needs.detect.outputs.crm }}" = "true" ]         && PATHS="$PATHS tests/unit/modules/crm"
+          [ "${{ needs.detect.outputs.dashboard }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/dashboard"
+          [ "${{ needs.detect.outputs.employees }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/employees"
+          [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
+          [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
+          [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"
+          if [ -n "$PATHS" ]; then
+            echo "Running:$PATHS"
+            pytest $PATHS -x -v
+          else
+            echo "No module tests affected — core tests only."
+          fi

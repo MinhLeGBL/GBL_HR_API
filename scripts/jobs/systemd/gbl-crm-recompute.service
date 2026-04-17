@@ -1,0 +1,13 @@
+[Unit]
+Description=GBL CRM RFM recompute job
+Wants=gbl-crm-recompute.timer
+
+[Service]
+Type=oneshot
+User=gbladmin
+WorkingDirectory=/home/gbladmin/GBL_HR_API
+Environment="PYTHONPATH=/home/gbladmin/GBL_HR_API"
+Environment="FLASK_ENV=production"
+ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/python scripts/jobs/crm_recompute.py
+StandardOutput=append:/var/log/gbl-crm-recompute.log
+StandardError=append:/var/log/gbl-crm-recompute.log
