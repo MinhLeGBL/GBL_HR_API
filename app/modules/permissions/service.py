@@ -117,22 +117,21 @@ class PermissionService:
                     ('BOD', 'Management Board', 'Management Board')
                 ''')
 
-            # Sections
-            cursor.execute('SELECT COUNT(*) FROM sections')
-            if cursor.fetchone()[0] == 0:
-                cursor.execute('''
-                    INSERT INTO sections (code, name, description) VALUES
-                    ('DASHBOARD', 'Dashboard', 'Main dashboard'),
-                    ('COMMISSION_DATA', 'Commission Data', 'Commission data management'),
-                    ('USER_MANAGEMENT', 'User Management', 'User administration'),
-                    ('EMPLOYEE_DATA', 'Employee Data', 'Employee information'),
-                    ('ACCESS_MANAGEMENT', 'Access Management', 'Permission and access control')
-                ''')
+            # Sections (additive — ON CONFLICT so new sections are inserted in existing environments)
+            cursor.execute('''
+                INSERT INTO sections (code, name, description) VALUES
+                ('DASHBOARD', 'Dashboard', 'Main dashboard'),
+                ('COMMISSION_DATA', 'Commission Data', 'Commission data management'),
+                ('USER_MANAGEMENT', 'User Management', 'User administration'),
+                ('EMPLOYEE_DATA', 'Employee Data', 'Employee information'),
+                ('ACCESS_MANAGEMENT', 'Access Management', 'Permission and access control'),
+                ('BATHROOM_PRICE_CHECK', 'Bathroom Price Check', 'Bathroom product catalog and pricing'),
+                ('CRM', 'CRM', 'Customer relationship management and RFM analytics')
+                ON CONFLICT (code) DO NOTHING
+            ''')
 
-            # Section permissions seed (runs after roles/users tables exist)
-            cursor.execute('SELECT COUNT(*) FROM section_departments')
-            if cursor.fetchone()[0] == 0:
-                self._seed_v2_permissions(cursor)
+            # Section permissions seed (additive — ON CONFLICT in _seed_v2_permissions)
+            self._seed_v2_permissions(cursor)
 
             conn.commit()
             cursor.close()
@@ -155,6 +154,8 @@ class PermissionService:
             'USER_MANAGEMENT': ['IT', 'HR'],
             'EMPLOYEE_DATA': ['HR'],
             'ACCESS_MANAGEMENT': ['IT'],
+            'BATHROOM_PRICE_CHECK': [],
+            'CRM': [],
         }
         for section_code, depts in section_depts.items():
             for dept in depts:
@@ -169,6 +170,8 @@ class PermissionService:
             'USER_MANAGEMENT': ['ADMIN'],
             'EMPLOYEE_DATA': ['ADMIN', 'MANAGER'],
             'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER'],
+            'BATHROOM_PRICE_CHECK': [],
+            'CRM': [],
         }
         for section_code, roles in section_roles.items():
             for role in roles:
