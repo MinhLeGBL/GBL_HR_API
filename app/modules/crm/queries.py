@@ -72,9 +72,9 @@ class CRMQueries:
     # where norm_frequency = brand_purchases / total_purchases,
     #       norm_monetary  = brand_spend / total_spend.
     #
-    # Category uses C_NAME (class level: Handbags, Shoes, RTW, etc.)
-    # instead of D_NAME (gender: WOMEN, MEN, KID). category_breadth
-    # also counts distinct C_NAME values.
+    # Category uses "D_NAME - UDF8_STRING" composite (e.g., "WOMEN - DRESS",
+    # "MEN - TSHIRT") via INVN_SBS_EXTEND.UDF8_STRING (100% coverage).
+    # category_breadth counts distinct composite category values.
     #
     # Returns one row per customer with top_brand, top_category, category_breadth.
     CUSTOMER_TOP_BRAND_CATEGORY = """
@@ -82,15 +82,19 @@ class CRMQueries:
             SELECT
                 d.BT_CUID                                                  AS customer_sid,
                 NVL(v.VEND_NAME, di.VEND_CODE)                             AS brand_name,
-                NVL(dcs.C_NAME, '(Unknown)')                               AS category_name,
+                NVL(dcs.C_NAME, '(Unknown)')
+                  || ' - '
+                  || NVL(ext.UDF8_STRING, '(Unknown)')                     AS category_name,
                 d.SID                                                      AS doc_sid,
                 (di.PRICE - NVL(di.TAX_AMT, 0))
                   * (1 - NVL(di.DISC_PERC, 0) / 100)
                   * (1 - NVL(d.DISC_PERC, 0) / 100)                        AS net_revenue
             FROM DOCUMENT d
-            JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
-            LEFT JOIN VENDOR v    ON v.VEND_CODE = di.VEND_CODE
-            LEFT JOIN DCS dcs     ON dcs.DCS_CODE = di.DCS_CODE
+            JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+            LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
+            LEFT JOIN DCS dcs           ON dcs.DCS_CODE = di.DCS_CODE
+            LEFT JOIN INVN_SBS_ITEM isi ON isi.SID = di.INVN_SBS_ITEM_SID
+            LEFT JOIN INVN_SBS_EXTEND ext ON ext.INVN_SBS_ITEM_SID = isi.SID
             WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
               AND d.invc_post_date <= SYSDATE
               AND di.ITEM_TYPE = 1
