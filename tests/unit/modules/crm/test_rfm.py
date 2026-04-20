@@ -8,6 +8,7 @@ import pytest
 from app.modules.crm.rfm import (
     SEGMENTS,
     classify_segment,
+    compute_engagement_score,
     compute_frequency_score,
     compute_monetary_quintile_scores,
     compute_recency_score,
@@ -153,27 +154,49 @@ class TestMonetaryQuintile:
 class TestWeightedScore:
 
     def test_all_max(self):
-        # 0.2*5 + 0.3*5 + 0.5*5 = 5.0
+        # 0.3*5 + 0.3*5 + 0.4*5 = 5.0
         assert compute_weighted_score(5, 5, 5) == 5.0
 
     def test_all_min(self):
-        # 0.2*1 + 0.3*1 + 0.5*1 = 1.0
+        # 0.3*1 + 0.3*1 + 0.4*1 = 1.0
         assert compute_weighted_score(1, 1, 1) == 1.0
 
-    def test_m_heavy_weighting(self):
-        # M=5, R=1, F=1: 0.2 + 0.3 + 2.5 = 3.0
-        # Confirms M dominates as expected for luxury
-        assert compute_weighted_score(1, 1, 5) == 3.0
-        # M=1, R=5, F=5: 1.0 + 1.5 + 0.5 = 3.0
-        # Same total but driven by R+F instead
-        assert compute_weighted_score(5, 5, 1) == 3.0
+    def test_m_still_heaviest(self):
+        # M=5, R=1, F=1: 0.3 + 0.3 + 2.0 = 2.6
+        assert compute_weighted_score(1, 1, 5) == 2.6
+        # M=1, R=5, F=5: 1.5 + 1.5 + 0.4 = 3.4
+        # R+F now outweigh M alone (was equal at 3.0 with old weights)
+        assert compute_weighted_score(5, 5, 1) == 3.4
 
     def test_rounding_to_2dp(self):
-        # 0.2*3 + 0.3*4 + 0.5*5 = 0.6 + 1.2 + 2.5 = 4.3
-        assert compute_weighted_score(3, 4, 5) == 4.3
+        # 0.3*3 + 0.3*4 + 0.4*5 = 0.9 + 1.2 + 2.0 = 4.1
+        assert compute_weighted_score(3, 4, 5) == 4.1
 
     def test_returns_float(self):
         assert isinstance(compute_weighted_score(3, 3, 3), float)
+
+
+# ---------------------------------------------------------------------------
+# compute_engagement_score
+# ---------------------------------------------------------------------------
+
+class TestEngagementScore:
+
+    def test_all_max(self):
+        # 0.5*5 + 0.3*5 + 0.2*5 = 5.0
+        assert compute_engagement_score(5, 5, 5) == 5.0
+
+    def test_all_min(self):
+        assert compute_engagement_score(1, 1, 1) == 1.0
+
+    def test_recency_heavy(self):
+        # R=5, F=1, M=1: 2.5 + 0.3 + 0.2 = 3.0
+        assert compute_engagement_score(5, 1, 1) == 3.0
+        # R=1, F=1, M=5: 0.5 + 0.3 + 1.0 = 1.8
+        assert compute_engagement_score(1, 1, 5) == 1.8
+
+    def test_returns_float(self):
+        assert isinstance(compute_engagement_score(3, 3, 3), float)
 
 
 # ---------------------------------------------------------------------------
@@ -193,15 +216,16 @@ class TestClassifySegment:
         assert classify_segment(5, 5, 5, 5.0) == 'VIC'
 
     def test_loyalist(self):
-        # R=4, F=4, M=3 → weighted = 0.2*4 + 0.3*4 + 0.5*3 = 3.5
-        assert classify_segment(4, 4, 3, 3.5) == 'Loyalist'
-        # R=3, F=3, weighted=3.5 (M=4): 0.2*3+0.3*3+0.5*4 = 0.6+0.9+2.0 = 3.5
-        assert classify_segment(3, 3, 4, 3.5) == 'Loyalist'
+        # R=4, F=4, M=3 → weighted = 0.3*4 + 0.3*4 + 0.4*3 = 3.6 (≥3.5)
+        assert classify_segment(4, 4, 3, compute_weighted_score(4, 4, 3)) == 'Loyalist'
+        # R=3, F=3, M=4 → weighted = 0.9 + 0.9 + 1.6 = 3.4 (<3.5) — NOT Loyalist with new weights
+        # R=3, F=4, M=4 → weighted = 0.9 + 1.2 + 1.6 = 3.7 (≥3.5) — Loyalist
+        assert classify_segment(3, 4, 4, compute_weighted_score(3, 4, 4)) == 'Loyalist'
 
     def test_loyalist_below_threshold_falls_through(self):
-        # R=3, F=3, M=2 → weighted = 0.6 + 0.9 + 1.0 = 2.5 (< 3.5)
+        # R=3, F=3, M=2 → weighted = 0.9 + 0.9 + 0.8 = 2.6 (< 3.5)
         # Doesn't match Loyalist; falls through. R=3 F=3 M=2: matches Core (R≥3 F≥2 M≥2)
-        assert classify_segment(3, 3, 2, 2.5) == 'Core'
+        assert classify_segment(3, 3, 2, compute_weighted_score(3, 3, 2)) == 'Core'
 
     def test_emerging(self):
         # Recent (R≥4), low frequency (F≤2), high spend (M≥3)
@@ -265,6 +289,7 @@ class TestScoreCustomers:
             assert 'f_score' in cust
             assert 'm_score' in cust
             assert 'weighted_score' in cust
+            assert 'engagement_score' in cust
             assert 'segment' in cust
             # Original keys preserved
             assert 'customer_sid' in cust

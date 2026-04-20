@@ -58,6 +58,7 @@ class CRMService:
                 'f_score':          r['f_score'],
                 'm_score':          r['m_score'],
                 'weighted_score':   float(r['weighted_score']),
+                'engagement_score': float(r.get('engagement_score') or 0),
                 'segment':          r['segment'],
                 'last_purchase':    lpd.isoformat() if lpd else None,
                 'top_brand':        r['top_brand'] or '',
@@ -173,6 +174,7 @@ class CRMService:
                     f_score            SMALLINT NOT NULL CHECK (f_score BETWEEN 1 AND 5),
                     m_score            SMALLINT NOT NULL CHECK (m_score BETWEEN 1 AND 5),
                     weighted_score     NUMERIC(3,2) NOT NULL,
+                    engagement_score   NUMERIC(3,2) NOT NULL DEFAULT 0,
                     segment            TEXT NOT NULL,
                     top_brand          TEXT,
                     top_category       TEXT,
@@ -192,6 +194,11 @@ class CRMService:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_crm_scores_rf
                     ON crm_customer_scores (r_score, f_score)
+            """)
+            # CR #45: add engagement_score column if table already existed without it
+            cursor.execute("""
+                ALTER TABLE crm_customer_scores
+                ADD COLUMN IF NOT EXISTS engagement_score NUMERIC(3,2) NOT NULL DEFAULT 0
             """)
 
             # Monthly snapshot of segment distribution — append-only history for trend chart.

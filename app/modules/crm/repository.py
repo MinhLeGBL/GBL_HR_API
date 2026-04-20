@@ -175,14 +175,14 @@ class CRMRepository:
                     customer_sid, name, email, phone,
                     recency, frequency, monetary,
                     r_score, f_score, m_score,
-                    weighted_score, segment,
+                    weighted_score, engagement_score, segment,
                     top_brand, top_category, category_breadth,
                     last_purchase_date
                 ) VALUES (
                     %(customer_sid)s, %(name)s, %(email)s, %(phone)s,
                     %(recency)s, %(frequency)s, %(monetary)s,
                     %(r_score)s, %(f_score)s, %(m_score)s,
-                    %(weighted_score)s, %(segment)s,
+                    %(weighted_score)s, %(engagement_score)s, %(segment)s,
                     %(top_brand)s, %(top_category)s, %(category_breadth)s,
                     %(last_purchase_date)s
                 )
@@ -275,7 +275,7 @@ class CRMRepository:
             SELECT customer_sid, name, email, phone,
                    recency, frequency, monetary,
                    r_score, f_score, m_score,
-                   weighted_score, segment,
+                   weighted_score, engagement_score, segment,
                    top_brand, top_category, category_breadth,
                    last_purchase_date
             FROM crm_customer_scores

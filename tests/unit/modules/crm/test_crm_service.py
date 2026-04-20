@@ -51,7 +51,7 @@ class TestGetCustomers:
             'customer_sid': 123, 'name': 'Nguyen Minh', 'email': None,
             'phone': '0909363636', 'recency': 45, 'frequency': 12,
             'monetary': 250_000_000, 'r_score': 5, 'f_score': 5, 'm_score': 5,
-            'weighted_score': 5.0, 'segment': 'VIC',
+            'weighted_score': 5.0, 'engagement_score': 5.0, 'segment': 'VIC',
             'top_brand': 'AKRIS', 'top_category': 'WOMEN', 'category_breadth': 6,
             'last_purchase_date': date(2026, 3, 2),
         }]
@@ -64,6 +64,7 @@ class TestGetCustomers:
         assert c['last_purchase'] == '2026-03-02'
         assert c['email'] == ''  # None → empty string
         assert c['weighted_score'] == 5.0
+        assert c['engagement_score'] == 5.0
 
     def test_passes_filters_to_repo(self, service):
         service.repo.count_scored_customers.return_value = 1
@@ -79,7 +80,7 @@ class TestGetCustomers:
             'customer_sid': 1, 'name': 'X', 'email': None, 'phone': None,
             'recency': 0, 'frequency': 1, 'monetary': 0,
             'r_score': 5, 'f_score': 1, 'm_score': 1,
-            'weighted_score': 1.8, 'segment': 'Prospect',
+            'weighted_score': 1.8, 'engagement_score': 3.0, 'segment': 'Prospect',
             'top_brand': None, 'top_category': None,
             'category_breadth': 0, 'last_purchase_date': None,
         }]
