@@ -127,10 +127,24 @@ class CRMRepository:
             conn.close()
 
     def update_config(self, config: Dict[str, float]) -> bool:
-        """Update RFM weights in crm_config. Returns True on success."""
+        """Update RFM weights in crm_config. Creates the table if it doesn't exist."""
         conn = get_postgres_connection()
         try:
             cur = conn.cursor()
+            # Ensure table + default row exist (idempotent)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS crm_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    w_recency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    w_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    w_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.4,
+                    e_recency NUMERIC(3,2) NOT NULL DEFAULT 0.5,
+                    e_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    e_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.2,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("INSERT INTO crm_config (id) VALUES (1) ON CONFLICT DO NOTHING")
             cur.execute("""
                 UPDATE crm_config SET
                     w_recency = %(w_recency)s, w_frequency = %(w_frequency)s, w_monetary = %(w_monetary)s,
