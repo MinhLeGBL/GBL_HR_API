@@ -148,6 +148,32 @@ class CRMService:
         return {'success': True, 'cells': cells}
 
     # ------------------------------------------------------------------
+    # Admin: RFM config management
+    # ------------------------------------------------------------------
+    def get_config(self) -> Dict[str, Any]:
+        """Get current RFM weights configuration."""
+        config = self.repo.get_config()
+        return {'success': True, 'config': config}
+
+    def update_config(self, config: Dict[str, float]) -> Dict[str, Any]:
+        """Update RFM weights. Validates that weights sum to 1.0."""
+        w_sum = round(config.get('w_recency', 0) + config.get('w_frequency', 0) + config.get('w_monetary', 0), 2)
+        e_sum = round(config.get('e_recency', 0) + config.get('e_frequency', 0) + config.get('e_monetary', 0), 2)
+
+        if w_sum != 1.0:
+            return {'success': False, 'error': f'Weighted score coefficients must sum to 1.0, got {w_sum}'}
+        if e_sum != 1.0:
+            return {'success': False, 'error': f'Engagement score coefficients must sum to 1.0, got {e_sum}'}
+
+        for key in ('w_recency', 'w_frequency', 'w_monetary', 'e_recency', 'e_frequency', 'e_monetary'):
+            val = config.get(key, 0)
+            if val < 0 or val > 1:
+                return {'success': False, 'error': f'{key} must be between 0 and 1, got {val}'}
+
+        self.repo.update_config(config)
+        return {'success': True, 'config': config}
+
+    # ------------------------------------------------------------------
     # Database initialization (called by scripts/database/init_db.py)
     # ------------------------------------------------------------------
     def init_database(self) -> Dict[str, Any]:
@@ -215,6 +241,25 @@ class CRMService:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_crm_snapshots_month
                     ON crm_segment_snapshots (snapshot_month DESC)
+            """)
+
+            # RFM configuration — single row, stores all tunable weights.
+            # Seeded with defaults on first run; updated via admin endpoint.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS crm_config (
+                    id                      INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    w_recency               NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    w_frequency             NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    w_monetary              NUMERIC(3,2) NOT NULL DEFAULT 0.4,
+                    e_recency               NUMERIC(3,2) NOT NULL DEFAULT 0.5,
+                    e_frequency             NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    e_monetary              NUMERIC(3,2) NOT NULL DEFAULT 0.2,
+                    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            # Seed default row if empty
+            cursor.execute("""
+                INSERT INTO crm_config (id) VALUES (1) ON CONFLICT DO NOTHING
             """)
 
             conn.commit()

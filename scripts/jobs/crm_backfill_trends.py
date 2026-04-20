@@ -35,7 +35,8 @@ from app.modules.crm.repository import CRMRepository
 from app.modules.crm.rfm import SEGMENTS, score_customers
 
 
-def backfill_month(repo: CRMRepository, year: int, month: int) -> dict:
+def backfill_month(repo: CRMRepository, year: int, month: int,
+                   weights: dict = None) -> dict:
     """
     Compute RFM segments "as of" the last day of the given month.
 
@@ -66,7 +67,7 @@ def backfill_month(repo: CRMRepository, year: int, month: int) -> dict:
         cust['phone'] = None  # Not needed for backfill
 
     # Score
-    scored = score_customers(raw_customers)
+    scored = score_customers(raw_customers, weights=weights)
 
     # Count segments
     segment_counts = Counter(c['segment'] for c in scored)
@@ -86,6 +87,8 @@ def backfill_month(repo: CRMRepository, year: int, month: int) -> dict:
 def main():
     print(f'CRM Segment Trend Backfill — starting (FLASK_ENV={env})\n')
     repo = CRMRepository()
+    weights = repo.get_config()
+    print(f'  Weights: weighted={weights["w_recency"]}/{weights["w_frequency"]}/{weights["w_monetary"]}')
     t_start = time.time()
 
     # Backfill May 2025 through March 2026 (11 months)
@@ -104,7 +107,7 @@ def main():
         print(f'  [{label}] Computing RFM as of month-end...', end=' ', flush=True)
         t = time.time()
         try:
-            result = backfill_month(repo, year, month)
+            result = backfill_month(repo, year, month, weights=weights)
             elapsed = time.time() - t
             print(f'{result["customers"]:,} customers, {elapsed:.1f}s')
             # Show segment counts on one line

@@ -13,7 +13,7 @@ Methodology (luxury hybrid approach):
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -141,28 +141,40 @@ def compute_monetary_quintile_scores(spends: Sequence[int]) -> List[int]:
     return scores
 
 
-def compute_weighted_score(r_score: int, f_score: int, m_score: int) -> float:
+def compute_weighted_score(r_score: int, f_score: int, m_score: int,
+                           weights: Optional[Dict[str, float]] = None) -> float:
     """
-    Combine R/F/M scores using luxury weights (0.3/0.3/0.4 — CR #45).
+    Combine R/F/M scores using configurable weights.
+
+    Args:
+        weights: Optional dict with keys 'w_recency', 'w_frequency', 'w_monetary'.
+                 Falls back to module-level defaults if not provided.
 
     Returns:
         Weighted score in [1.0, 5.0], rounded to 2 decimal places.
     """
-    weighted = W_RECENCY * r_score + W_FREQUENCY * f_score + W_MONETARY * m_score
-    return round(weighted, 2)
+    wr = weights['w_recency'] if weights else W_RECENCY
+    wf = weights['w_frequency'] if weights else W_FREQUENCY
+    wm = weights['w_monetary'] if weights else W_MONETARY
+    return round(wr * r_score + wf * f_score + wm * m_score, 2)
 
 
-def compute_engagement_score(r_score: int, f_score: int, m_score: int) -> float:
+def compute_engagement_score(r_score: int, f_score: int, m_score: int,
+                              weights: Optional[Dict[str, float]] = None) -> float:
     """
     Recency-heavy engagement score for outreach prioritization (CR #45).
 
-    Formula: 0.5×R + 0.3×F + 0.2×M — prioritizes recently active customers.
+    Args:
+        weights: Optional dict with keys 'e_recency', 'e_frequency', 'e_monetary'.
+                 Falls back to module-level defaults if not provided.
 
     Returns:
         Engagement score in [1.0, 5.0], rounded to 2 decimal places.
     """
-    engagement = E_RECENCY * r_score + E_FREQUENCY * f_score + E_MONETARY * m_score
-    return round(engagement, 2)
+    er = weights['e_recency'] if weights else E_RECENCY
+    ef = weights['e_frequency'] if weights else E_FREQUENCY
+    em = weights['e_monetary'] if weights else E_MONETARY
+    return round(er * r_score + ef * f_score + em * m_score, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +216,8 @@ def classify_segment(r_score: int, f_score: int, m_score: int, weighted_score: f
 # End-to-end batch scorer
 # ---------------------------------------------------------------------------
 
-def score_customers(raw_customers: List[Dict]) -> List[Dict]:
+def score_customers(raw_customers: List[Dict],
+                     weights: Optional[Dict[str, float]] = None) -> List[Dict]:
     """
     Apply full RFM scoring to a list of customers.
 
@@ -215,6 +228,9 @@ def score_customers(raw_customers: List[Dict]) -> List[Dict]:
             - frequency (int, distinct purchase count, >= 1)
             - monetary (int, total spend in VND)
             (Other keys are passed through unchanged.)
+        weights: Optional config dict from crm_config table. If provided,
+            used for weighted_score and engagement_score computation.
+            Falls back to module-level defaults if None.
 
     Returns:
         Same list of dicts, each enriched with:
@@ -241,8 +257,8 @@ def score_customers(raw_customers: List[Dict]) -> List[Dict]:
     for cust, m_score in zip(raw_customers, m_scores):
         r_score = compute_recency_score(cust['recency'])
         f_score = compute_frequency_score(cust['frequency'])
-        weighted = compute_weighted_score(r_score, f_score, m_score)
-        engagement = compute_engagement_score(r_score, f_score, m_score)
+        weighted = compute_weighted_score(r_score, f_score, m_score, weights)
+        engagement = compute_engagement_score(r_score, f_score, m_score, weights)
         segment  = classify_segment(r_score, f_score, m_score, weighted)
 
         new_cust = {**cust,

@@ -175,6 +175,15 @@ class TestWeightedScore:
     def test_returns_float(self):
         assert isinstance(compute_weighted_score(3, 3, 3), float)
 
+    def test_custom_weights(self):
+        custom = {'w_recency': 0.5, 'w_frequency': 0.3, 'w_monetary': 0.2}
+        # 0.5*5 + 0.3*1 + 0.2*1 = 2.5 + 0.3 + 0.2 = 3.0
+        assert compute_weighted_score(5, 1, 1, weights=custom) == 3.0
+
+    def test_default_weights_when_none(self):
+        # Should use module defaults (0.3/0.3/0.4)
+        assert compute_weighted_score(5, 5, 5) == compute_weighted_score(5, 5, 5, weights=None)
+
 
 # ---------------------------------------------------------------------------
 # compute_engagement_score
@@ -197,6 +206,11 @@ class TestEngagementScore:
 
     def test_returns_float(self):
         assert isinstance(compute_engagement_score(3, 3, 3), float)
+
+    def test_custom_weights(self):
+        custom = {'e_recency': 0.1, 'e_frequency': 0.1, 'e_monetary': 0.8}
+        # 0.1*1 + 0.1*1 + 0.8*5 = 4.2
+        assert compute_engagement_score(1, 1, 5, weights=custom) == 4.2
 
 
 # ---------------------------------------------------------------------------

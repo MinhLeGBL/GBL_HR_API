@@ -180,3 +180,54 @@ class TestGetHeatmap:
         service.repo.count_scored_customers.return_value = 0
         result = service.get_heatmap()
         assert result['success'] is False
+
+
+# ---------------------------------------------------------------------------
+# get_config / update_config
+# ---------------------------------------------------------------------------
+
+class TestConfig:
+
+    def test_get_config(self, service):
+        service.repo.get_config.return_value = {
+            'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
+            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+        }
+        result = service.get_config()
+        assert result['success'] is True
+        assert result['config']['w_recency'] == 0.3
+
+    def test_update_config_valid(self, service):
+        config = {
+            'w_recency': 0.2, 'w_frequency': 0.3, 'w_monetary': 0.5,
+            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+        }
+        result = service.update_config(config)
+        assert result['success'] is True
+        service.repo.update_config.assert_called_once_with(config)
+
+    def test_update_config_weighted_sum_not_1(self, service):
+        config = {
+            'w_recency': 0.5, 'w_frequency': 0.3, 'w_monetary': 0.5,  # sum = 1.3
+            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+        }
+        result = service.update_config(config)
+        assert result['success'] is False
+        assert 'sum to 1.0' in result['error']
+
+    def test_update_config_engagement_sum_not_1(self, service):
+        config = {
+            'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
+            'e_recency': 0.1, 'e_frequency': 0.1, 'e_monetary': 0.1,  # sum = 0.3
+        }
+        result = service.update_config(config)
+        assert result['success'] is False
+
+    def test_update_config_negative_value(self, service):
+        config = {
+            'w_recency': -0.1, 'w_frequency': 0.6, 'w_monetary': 0.5,
+            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+        }
+        result = service.update_config(config)
+        assert result['success'] is False
+        assert 'between 0 and 1' in result['error']

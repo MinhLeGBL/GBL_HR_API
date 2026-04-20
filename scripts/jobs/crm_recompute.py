@@ -58,6 +58,11 @@ def recompute() -> dict:
     repo = CRMRepository()
     t_start = time.time()
 
+    # Load RFM weights from DB config (falls back to defaults if not set)
+    weights = repo.get_config()
+    print(f'  Weights: weighted={weights["w_recency"]}/{weights["w_frequency"]}/{weights["w_monetary"]}'
+          f'  engagement={weights["e_recency"]}/{weights["e_frequency"]}/{weights["e_monetary"]}')
+
     # ------------------------------------------------------------------
     # Step 1-3: Oracle reads (parallelism possible later; sequential for v1)
     # ------------------------------------------------------------------
@@ -103,7 +108,7 @@ def recompute() -> dict:
     # Step 5: Score all customers
     # ------------------------------------------------------------------
     print('  [5/7] Scoring customers (RFM + segmentation)...', flush=True)
-    scored = score_customers(raw_customers)
+    scored = score_customers(raw_customers, weights=weights)
 
     # ------------------------------------------------------------------
     # Step 6-7: Postgres writes
