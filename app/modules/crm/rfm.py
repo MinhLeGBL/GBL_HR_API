@@ -13,7 +13,7 @@ Methodology (luxury hybrid approach):
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -38,10 +38,15 @@ FREQUENCY_THRESHOLDS = [
     # ≥ 10 → 5
 ]
 
-# Weighted score coefficients (sum = 1.0)
-W_RECENCY   = 0.2
+# Weighted score coefficients (sum = 1.0) — CR #45: rebalanced from 0.2/0.3/0.5
+W_RECENCY   = 0.3
 W_FREQUENCY = 0.3
-W_MONETARY  = 0.5
+W_MONETARY  = 0.4
+
+# Engagement score coefficients (sum = 1.0) — R-heavy for outreach prioritization
+E_RECENCY   = 0.5
+E_FREQUENCY = 0.3
+E_MONETARY  = 0.2
 
 # 7 luxury segments — must match CR exactly
 SEGMENTS = ['VIC', 'Loyalist', 'Emerging', 'Prospect', 'Dormant', 'Core', 'Lapsed']
@@ -136,15 +141,40 @@ def compute_monetary_quintile_scores(spends: Sequence[int]) -> List[int]:
     return scores
 
 
-def compute_weighted_score(r_score: int, f_score: int, m_score: int) -> float:
+def compute_weighted_score(r_score: int, f_score: int, m_score: int,
+                           weights: Optional[Dict[str, float]] = None) -> float:
     """
-    Combine R/F/M scores using luxury weights (0.2/0.3/0.5).
+    Combine R/F/M scores using configurable weights.
+
+    Args:
+        weights: Optional dict with keys 'w_recency', 'w_frequency', 'w_monetary'.
+                 Falls back to module-level defaults if not provided.
 
     Returns:
         Weighted score in [1.0, 5.0], rounded to 2 decimal places.
     """
-    weighted = W_RECENCY * r_score + W_FREQUENCY * f_score + W_MONETARY * m_score
-    return round(weighted, 2)
+    wr = weights['w_recency'] if weights else W_RECENCY
+    wf = weights['w_frequency'] if weights else W_FREQUENCY
+    wm = weights['w_monetary'] if weights else W_MONETARY
+    return round(wr * r_score + wf * f_score + wm * m_score, 2)
+
+
+def compute_engagement_score(r_score: int, f_score: int, m_score: int,
+                              weights: Optional[Dict[str, float]] = None) -> float:
+    """
+    Recency-heavy engagement score for outreach prioritization (CR #45).
+
+    Args:
+        weights: Optional dict with keys 'e_recency', 'e_frequency', 'e_monetary'.
+                 Falls back to module-level defaults if not provided.
+
+    Returns:
+        Engagement score in [1.0, 5.0], rounded to 2 decimal places.
+    """
+    er = weights['e_recency'] if weights else E_RECENCY
+    ef = weights['e_frequency'] if weights else E_FREQUENCY
+    em = weights['e_monetary'] if weights else E_MONETARY
+    return round(er * r_score + ef * f_score + em * m_score, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +216,8 @@ def classify_segment(r_score: int, f_score: int, m_score: int, weighted_score: f
 # End-to-end batch scorer
 # ---------------------------------------------------------------------------
 
-def score_customers(raw_customers: List[Dict]) -> List[Dict]:
+def score_customers(raw_customers: List[Dict],
+                     weights: Optional[Dict[str, float]] = None) -> List[Dict]:
     """
     Apply full RFM scoring to a list of customers.
 
@@ -197,6 +228,9 @@ def score_customers(raw_customers: List[Dict]) -> List[Dict]:
             - frequency (int, distinct purchase count, >= 1)
             - monetary (int, total spend in VND)
             (Other keys are passed through unchanged.)
+        weights: Optional config dict from crm_config table. If provided,
+            used for weighted_score and engagement_score computation.
+            Falls back to module-level defaults if None.
 
     Returns:
         Same list of dicts, each enriched with:
@@ -204,6 +238,7 @@ def score_customers(raw_customers: List[Dict]) -> List[Dict]:
             - f_score (int 1-5)
             - m_score (int 1-5)
             - weighted_score (float, 2 decimals)
+            - engagement_score (float, 2 decimals)
             - segment (str, one of SEGMENTS)
 
         The original list is not mutated; new dicts are returned.
@@ -222,7 +257,8 @@ def score_customers(raw_customers: List[Dict]) -> List[Dict]:
     for cust, m_score in zip(raw_customers, m_scores):
         r_score = compute_recency_score(cust['recency'])
         f_score = compute_frequency_score(cust['frequency'])
-        weighted = compute_weighted_score(r_score, f_score, m_score)
+        weighted = compute_weighted_score(r_score, f_score, m_score, weights)
+        engagement = compute_engagement_score(r_score, f_score, m_score, weights)
         segment  = classify_segment(r_score, f_score, m_score, weighted)
 
         new_cust = {**cust,
@@ -230,6 +266,7 @@ def score_customers(raw_customers: List[Dict]) -> List[Dict]:
                     'f_score': f_score,
                     'm_score': m_score,
                     'weighted_score': weighted,
+                    'engagement_score': engagement,
                     'segment': segment}
         out.append(new_cust)
 

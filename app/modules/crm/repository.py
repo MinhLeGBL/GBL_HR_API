@@ -93,6 +93,75 @@ class CRMRepository:
         return {int(r[0]): r[1] for r in rows}
 
     # ==================================================================
+    # PostgreSQL config (RFM weights)
+    # ==================================================================
+
+    def get_config(self) -> Dict[str, float]:
+        """
+        Read RFM config from crm_config table. Returns default weights
+        if the table doesn't exist or is empty.
+        """
+        defaults = {
+            'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
+            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+        }
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT w_recency, w_frequency, w_monetary,
+                       e_recency, e_frequency, e_monetary
+                FROM crm_config WHERE id = 1
+            """)
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return defaults
+            return {
+                'w_recency': float(row[0]), 'w_frequency': float(row[1]), 'w_monetary': float(row[2]),
+                'e_recency': float(row[3]), 'e_frequency': float(row[4]), 'e_monetary': float(row[5]),
+            }
+        except Exception:
+            return defaults
+        finally:
+            conn.close()
+
+    def update_config(self, config: Dict[str, float]) -> bool:
+        """Update RFM weights in crm_config. Creates the table if it doesn't exist."""
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            # Ensure table + default row exist (idempotent)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS crm_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    w_recency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    w_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    w_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.4,
+                    e_recency NUMERIC(3,2) NOT NULL DEFAULT 0.5,
+                    e_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    e_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.2,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("INSERT INTO crm_config (id) VALUES (1) ON CONFLICT DO NOTHING")
+            cur.execute("""
+                UPDATE crm_config SET
+                    w_recency = %(w_recency)s, w_frequency = %(w_frequency)s, w_monetary = %(w_monetary)s,
+                    e_recency = %(e_recency)s, e_frequency = %(e_frequency)s, e_monetary = %(e_monetary)s,
+                    updated_at = NOW()
+                WHERE id = 1
+            """, config)
+            conn.commit()
+            cur.close()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # ==================================================================
     # Oracle reads — backfill (parameterized date)
     # ==================================================================
 
@@ -175,14 +244,14 @@ class CRMRepository:
                     customer_sid, name, email, phone,
                     recency, frequency, monetary,
                     r_score, f_score, m_score,
-                    weighted_score, segment,
+                    weighted_score, engagement_score, segment,
                     top_brand, top_category, category_breadth,
                     last_purchase_date
                 ) VALUES (
                     %(customer_sid)s, %(name)s, %(email)s, %(phone)s,
                     %(recency)s, %(frequency)s, %(monetary)s,
                     %(r_score)s, %(f_score)s, %(m_score)s,
-                    %(weighted_score)s, %(segment)s,
+                    %(weighted_score)s, %(engagement_score)s, %(segment)s,
                     %(top_brand)s, %(top_category)s, %(category_breadth)s,
                     %(last_purchase_date)s
                 )
@@ -275,7 +344,7 @@ class CRMRepository:
             SELECT customer_sid, name, email, phone,
                    recency, frequency, monetary,
                    r_score, f_score, m_score,
-                   weighted_score, segment,
+                   weighted_score, engagement_score, segment,
                    top_brand, top_category, category_breadth,
                    last_purchase_date
             FROM crm_customer_scores
