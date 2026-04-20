@@ -45,6 +45,32 @@ def get_heatmap():
     return jsonify(result), 200
 
 
+@crm_bp.route('/admin/config', methods=['GET'])
+@admin_required
+def get_config():
+    result = crm_service.get_config()
+    return jsonify(result), 200
+
+
+@crm_bp.route('/admin/config', methods=['PUT'])
+@admin_required
+def update_config():
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'error': 'Request body required'}), 400
+
+    required = ('w_recency', 'w_frequency', 'w_monetary', 'e_recency', 'e_frequency', 'e_monetary')
+    missing = [k for k in required if k not in data]
+    if missing:
+        return jsonify({'success': False, 'error': f'Missing fields: {", ".join(missing)}'}), 400
+
+    config = {k: float(data[k]) for k in required}
+    result = crm_service.update_config(config)
+    if not result['success']:
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
 @crm_bp.route('/admin/recompute', methods=['POST'])
 @admin_required
 def admin_recompute():

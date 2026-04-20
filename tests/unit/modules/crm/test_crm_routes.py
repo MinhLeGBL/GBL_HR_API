@@ -185,6 +185,63 @@ class TestGetHeatmap:
 
 
 # ---------------------------------------------------------------------------
+# GET/PUT /admin/config
+# ---------------------------------------------------------------------------
+
+class TestAdminConfig:
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_get_config(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_config.return_value = {
+            'success': True, 'config': {'w_recency': 0.3},
+        }
+        resp = client.get('/api/v1/crm/admin/config', headers=_auth_headers())
+        assert resp.status_code == 200
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_put_config_valid(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.update_config.return_value = {'success': True, 'config': {}}
+        resp = client.put('/api/v1/crm/admin/config',
+                          json={
+                              'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
+                              'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+                          },
+                          headers=_auth_headers())
+        assert resp.status_code == 200
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_put_config_missing_fields(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        resp = client.put('/api/v1/crm/admin/config',
+                          json={'w_recency': 0.3},
+                          headers=_auth_headers())
+        assert resp.status_code == 400
+        assert 'Missing fields' in json.loads(resp.data)['error']
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_put_config_validation_error(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.update_config.return_value = {'success': False, 'error': 'sum to 1.0'}
+        resp = client.put('/api/v1/crm/admin/config',
+                          json={
+                              'w_recency': 0.5, 'w_frequency': 0.5, 'w_monetary': 0.5,
+                              'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+                          },
+                          headers=_auth_headers())
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # POST /admin/recompute
 # ---------------------------------------------------------------------------
 
