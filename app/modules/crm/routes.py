@@ -45,31 +45,42 @@ def get_heatmap():
     return jsonify(result), 200
 
 
+# Map service error codes → HTTP status. Service returns
+# {success: False, error: '...', code: '<CODE>'}; routes look up the status.
+_DRILLDOWN_ERROR_STATUS = {
+    'NOT_COMPUTED':    503,
+    'INVALID_SEGMENT': 400,
+    'NOT_FOUND':       404,
+}
+
+
+def _drilldown_response(result):
+    if result['success']:
+        return jsonify(result), 200
+    status = _DRILLDOWN_ERROR_STATUS.get(result.get('code'), 500)
+    return jsonify(result), status
+
+
 @crm_bp.route('/customers/<int:customer_sid>/drilldown', methods=['GET'])
 @token_required
 def get_customer_drilldown(customer_sid):
-    result = crm_service.get_customer_drilldown(customer_sid)
-    if not result['success']:
-        if 'not yet computed' in result['error']:
-            return jsonify(result), 503
-        return jsonify(result), 404
-    return jsonify(result), 200
+    return _drilldown_response(crm_service.get_customer_drilldown(customer_sid))
 
 
-@crm_bp.route('/brands/<brand_name>/drilldown', methods=['GET'])
+@crm_bp.route('/brand-drilldown', methods=['GET'])
 @token_required
-def get_brand_drilldown(brand_name):
-    segment = request.args.get('segment')
+def get_brand_drilldown():
+    brand_name = request.args.get('brand')
+    segment    = request.args.get('segment')
+    if not brand_name:
+        return jsonify({'success': False,
+                        'error':   'brand query param is required',
+                        'code':    'INVALID_REQUEST'}), 400
     if not segment:
-        return jsonify({'success': False, 'error': 'segment query param is required'}), 400
-    result = crm_service.get_brand_drilldown(brand_name, segment)
-    if not result['success']:
-        if 'not yet computed' in result['error']:
-            return jsonify(result), 503
-        if result['error'].startswith('Invalid segment'):
-            return jsonify(result), 400
-        return jsonify(result), 404
-    return jsonify(result), 200
+        return jsonify({'success': False,
+                        'error':   'segment query param is required',
+                        'code':    'INVALID_REQUEST'}), 400
+    return _drilldown_response(crm_service.get_brand_drilldown(brand_name, segment))
 
 
 @crm_bp.route('/product-analysis', methods=['GET'])

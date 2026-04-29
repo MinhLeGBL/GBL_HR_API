@@ -362,7 +362,7 @@ class TestGetCustomerDrilldown:
         service.repo.count_scored_customers.return_value = 0
         result = service.get_customer_drilldown(123)
         assert result['success'] is False
-        assert 'not yet computed' in result['error']
+        assert result['code'] == 'NOT_COMPUTED'
 
     def test_404_when_customer_has_no_transactions(self, service):
         service.repo.count_scored_customers.return_value = 1
@@ -371,7 +371,7 @@ class TestGetCustomerDrilldown:
         }
         result = service.get_customer_drilldown(123)
         assert result['success'] is False
-        assert 'no transactions' in result['error']
+        assert result['code'] == 'NOT_FOUND'
 
     def test_assembles_response(self, service):
         service.repo.count_scored_customers.return_value = 1
@@ -417,13 +417,20 @@ class TestGetBrandDrilldown:
         service.repo.count_scored_customers.return_value = 0
         result = service.get_brand_drilldown('GUCCI', segment='VIC')
         assert result['success'] is False
-        assert 'not yet computed' in result['error']
+        assert result['code'] == 'NOT_COMPUTED'
 
     def test_invalid_segment(self, service):
         service.repo.count_scored_customers.return_value = 1
         result = service.get_brand_drilldown('GUCCI', segment='Whales')
         assert result['success'] is False
-        assert result['error'].startswith('Invalid segment')
+        assert result['code'] == 'INVALID_SEGMENT'
+
+    def test_invalid_segment_takes_precedence_over_not_computed(self, service):
+        # Segment validation runs first, so a malformed request stays 400 even
+        # if RFM is uncomputed (which would otherwise short-circuit to 503).
+        service.repo.count_scored_customers.return_value = 0
+        result = service.get_brand_drilldown('GUCCI', segment='Whales')
+        assert result['code'] == 'INVALID_SEGMENT'
 
     def test_404_when_no_transactions(self, service):
         service.repo.count_scored_customers.return_value = 1
@@ -433,7 +440,7 @@ class TestGetBrandDrilldown:
         }
         result = service.get_brand_drilldown('GHOST', segment='VIC')
         assert result['success'] is False
-        assert 'not found' in result['error']
+        assert result['code'] == 'NOT_FOUND'
 
     def test_splits_segment_vs_all(self, service):
         # Segment has customers 1 and 2 only. Customer 3 contributes only to all-segments.

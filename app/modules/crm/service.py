@@ -43,7 +43,11 @@ class CRMService:
     def _ensure_computed(self) -> Optional[Dict]:
         """Return an error dict if scores haven't been computed yet, else None."""
         if self.repo.count_scored_customers() == 0:
-            return {'success': False, 'error': 'RFM data not yet computed. Run the recompute job first.'}
+            return {
+                'success': False,
+                'error':   'RFM data not yet computed. Run the recompute job first.',
+                'code':    'NOT_COMPUTED',
+            }
         return None
 
     # ------------------------------------------------------------------
@@ -227,7 +231,11 @@ class CRMService:
 
         raw = self.repo.fetch_customer_drilldown(customer_sid)
         if not raw['totals']:
-            return {'success': False, 'error': 'Customer not found or has no transactions'}
+            return {
+                'success': False,
+                'error':   'Customer not found or has no transactions',
+                'code':    'NOT_FOUND',
+            }
 
         brand_rows = sorted(raw['brands'],
                             key=lambda b: (-b['revenue'], b['brand_name'] or ''))
@@ -267,21 +275,32 @@ class CRMService:
 
         Returns:
             {success: True, drilldown: {...}} on success;
-            error dict for 503 (RFM not computed), 400 (invalid segment),
-            or 404 (no transactions for the brand).
+            error dict with `code` ('INVALID_SEGMENT', 'NOT_COMPUTED',
+            or 'NOT_FOUND') that the route layer maps to a status code.
         """
+        # Validate the segment before checking the cache: a malformed request
+        # is a 400 even if the cache is empty (which would otherwise short-
+        # circuit to 503).
+        if segment not in SEGMENTS:
+            return {
+                'success': False,
+                'error':   f'Invalid segment: {segment}',
+                'code':    'INVALID_SEGMENT',
+            }
+
         err = self._ensure_computed()
         if err:
             return err
-
-        if segment not in SEGMENTS:
-            return {'success': False, 'error': f'Invalid segment: {segment}'}
 
         segment_sids = set(self.repo.list_customer_sids_in_segment(segment))
         raw = self.repo.fetch_brand_drilldown(brand_name)
 
         if not raw['totals']:
-            return {'success': False, 'error': 'Brand not found'}
+            return {
+                'success': False,
+                'error':   'Brand not found',
+                'code':    'NOT_FOUND',
+            }
 
         # Headline metrics — split each customer's contribution by segment
         # membership.
