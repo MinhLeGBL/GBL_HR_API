@@ -316,3 +316,122 @@ class TestAggregateRfHeatmap:
         result = CRMRepository().aggregate_rf_heatmap()
         assert len(result) == 2
         assert result[0] == {'r': 5, 'f': 5, 'count': 28, 'total_monetary': 7_000_000_000}
+
+
+# ===========================================================================
+# Product analysis (CR #48)
+# ===========================================================================
+
+class TestFetchProductAggregates:
+
+    @patch('app.modules.crm.repository.get_oracle_connection')
+    def test_brand_dispatch(self, mock_oracle):
+        rows = [(123, 'GUCCI', 4, 50_000_000, 30)]
+        conn, cur = _make_conn(rows)
+        mock_oracle.return_value = conn
+
+        result = CRMRepository().fetch_product_aggregates(group_by='brand')
+        assert result == [{
+            'customer_sid': 123, 'group_name': 'GUCCI',
+            'items': 4, 'revenue': 50_000_000, 'customer_recency_days': 30,
+        }]
+        # The brand SQL should have been used (sanity-check it joined VENDOR)
+        executed_sql = cur.execute.call_args[0][0]
+        assert 'VENDOR' in executed_sql
+        assert 'SUM(NVL(di.QTY' in executed_sql
+        assert 'MAX(' in executed_sql
+
+    @patch('app.modules.crm.repository.get_oracle_connection')
+    def test_category_dispatch(self, mock_oracle):
+        rows = [(123, 'WOMEN - DRESS', 2, 10_000_000, 15)]
+        conn, cur = _make_conn(rows)
+        mock_oracle.return_value = conn
+
+        result = CRMRepository().fetch_product_aggregates(group_by='category')
+        assert result[0]['group_name'] == 'WOMEN - DRESS'
+        assert result[0]['items'] == 2
+        assert result[0]['customer_recency_days'] == 15
+        executed_sql = cur.execute.call_args[0][0]
+        # Category SQL uses DCS + INVN_SBS_EXTEND, not VENDOR
+        assert 'DCS' in executed_sql
+        assert 'INVN_SBS_EXTEND' in executed_sql
+
+    def test_invalid_group_by(self):
+        with pytest.raises(ValueError):
+            CRMRepository().fetch_product_aggregates(group_by='color')
+
+
+class TestReplaceProductScores:
+
+    @patch('app.modules.crm.repository.get_postgres_connection')
+    def test_truncate_then_insert(self, mock_pg):
+        conn, cur = _make_conn([])
+        cur.rowcount = 2
+        mock_pg.return_value = conn
+
+        rows = [
+            {'group_by': 'brand', 'segment': 'VIC', 'name': 'GUCCI',
+             'customer_count': 23,
+             'recency_days': 12.5, 'frequency': 50, 'monetary': 100_000_000,
+             'r_score': 5, 'f_score': 5, 'm_score': 5,
+             'weighted_score': 5.0, 'c_score': 5, 'compound_score': 5.0},
+            {'group_by': 'brand', 'segment': 'VIC', 'name': 'PRADA',
+             'customer_count': 15,
+             'recency_days': 30.0, 'frequency': 25, 'monetary': 40_000_000,
+             'r_score': 4, 'f_score': 4, 'm_score': 4,
+             'weighted_score': 4.0, 'c_score': 4, 'compound_score': 4.0},
+        ]
+        inserted = CRMRepository().replace_product_scores(rows)
+        assert inserted == 2
+        # First call should be TRUNCATE; executemany used for INSERT
+        first_sql = cur.execute.call_args_list[0][0][0]
+        assert 'TRUNCATE' in first_sql
+        cur.executemany.assert_called_once()
+
+    @patch('app.modules.crm.repository.get_postgres_connection')
+    def test_empty_truncates_only(self, mock_pg):
+        conn, cur = _make_conn([])
+        mock_pg.return_value = conn
+
+        inserted = CRMRepository().replace_product_scores([])
+        assert inserted == 0
+        cur.executemany.assert_not_called()
+
+
+class TestListProductScores:
+
+    @patch('app.modules.crm.repository.get_postgres_connection')
+    def test_filter_group_by_only(self, mock_pg):
+        cols = ['segment', 'name', 'customer_count', 'recency_days',
+                'frequency', 'monetary', 'r_score', 'f_score', 'm_score',
+                'weighted_score', 'c_score', 'compound_score']
+        rows = [('VIC', 'GUCCI', 23, 12.5, 50, 100_000_000, 5, 5, 5,
+                 5.0, 5, 5.0)]
+        conn, cur = _make_conn(rows)
+        cur.description = [(c,) for c in cols]
+        mock_pg.return_value = conn
+
+        result = CRMRepository().list_product_scores(group_by='brand')
+        assert len(result) == 1
+        assert result[0]['customer_count'] == 23
+        assert result[0]['compound_score'] == 5.0
+        executed_sql, params = cur.execute.call_args[0]
+        assert 'group_by = %s' in executed_sql
+        assert 'segment = %s' not in executed_sql
+        # CR #51: primary sort is compound_score
+        assert 'compound_score DESC' in executed_sql
+        assert params == ['brand']
+
+    @patch('app.modules.crm.repository.get_postgres_connection')
+    def test_filter_group_by_and_segment(self, mock_pg):
+        cols = ['segment', 'name', 'customer_count', 'recency_days',
+                'frequency', 'monetary', 'r_score', 'f_score', 'm_score',
+                'weighted_score', 'c_score', 'compound_score']
+        conn, cur = _make_conn([])
+        cur.description = [(c,) for c in cols]
+        mock_pg.return_value = conn
+
+        CRMRepository().list_product_scores(group_by='category', segment='VIC')
+        executed_sql, params = cur.execute.call_args[0]
+        assert 'segment = %s' in executed_sql
+        assert params == ['category', 'VIC']

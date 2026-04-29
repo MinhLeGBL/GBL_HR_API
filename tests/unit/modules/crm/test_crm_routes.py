@@ -209,8 +209,9 @@ class TestAdminConfig:
         mock_svc.update_config.return_value = {'success': True, 'config': {}}
         resp = client.put('/api/v1/crm/admin/config',
                           json={
-                              'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
-                              'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+                              'w_recency':  0.3, 'w_frequency':  0.3, 'w_monetary':  0.4,
+                              'e_recency':  0.5, 'e_frequency':  0.3, 'e_monetary':  0.2,
+                              'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
                           },
                           headers=_auth_headers())
         assert resp.status_code == 200
@@ -234,11 +235,28 @@ class TestAdminConfig:
         mock_svc.update_config.return_value = {'success': False, 'error': 'sum to 1.0'}
         resp = client.put('/api/v1/crm/admin/config',
                           json={
-                              'w_recency': 0.5, 'w_frequency': 0.5, 'w_monetary': 0.5,
+                              'w_recency':  0.5, 'w_frequency':  0.5, 'w_monetary':  0.5,
+                              'e_recency':  0.5, 'e_frequency':  0.3, 'e_monetary':  0.2,
+                              'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
+                          },
+                          headers=_auth_headers())
+        assert resp.status_code == 400
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_put_config_missing_pw_fields(self, _mock_svc, mock_get_user, mock_verify, client):
+        # CR #52: pw_* fields are now required in PUT body
+        _mock_auth(mock_verify, mock_get_user)
+        resp = client.put('/api/v1/crm/admin/config',
+                          json={
+                              'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
                               'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
                           },
                           headers=_auth_headers())
         assert resp.status_code == 400
+        body = json.loads(resp.data)
+        assert 'pw_recency' in body['error']
 
 
 # ---------------------------------------------------------------------------
@@ -270,3 +288,69 @@ class TestAdminRecompute:
         assert resp.status_code == 500
         data = json.loads(resp.data)
         assert 'Oracle down' in data['error']
+
+
+# ---------------------------------------------------------------------------
+# GET /product-analysis (CR #48)
+# ---------------------------------------------------------------------------
+
+class TestProductAnalysis:
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_200_with_data(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_product_analysis.return_value = {
+            'success': True,
+            'groups': {'VIC': [{'name': 'GUCCI', 'frequency': 10, 'monetary': 1,
+                                'recency_days': 0.0, 'r_score': 5, 'f_score': 5,
+                                'm_score': 5, 'weighted_score': 5.0}]},
+        }
+        resp = client.get('/api/v1/crm/product-analysis?group_by=brand',
+                          headers=_auth_headers())
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data['success'] is True
+        assert 'VIC' in data['groups']
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_400_missing_group_by(self, _mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        resp = client.get('/api/v1/crm/product-analysis', headers=_auth_headers())
+        assert resp.status_code == 400
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_400_invalid_group_by(self, _mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        resp = client.get('/api/v1/crm/product-analysis?group_by=color',
+                          headers=_auth_headers())
+        assert resp.status_code == 400
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_503_when_not_computed(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_product_analysis.return_value = {
+            'success': False, 'error': 'RFM data not yet computed.',
+        }
+        resp = client.get('/api/v1/crm/product-analysis?group_by=brand',
+                          headers=_auth_headers())
+        assert resp.status_code == 503
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_passes_segment_filter(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_product_analysis.return_value = {'success': True, 'groups': {}}
+        client.get('/api/v1/crm/product-analysis?group_by=category&segment=VIC',
+                   headers=_auth_headers())
+        mock_svc.get_product_analysis.assert_called_once_with(
+            group_by='category', segment='VIC',
+        )

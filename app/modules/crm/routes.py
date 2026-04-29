@@ -45,6 +45,21 @@ def get_heatmap():
     return jsonify(result), 200
 
 
+@crm_bp.route('/product-analysis', methods=['GET'])
+@token_required
+def get_product_analysis():
+    group_by = request.args.get('group_by')
+    if group_by not in ('brand', 'category'):
+        return jsonify({'success': False,
+                        'error': "group_by must be 'brand' or 'category'"}), 400
+
+    segment = request.args.get('segment') or None
+    result = crm_service.get_product_analysis(group_by=group_by, segment=segment)
+    if not result['success']:
+        return jsonify(result), 503
+    return jsonify(result), 200
+
+
 @crm_bp.route('/admin/config', methods=['GET'])
 @admin_required
 def get_config():
@@ -59,7 +74,9 @@ def update_config():
     if not data:
         return jsonify({'success': False, 'error': 'Request body required'}), 400
 
-    required = ('w_recency', 'w_frequency', 'w_monetary', 'e_recency', 'e_frequency', 'e_monetary')
+    required = ('w_recency',  'w_frequency',  'w_monetary',
+                'e_recency',  'e_frequency',  'e_monetary',
+                'pw_recency', 'pw_frequency', 'pw_monetary')
     missing = [k for k in required if k not in data]
     if missing:
         return jsonify({'success': False, 'error': f'Missing fields: {", ".join(missing)}'}), 400

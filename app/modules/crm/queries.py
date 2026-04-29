@@ -190,6 +190,83 @@ class CRMQueries:
         ) WHERE rn = 1
     """
 
+    # -----------------------------------------------------------------
+    # 4. Per-customer per-brand aggregates (CR #48 → revised by CR #49)
+    # -----------------------------------------------------------------
+    # One row per (customer, brand). Each row carries that customer's
+    # **own** values for the brand; the pooler then averages across all
+    # customers in a segment (nested per-customer averaging, CR #49).
+    # Fields:
+    #   items                 — total quantity of items of this brand the
+    #                           customer bought across all their transactions
+    #                           (SUM(QTY))
+    #   revenue               — net revenue (after item + doc disc) across
+    #                           those line items
+    #   customer_recency_days — days since this customer's most recent
+    #                           transaction containing the brand
+    #                           (today − MAX(invc_post_date))
+    PRODUCT_BRAND_AGGREGATES = """
+        SELECT
+            d.BT_CUID                                                      AS customer_sid,
+            NVL(v.VEND_NAME, di.VEND_CODE)                                 AS group_name,
+            SUM(NVL(di.QTY, 0))                                            AS items,
+            SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100))                         AS revenue,
+            TRUNC(SYSDATE)
+              - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                 AS customer_recency_days
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
+        WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+          AND d.BT_CUID IS NOT NULL
+          AND d.BT_CUID NOT IN (
+              SELECT SID FROM CUSTOMER
+              WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
+          )
+        GROUP BY d.BT_CUID, NVL(v.VEND_NAME, di.VEND_CODE)
+    """
+
+    # -----------------------------------------------------------------
+    # 5. Per-customer per-category aggregates (CR #48 → revised by CR #49)
+    # -----------------------------------------------------------------
+    # Same shape as PRODUCT_BRAND_AGGREGATES but grouped on the C_NAME +
+    # UDF8_STRING composite category used elsewhere in the CRM module
+    # (CR #42). Categories with neither value are emitted as
+    # "(Unknown) - (Unknown)" so they aggregate together.
+    PRODUCT_CATEGORY_AGGREGATES = """
+        SELECT
+            d.BT_CUID                                                      AS customer_sid,
+            NVL(dcs.C_NAME, '(Unknown)')
+              || ' - '
+              || NVL(ext.UDF8_STRING, '(Unknown)')                         AS group_name,
+            SUM(NVL(di.QTY, 0))                                            AS items,
+            SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100))                         AS revenue,
+            TRUNC(SYSDATE)
+              - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                 AS customer_recency_days
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN DCS dcs           ON dcs.DCS_CODE = di.DCS_CODE
+        LEFT JOIN INVN_SBS_ITEM isi ON isi.SID = di.INVN_SBS_ITEM_SID
+        LEFT JOIN INVN_SBS_EXTEND ext ON ext.INVN_SBS_ITEM_SID = isi.SID
+        WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+          AND d.BT_CUID IS NOT NULL
+          AND d.BT_CUID NOT IN (
+              SELECT SID FROM CUSTOMER
+              WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
+          )
+        GROUP BY d.BT_CUID,
+                 NVL(dcs.C_NAME, '(Unknown)')
+                   || ' - '
+                   || NVL(ext.UDF8_STRING, '(Unknown)')
+    """
+
     @classmethod
     def as_of_query(cls, query_name: str) -> str:
         """
@@ -200,7 +277,8 @@ class CRMQueries:
 
         Args:
             query_name: One of 'CUSTOMER_RFM_AGGREGATES',
-                        'CUSTOMER_TOP_BRAND_CATEGORY', 'CUSTOMER_PHONE'.
+                        'CUSTOMER_TOP_BRAND_CATEGORY', 'CUSTOMER_PHONE',
+                        'PRODUCT_BRAND_AGGREGATES', 'PRODUCT_CATEGORY_AGGREGATES'.
 
         Returns:
             Modified SQL string with :as_of_date in place of SYSDATE.

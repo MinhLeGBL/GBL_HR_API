@@ -11,9 +11,12 @@ from app.modules.crm.rfm import (
     compute_engagement_score,
     compute_frequency_score,
     compute_monetary_quintile_scores,
+    compute_quintile_scores,
     compute_recency_score,
     compute_weighted_score,
+    pool_product_aggregates_by_segment,
     score_customers,
+    score_product_groups,
 )
 
 
@@ -370,3 +373,213 @@ class TestScoreCustomers:
         assert lapsed['f_score'] == 1
         assert lapsed['m_score'] == 1
         assert lapsed['segment'] == 'Lapsed'
+
+
+# ---------------------------------------------------------------------------
+# compute_quintile_scores (generic, ascending=True for recency)
+# ---------------------------------------------------------------------------
+
+class TestQuintileGeneric:
+
+    def test_descending_matches_monetary_quintile(self):
+        # Same input through both APIs must produce the same scores
+        spends = [10, 50, 30, 40, 20]
+        assert compute_quintile_scores(spends, ascending=False) == \
+               compute_monetary_quintile_scores(spends)
+
+    def test_ascending_recency_lowest_days_gets_5(self):
+        # 5 brands' mean recency days — lowest (most recent) should score 5
+        recency = [400, 30, 200, 100, 600]
+        scores = compute_quintile_scores(recency, ascending=True)
+        # Sort ASC: 30(idx1), 100(idx3), 200(idx2), 400(idx0), 600(idx4)
+        # ranks 0..4 → scores 5,4,3,2,1
+        assert scores == [2, 5, 3, 4, 1]
+
+    def test_empty(self):
+        assert compute_quintile_scores([], ascending=True) == []
+
+    def test_single(self):
+        assert compute_quintile_scores([42], ascending=True) == [5]
+
+
+# ---------------------------------------------------------------------------
+# pool_product_aggregates_by_segment
+# ---------------------------------------------------------------------------
+
+class TestPoolProductAggregates:
+
+    def test_cr49_worked_example(self):
+        """Direct port of the CR #49 spec example."""
+        rows = [
+            # Customer A: 5 items, 1,000,000 VND, recency 10d
+            {'customer_sid': 1, 'group_name': 'X',
+             'items': 5, 'revenue': 1_000_000, 'customer_recency_days': 10},
+            # Customer B: 2 items, 500,000 VND, recency 30d
+            {'customer_sid': 2, 'group_name': 'X',
+             'items': 2, 'revenue': 500_000, 'customer_recency_days': 30},
+        ]
+        out = pool_product_aggregates_by_segment(rows, {1: 'VIC', 2: 'VIC'})
+        x = out['VIC'][0]
+        assert x['name'] == 'X'
+        # CR #50: customer_count = number of distinct contributing customers
+        assert x['customer_count'] == 2
+        # mean of (10, 30) = 20
+        assert x['recency_days'] == 20.0
+        # mean of (5, 2) = 3.5
+        assert x['frequency'] == 3.5
+        # mean of (1_000_000, 500_000) = 750_000
+        assert x['monetary'] == 750_000
+
+    def test_skips_customers_not_in_segments_map(self):
+        rows = [
+            {'customer_sid': 1, 'group_name': 'GUCCI',
+             'items': 1, 'revenue': 1_000_000, 'customer_recency_days': 10},
+            {'customer_sid': 999, 'group_name': 'GUCCI',
+             'items': 5, 'revenue': 9_000_000, 'customer_recency_days': 50},
+        ]
+        out = pool_product_aggregates_by_segment(rows, {1: 'VIC'})
+        # customer 999 dropped → only customer 1's per-customer values flow through
+        assert out['VIC'][0]['frequency'] == 1.0
+        assert out['VIC'][0]['monetary'] == 1_000_000
+
+    def test_skips_null_group_name(self):
+        rows = [
+            {'customer_sid': 1, 'group_name': None,
+             'items': 1, 'revenue': 1, 'customer_recency_days': 1},
+        ]
+        out = pool_product_aggregates_by_segment(rows, {1: 'VIC'})
+        assert out == {}
+
+    def test_separates_segments(self):
+        rows = [
+            {'customer_sid': 1, 'group_name': 'GUCCI',
+             'items': 2, 'revenue': 100, 'customer_recency_days': 10},
+            {'customer_sid': 2, 'group_name': 'GUCCI',
+             'items': 1, 'revenue': 50, 'customer_recency_days': 200},
+        ]
+        out = pool_product_aggregates_by_segment(rows, {1: 'VIC', 2: 'Lapsed'})
+        assert set(out.keys()) == {'VIC', 'Lapsed'}
+        # Each segment has only one customer, so per-customer values flow through
+        assert out['VIC'][0]['frequency'] == 2.0
+        assert out['VIC'][0]['recency_days'] == 10.0
+        assert out['Lapsed'][0]['frequency'] == 1.0
+        assert out['Lapsed'][0]['recency_days'] == 200.0
+
+    def test_single_customer_brand_passes_through(self):
+        """Edge case from CR #49 notes: single customer's values flow through directly."""
+        rows = [
+            {'customer_sid': 7, 'group_name': 'NICHE',
+             'items': 4, 'revenue': 8_000_000, 'customer_recency_days': 45},
+        ]
+        out = pool_product_aggregates_by_segment(rows, {7: 'VIC'})
+        niche = out['VIC'][0]
+        assert niche['customer_count'] == 1
+        assert niche['frequency'] == 4.0
+        assert niche['monetary'] == 8_000_000
+        assert niche['recency_days'] == 45.0
+
+
+# ---------------------------------------------------------------------------
+# score_product_groups
+# ---------------------------------------------------------------------------
+
+class TestScoreProductGroups:
+
+    def test_empty_returns_empty(self):
+        assert score_product_groups([]) == []
+
+    def test_single_group_gets_top_scores(self):
+        # CR #51 single-row edge case: c_score=5, compound=weighted_score
+        out = score_product_groups([
+            {'name': 'GUCCI', 'customer_count': 1, 'recency_days': 30.0,
+             'frequency': 10, 'monetary': 1_000_000},
+        ])
+        assert out[0]['r_score'] == 5
+        assert out[0]['f_score'] == 5
+        assert out[0]['m_score'] == 5
+        assert out[0]['weighted_score'] == 5.0
+        assert out[0]['c_score'] == 5
+        assert out[0]['compound_score'] == 5.0
+
+    def test_recency_inverted(self):
+        # Two brands; the one with lower recency_days must get a higher r_score
+        groups = [
+            {'name': 'A', 'customer_count': 1, 'recency_days': 200.0,
+             'frequency': 1, 'monetary': 1},
+            {'name': 'B', 'customer_count': 1, 'recency_days': 30.0,
+             'frequency': 1, 'monetary': 1},
+        ]
+        out = score_product_groups(groups)
+        a = next(g for g in out if g['name'] == 'A')
+        b = next(g for g in out if g['name'] == 'B')
+        assert b['r_score'] > a['r_score']
+
+    def test_sorted_by_compound_score_desc(self):
+        # CR #51: primary sort key is compound_score (replaces weighted_score)
+        groups = [
+            {'name': 'low',  'customer_count': 1,  'recency_days': 500.0,
+             'frequency': 1,  'monetary': 100},
+            {'name': 'mid',  'customer_count': 5,  'recency_days': 200.0,
+             'frequency': 5,  'monetary': 1_000},
+            {'name': 'high', 'customer_count': 20, 'recency_days': 30.0,
+             'frequency': 20, 'monetary': 100_000},
+        ]
+        out = score_product_groups(groups)
+        scores = [g['compound_score'] for g in out]
+        assert scores == sorted(scores, reverse=True)
+        assert out[0]['name'] == 'high'
+
+    def test_weights_passthrough(self):
+        groups = [
+            {'name': 'A', 'customer_count': 1, 'recency_days': 100.0,
+             'frequency': 1, 'monetary': 100},
+            {'name': 'B', 'customer_count': 1, 'recency_days': 10.0,
+             'frequency': 5, 'monetary': 500},
+        ]
+        custom = {'w_recency': 1.0, 'w_frequency': 0.0, 'w_monetary': 0.0}
+        out = score_product_groups(groups, weights=custom)
+        # weighted == r_score under these weights
+        for g in out:
+            assert g['weighted_score'] == float(g['r_score'])
+
+    def test_compound_score_formula(self):
+        # CR #51: compound_score = round(sqrt(weighted_score * c_score), 2)
+        import math
+        groups = [
+            {'name': f'B{i}', 'customer_count': (i + 1) * 3,
+             'recency_days': 50.0 + i * 30, 'frequency': i + 1,
+             'monetary': (i + 1) * 1_000}
+            for i in range(5)
+        ]
+        out = score_product_groups(groups)
+        for row in out:
+            expected = round(math.sqrt(row['weighted_score'] * row['c_score']), 2)
+            assert row['compound_score'] == expected, (
+                f"compound_score mismatch for {row['name']}: "
+                f"weighted={row['weighted_score']} c={row['c_score']}"
+            )
+
+    def test_compound_score_breadth_penalises_low_customer_count(self):
+        # Same R/F/M magnitudes per row, but customer_count ranks ALIGN with
+        # the natural quintile tie-break (orig_idx ascending) so weighted &
+        # c don't cancel. Highest-count brand (B0) wins.
+        groups = [
+            {'name': 'B0', 'customer_count': 50, 'recency_days': 30.0,
+             'frequency': 5,  'monetary': 1_000},
+            {'name': 'B1', 'customer_count': 40, 'recency_days': 30.0,
+             'frequency': 5,  'monetary': 1_000},
+            {'name': 'B2', 'customer_count': 30, 'recency_days': 30.0,
+             'frequency': 5,  'monetary': 1_000},
+            {'name': 'B3', 'customer_count': 20, 'recency_days': 30.0,
+             'frequency': 5,  'monetary': 1_000},
+            {'name': 'B4', 'customer_count': 1,  'recency_days': 30.0,
+             'frequency': 5,  'monetary': 1_000},
+        ]
+        out = score_product_groups(groups)
+        b0 = next(g for g in out if g['name'] == 'B0')
+        b4 = next(g for g in out if g['name'] == 'B4')
+        assert b0['c_score'] == 5    # most customers
+        assert b4['c_score'] == 1    # fewest customers
+        assert b0['compound_score'] > b4['compound_score']
+        # Top of the list is the highest-breadth brand (sort changed)
+        assert out[0]['name'] == 'B0'

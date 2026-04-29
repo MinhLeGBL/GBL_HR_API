@@ -190,17 +190,20 @@ class TestConfig:
 
     def test_get_config(self, service):
         service.repo.get_config.return_value = {
-            'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
-            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+            'w_recency': 0.3,  'w_frequency': 0.3,  'w_monetary': 0.4,
+            'e_recency': 0.5,  'e_frequency': 0.3,  'e_monetary': 0.2,
+            'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
         }
         result = service.get_config()
         assert result['success'] is True
         assert result['config']['w_recency'] == 0.3
+        assert result['config']['pw_recency'] == 0.3
 
     def test_update_config_valid(self, service):
         config = {
-            'w_recency': 0.2, 'w_frequency': 0.3, 'w_monetary': 0.5,
-            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+            'w_recency': 0.2,  'w_frequency': 0.3,  'w_monetary': 0.5,
+            'e_recency': 0.5,  'e_frequency': 0.3,  'e_monetary': 0.2,
+            'pw_recency': 0.4, 'pw_frequency': 0.3, 'pw_monetary': 0.3,
         }
         result = service.update_config(config)
         assert result['success'] is True
@@ -208,8 +211,9 @@ class TestConfig:
 
     def test_update_config_weighted_sum_not_1(self, service):
         config = {
-            'w_recency': 0.5, 'w_frequency': 0.3, 'w_monetary': 0.5,  # sum = 1.3
-            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+            'w_recency': 0.5,  'w_frequency': 0.3,  'w_monetary': 0.5,  # sum = 1.3
+            'e_recency': 0.5,  'e_frequency': 0.3,  'e_monetary': 0.2,
+            'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
         }
         result = service.update_config(config)
         assert result['success'] is False
@@ -217,17 +221,105 @@ class TestConfig:
 
     def test_update_config_engagement_sum_not_1(self, service):
         config = {
-            'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
-            'e_recency': 0.1, 'e_frequency': 0.1, 'e_monetary': 0.1,  # sum = 0.3
+            'w_recency': 0.3,  'w_frequency': 0.3,  'w_monetary': 0.4,
+            'e_recency': 0.1,  'e_frequency': 0.1,  'e_monetary': 0.1,  # sum = 0.3
+            'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
         }
         result = service.update_config(config)
         assert result['success'] is False
 
+    def test_update_config_product_sum_not_1(self, service):
+        # CR #52: pw_* must also sum to 1.0
+        config = {
+            'w_recency': 0.3,  'w_frequency': 0.3,  'w_monetary': 0.4,
+            'e_recency': 0.5,  'e_frequency': 0.3,  'e_monetary': 0.2,
+            'pw_recency': 0.5, 'pw_frequency': 0.5, 'pw_monetary': 0.5,  # sum = 1.5
+        }
+        result = service.update_config(config)
+        assert result['success'] is False
+        assert 'Product-analysis' in result['error']
+
     def test_update_config_negative_value(self, service):
         config = {
-            'w_recency': -0.1, 'w_frequency': 0.6, 'w_monetary': 0.5,
-            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+            'w_recency': -0.1, 'w_frequency': 0.6,  'w_monetary': 0.5,
+            'e_recency': 0.5,  'e_frequency': 0.3,  'e_monetary': 0.2,
+            'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
         }
         result = service.update_config(config)
         assert result['success'] is False
         assert 'between 0 and 1' in result['error']
+
+    def test_update_config_pw_negative_value(self, service):
+        # CR #52: pw_* values must also be in [0, 1]
+        config = {
+            'w_recency': 0.3,   'w_frequency': 0.3,  'w_monetary': 0.4,
+            'e_recency': 0.5,   'e_frequency': 0.3,  'e_monetary': 0.2,
+            'pw_recency': -0.5, 'pw_frequency': 0.7, 'pw_monetary': 0.8,  # sum 1.0 but pw_recency is negative
+        }
+        result = service.update_config(config)
+        assert result['success'] is False
+        assert 'pw_recency' in result['error']
+
+
+# ---------------------------------------------------------------------------
+# get_product_analysis (CR #48)
+# ---------------------------------------------------------------------------
+
+class TestGetProductAnalysis:
+
+    def test_503_when_not_computed(self, service):
+        service.repo.count_product_scores.return_value = 0
+        result = service.get_product_analysis(group_by='brand')
+        assert result['success'] is False
+        assert 'not yet computed' in result['error']
+
+    def test_groups_rows_by_segment(self, service):
+        service.repo.count_product_scores.return_value = 4
+        service.repo.list_product_scores.return_value = [
+            {'segment': 'VIC', 'name': 'GUCCI', 'customer_count': 23,
+             'recency_days': 12.5, 'frequency': 50, 'monetary': 100_000_000,
+             'r_score': 5, 'f_score': 5, 'm_score': 5,
+             'weighted_score': 5.0, 'c_score': 5, 'compound_score': 5.0},
+            {'segment': 'VIC', 'name': 'PRADA', 'customer_count': 15,
+             'recency_days': 30.0, 'frequency': 25, 'monetary': 40_000_000,
+             'r_score': 4, 'f_score': 4, 'm_score': 4,
+             'weighted_score': 4.0, 'c_score': 4, 'compound_score': 4.0},
+            {'segment': 'Loyalist', 'name': 'GUCCI', 'customer_count': 8,
+             'recency_days': 60.0, 'frequency': 12, 'monetary': 8_000_000,
+             'r_score': 5, 'f_score': 4, 'm_score': 3,
+             'weighted_score': 4.0, 'c_score': 5, 'compound_score': 4.47},
+        ]
+        result = service.get_product_analysis(group_by='brand')
+        assert result['success'] is True
+        # All 7 segments must be keys (empty list when no data)
+        assert set(result['groups'].keys()) == set(SEGMENTS)
+        assert len(result['groups']['VIC']) == 2
+        assert len(result['groups']['Loyalist']) == 1
+        assert len(result['groups']['Lapsed']) == 0
+        # Row contents formatted with proper types
+        vic_row = result['groups']['VIC'][0]
+        assert vic_row['name'] == 'GUCCI'
+        assert vic_row['customer_count'] == 23           # CR #50
+        assert isinstance(vic_row['customer_count'], int)
+        assert vic_row['frequency'] == 50
+        assert isinstance(vic_row['frequency'], float)   # CR #49: fractional
+        assert isinstance(vic_row['monetary'], int)
+        assert isinstance(vic_row['recency_days'], float)
+        assert vic_row['c_score'] == 5                    # CR #51
+        assert vic_row['compound_score'] == 5.0           # CR #51
+        assert isinstance(vic_row['compound_score'], float)
+
+    def test_segment_filter_returns_only_that_segment(self, service):
+        service.repo.count_product_scores.return_value = 1
+        service.repo.list_product_scores.return_value = [
+            {'segment': 'VIC', 'name': 'GUCCI', 'customer_count': 23,
+             'recency_days': 12.5, 'frequency': 50, 'monetary': 100_000_000,
+             'r_score': 5, 'f_score': 5, 'm_score': 5,
+             'weighted_score': 5.0, 'c_score': 5, 'compound_score': 5.0},
+        ]
+        result = service.get_product_analysis(group_by='brand', segment='VIC')
+        assert result['success'] is True
+        assert list(result['groups'].keys()) == ['VIC']
+        service.repo.list_product_scores.assert_called_once_with(
+            group_by='brand', segment='VIC',
+        )
