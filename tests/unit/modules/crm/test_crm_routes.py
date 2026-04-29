@@ -291,6 +291,115 @@ class TestAdminRecompute:
 
 
 # ---------------------------------------------------------------------------
+# GET /customers/<sid>/drilldown (CR #53)
+# ---------------------------------------------------------------------------
+
+class TestCustomerDrilldown:
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_200(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_customer_drilldown.return_value = {
+            'success': True, 'drilldown': {'total_monetary': 1, 'total_bills': 1},
+        }
+        resp = client.get('/api/v1/crm/customers/123/drilldown',
+                          headers=_auth_headers())
+        assert resp.status_code == 200
+        mock_svc.get_customer_drilldown.assert_called_once_with(123)
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_404_when_no_transactions(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_customer_drilldown.return_value = {
+            'success': False, 'error': 'Customer not found or has no transactions',
+        }
+        resp = client.get('/api/v1/crm/customers/999/drilldown',
+                          headers=_auth_headers())
+        assert resp.status_code == 404
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_503_when_not_computed(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_customer_drilldown.return_value = {
+            'success': False, 'error': 'RFM data not yet computed.',
+        }
+        resp = client.get('/api/v1/crm/customers/123/drilldown',
+                          headers=_auth_headers())
+        assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# GET /brands/<name>/drilldown (CR #54)
+# ---------------------------------------------------------------------------
+
+class TestBrandDrilldown:
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_200(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_brand_drilldown.return_value = {
+            'success': True, 'drilldown': {'revenue_in_segment': 1},
+        }
+        resp = client.get('/api/v1/crm/brands/GUCCI/drilldown?segment=VIC',
+                          headers=_auth_headers())
+        assert resp.status_code == 200
+        mock_svc.get_brand_drilldown.assert_called_once_with('GUCCI', 'VIC')
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_400_missing_segment(self, _mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        resp = client.get('/api/v1/crm/brands/GUCCI/drilldown',
+                          headers=_auth_headers())
+        assert resp.status_code == 400
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_400_invalid_segment(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_brand_drilldown.return_value = {
+            'success': False, 'error': 'Invalid segment: Whales',
+        }
+        resp = client.get('/api/v1/crm/brands/GUCCI/drilldown?segment=Whales',
+                          headers=_auth_headers())
+        assert resp.status_code == 400
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_404_when_brand_not_found(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_brand_drilldown.return_value = {
+            'success': False, 'error': 'Brand not found',
+        }
+        resp = client.get('/api/v1/crm/brands/GHOST/drilldown?segment=VIC',
+                          headers=_auth_headers())
+        assert resp.status_code == 404
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE_PATH)
+    def test_503_when_not_computed(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_brand_drilldown.return_value = {
+            'success': False, 'error': 'RFM data not yet computed.',
+        }
+        resp = client.get('/api/v1/crm/brands/GUCCI/drilldown?segment=VIC',
+                          headers=_auth_headers())
+        assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
 # GET /product-analysis (CR #48)
 # ---------------------------------------------------------------------------
 

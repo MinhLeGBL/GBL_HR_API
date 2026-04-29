@@ -126,6 +126,111 @@ class CRMRepository:
             for r in rows
         ]
 
+    def fetch_customer_drilldown(self, customer_sid: int) -> Dict[str, Any]:
+        """
+        Fetch all live aggregates for a single customer's drilldown view.
+
+        Returns a dict with keys:
+            totals: {total_monetary, total_bills, fp_revenue, discounted_revenue}
+                    (None if customer has zero matching transactions)
+            brands: list of {brand_name, revenue, brand_recency_days}
+            categories: list of {category_name, revenue}
+        """
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+
+            cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_TOTALS,
+                        {'customer_sid': customer_sid})
+            row = cur.fetchone()
+            totals = None
+            if row and row[1]:  # row[1] = total_bills; None or 0 → no purchases
+                totals = {
+                    'total_monetary':     int(row[0] or 0),
+                    'total_bills':        int(row[1] or 0),
+                    'fp_revenue':         int(row[2] or 0),
+                    'discounted_revenue': int(row[3] or 0),
+                }
+
+            cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_BRANDS,
+                        {'customer_sid': customer_sid})
+            brands = [
+                {
+                    'brand_name':         r[0],
+                    'revenue':            int(r[1] or 0),
+                    'brand_recency_days': int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_CATEGORIES,
+                        {'customer_sid': customer_sid})
+            categories = [
+                {
+                    'category_name': r[0],
+                    'revenue':       int(r[1] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+            cur.close()
+        finally:
+            conn.close()
+
+        return {'totals': totals, 'brands': brands, 'categories': categories}
+
+    def fetch_brand_drilldown(self, brand_name: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Fetch all per-customer aggregates for a single brand's drilldown
+        view, across every customer in the 24-month window. The service
+        layer filters by segment in Python.
+
+        Returns a dict:
+            totals:     [{customer_sid, revenue, items}, ...]
+            seasons:    [{customer_sid, raw_season, revenue}, ...]
+            categories: [{customer_sid, category_name, revenue}, ...]
+        """
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+
+            cur.execute(CRMQueries.BRAND_DRILLDOWN_TOTALS,
+                        {'brand_name': brand_name})
+            totals = [
+                {
+                    'customer_sid': int(r[0]),
+                    'revenue':      int(r[1] or 0),
+                    'items':        int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(CRMQueries.BRAND_DRILLDOWN_SEASONS,
+                        {'brand_name': brand_name})
+            seasons = [
+                {
+                    'customer_sid': int(r[0]),
+                    'raw_season':   r[1],
+                    'revenue':      int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(CRMQueries.BRAND_DRILLDOWN_CATEGORIES,
+                        {'brand_name': brand_name})
+            categories = [
+                {
+                    'customer_sid':  int(r[0]),
+                    'category_name': r[1],
+                    'revenue':       int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+            cur.close()
+        finally:
+            conn.close()
+
+        return {'totals': totals, 'seasons': seasons, 'categories': categories}
+
     def fetch_customer_phones(self) -> Dict[int, str]:
         """Fetch primary phone per customer. Customers without a phone are absent."""
         conn = get_oracle_connection()
@@ -543,6 +648,21 @@ class CRMRepository:
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             cur.close()
             return rows
+        finally:
+            conn.close()
+
+    def list_customer_sids_in_segment(self, segment: str) -> List[int]:
+        """Return the customer_sids assigned to ``segment``. [] if none."""
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT customer_sid FROM crm_customer_scores WHERE segment = %s',
+                (segment,),
+            )
+            sids = [int(r[0]) for r in cur.fetchall()]
+            cur.close()
+            return sids
         finally:
             conn.close()
 

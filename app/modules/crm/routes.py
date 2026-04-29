@@ -45,6 +45,33 @@ def get_heatmap():
     return jsonify(result), 200
 
 
+@crm_bp.route('/customers/<int:customer_sid>/drilldown', methods=['GET'])
+@token_required
+def get_customer_drilldown(customer_sid):
+    result = crm_service.get_customer_drilldown(customer_sid)
+    if not result['success']:
+        if 'not yet computed' in result['error']:
+            return jsonify(result), 503
+        return jsonify(result), 404
+    return jsonify(result), 200
+
+
+@crm_bp.route('/brands/<brand_name>/drilldown', methods=['GET'])
+@token_required
+def get_brand_drilldown(brand_name):
+    segment = request.args.get('segment')
+    if not segment:
+        return jsonify({'success': False, 'error': 'segment query param is required'}), 400
+    result = crm_service.get_brand_drilldown(brand_name, segment)
+    if not result['success']:
+        if 'not yet computed' in result['error']:
+            return jsonify(result), 503
+        if result['error'].startswith('Invalid segment'):
+            return jsonify(result), 400
+        return jsonify(result), 404
+    return jsonify(result), 200
+
+
 @crm_bp.route('/product-analysis', methods=['GET'])
 @token_required
 def get_product_analysis():

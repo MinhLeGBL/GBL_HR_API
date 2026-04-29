@@ -267,6 +267,166 @@ class CRMQueries:
                    || NVL(ext.UDF8_STRING, '(Unknown)')
     """
 
+    # =================================================================
+    # 6. Customer drilldown (CR #53) — live Oracle, one customer
+    # =================================================================
+    # Three small queries instead of one wide CTE — each is independently
+    # readable, and the customer SID is bound once per query.
+
+    # 6a. Headline metrics: total monetary, total bills, FP/discounted split.
+    # Per-line proportional split: each line's net revenue is split by its
+    # kept-vs-discount ratio. For a line with combined kept_fraction k:
+    #   FP_per_line = net * k       = (PRICE-TAX) * k * k
+    #   MD_per_line = net * (1 - k) = (PRICE-TAX) * k * (1 - k)
+    # FP + MD = net, so FP + MD across all lines = total_monetary.
+    # Zero-discount lines collapse to FP = net, MD = 0.
+    # Example: PRICE-TAX = 100 with item disc 20% (k=0.8) → net=80,
+    #          FP=80*0.8=64, MD=80*0.2=16.
+    CUSTOMER_DRILLDOWN_TOTALS = """
+        SELECT
+            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS total_monetary,
+            COUNT(DISTINCT d.SID)                                              AS total_bills,
+            ROUND(SUM(
+                (di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)
+            ), 0)                                                              AS fp_revenue,
+            ROUND(SUM(
+                (di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)
+                * (1 - (1 - NVL(di.DISC_PERC, 0) / 100) * (1 - NVL(d.DISC_PERC, 0) / 100))
+            ), 0)                                                              AS discounted_revenue
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
+        WHERE d.BT_CUID = :customer_sid
+          AND d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+    """
+
+    # 6b. Brand distribution + per-brand latest-purchase recency.
+    # Service aggregates `avg_brand_recency_days = mean(brand_recency)` over
+    # the rows. Distribution is the {name, monetary} columns.
+    CUSTOMER_DRILLDOWN_BRANDS = """
+        SELECT
+            NVL(v.VEND_NAME, di.VEND_CODE)                                     AS brand_name,
+            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue,
+            TRUNC(SYSDATE)
+              - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                     AS brand_recency_days
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
+        WHERE d.BT_CUID = :customer_sid
+          AND d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+        GROUP BY NVL(v.VEND_NAME, di.VEND_CODE)
+    """
+
+    # 6c. Category distribution (C_NAME only — matches CR #42 convention,
+    # no UDF8 composite for the drilldown view).
+    CUSTOMER_DRILLDOWN_CATEGORIES = """
+        SELECT
+            NVL(dcs.C_NAME, '(Unknown)')                                       AS category_name,
+            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN DCS dcs           ON dcs.DCS_CODE = di.DCS_CODE
+        WHERE d.BT_CUID = :customer_sid
+          AND d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+        GROUP BY NVL(dcs.C_NAME, '(Unknown)')
+    """
+
+    # =================================================================
+    # 7. Brand drilldown (CR #54) — live Oracle, one brand × all customers
+    # =================================================================
+    # Each query returns one row per (customer_sid, axis); the service
+    # filters by segment membership in Python (no Oracle IN-list size
+    # issues, mirrors the product-analysis pattern). Brand match is done
+    # on VEND_NAME with VEND_CODE fallback so it stays consistent with how
+    # `top_brand` is rendered elsewhere.
+
+    BRAND_DRILLDOWN_TOTALS = """
+        SELECT
+            d.BT_CUID                                                          AS customer_sid,
+            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue,
+            SUM(NVL(di.QTY, 0))                                                AS items
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
+        WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+          AND d.BT_CUID IS NOT NULL
+          AND d.BT_CUID NOT IN (
+              SELECT SID FROM CUSTOMER
+              WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
+          )
+          AND NVL(v.VEND_NAME, di.VEND_CODE) = :brand_name
+        GROUP BY d.BT_CUID
+    """
+
+    # Per-customer per-season revenue. Season is INVN_SBS_ITEM.UDF5_STRING
+    # (e.g. "SS25", "FW24"). Service strips the alpha prefix.
+    BRAND_DRILLDOWN_SEASONS = """
+        SELECT
+            d.BT_CUID                                                          AS customer_sid,
+            isi.UDF5_STRING                                                    AS raw_season,
+            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
+        LEFT JOIN INVN_SBS_ITEM isi ON isi.SID = di.INVN_SBS_ITEM_SID
+        WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+          AND d.BT_CUID IS NOT NULL
+          AND d.BT_CUID NOT IN (
+              SELECT SID FROM CUSTOMER
+              WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
+          )
+          AND NVL(v.VEND_NAME, di.VEND_CODE) = :brand_name
+        GROUP BY d.BT_CUID, isi.UDF5_STRING
+    """
+
+    BRAND_DRILLDOWN_CATEGORIES = """
+        SELECT
+            d.BT_CUID                                                          AS customer_sid,
+            NVL(dcs.C_NAME, '(Unknown)')                                       AS category_name,
+            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
+                * (1 - NVL(di.DISC_PERC, 0) / 100)
+                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue
+        FROM DOCUMENT d
+        JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
+        LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
+        LEFT JOIN DCS dcs           ON dcs.DCS_CODE = di.DCS_CODE
+        WHERE d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+          AND d.invc_post_date <= SYSDATE
+          AND di.ITEM_TYPE = 1
+          AND d.BT_CUID IS NOT NULL
+          AND d.BT_CUID NOT IN (
+              SELECT SID FROM CUSTOMER
+              WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
+          )
+          AND NVL(v.VEND_NAME, di.VEND_CODE) = :brand_name
+        GROUP BY d.BT_CUID, NVL(dcs.C_NAME, '(Unknown)')
+    """
+
     @classmethod
     def as_of_query(cls, query_name: str) -> str:
         """

@@ -9,10 +9,26 @@ Architecture:
 - This service reads from PostgreSQL only. If the cache is empty, endpoints
   return 503 (RFM not yet computed).
 """
+import re
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from app.core.database import get_postgres_connection
 from .repository import CRMRepository
 from .rfm import SEGMENTS
+
+
+# Strip the alpha prefix from a season code like "SS25" → "SS", "FW24" → "FW".
+# Anything else (None, empty, no leading letters) → "Unknown".
+_SEASON_PREFIX = re.compile(r'^([A-Za-z]+)')
+
+
+def _season_prefix(raw: Optional[str]) -> str:
+    if not raw:
+        return 'Unknown'
+    match = _SEASON_PREFIX.match(raw.strip())
+    if not match:
+        return 'Unknown'
+    return match.group(1).upper()
 
 
 class CRMService:
@@ -47,7 +63,9 @@ class CRMService:
         for r in rows:
             lpd = r['last_purchase_date']
             customers.append({
-                'id':               r['customer_sid'],
+                # 18-digit BIGINT — JSON-serialize as string so JS clients
+                # don't lose precision past Number.MAX_SAFE_INTEGER (CR #55).
+                'id':               str(r['customer_sid']),
                 'name':             r['name'] or '',
                 'email':            r['email'] or '',
                 'phone':            r['phone'] or '',
@@ -189,6 +207,135 @@ class CRMService:
             })
 
         return {'success': True, 'groups': groups}
+
+    # ------------------------------------------------------------------
+    # Drilldowns (CR #53, CR #54) — live Oracle, click-triggered
+    # ------------------------------------------------------------------
+    def get_customer_drilldown(self, customer_sid: int) -> Dict[str, Any]:
+        """
+        Per-customer drilldown for the popup dialog. Live Oracle aggregation
+        scoped to the rolling 24-month window.
+
+        Returns:
+            {success: True, drilldown: {...}} on success;
+            {success: False, error: ...} for 503 (RFM not computed) and 404
+            (customer has no transactions in window).
+        """
+        err = self._ensure_computed()
+        if err:
+            return err
+
+        raw = self.repo.fetch_customer_drilldown(customer_sid)
+        if not raw['totals']:
+            return {'success': False, 'error': 'Customer not found or has no transactions'}
+
+        brand_rows = sorted(raw['brands'],
+                            key=lambda b: (-b['revenue'], b['brand_name'] or ''))
+        category_rows = sorted(raw['categories'],
+                               key=lambda c: (-c['revenue'], c['category_name'] or ''))
+
+        avg_brand_recency = (
+            sum(b['brand_recency_days'] for b in brand_rows) / len(brand_rows)
+            if brand_rows else 0.0
+        )
+
+        return {
+            'success': True,
+            'drilldown': {
+                'total_monetary':         raw['totals']['total_monetary'],
+                'total_bills':            raw['totals']['total_bills'],
+                'avg_brand_recency_days': round(avg_brand_recency, 2),
+                'brand_distribution': [
+                    {'name': b['brand_name'] or '(Unknown)', 'monetary': b['revenue']}
+                    for b in brand_rows
+                ],
+                'category_distribution': [
+                    {'name': c['category_name'], 'monetary': c['revenue']}
+                    for c in category_rows
+                ],
+                'price_distribution': {
+                    'full_price': raw['totals']['fp_revenue'],
+                    'discounted': raw['totals']['discounted_revenue'],
+                },
+            },
+        }
+
+    def get_brand_drilldown(self, brand_name: str, segment: str) -> Dict[str, Any]:
+        """
+        Per-brand drilldown for the popup dialog. Live Oracle aggregation +
+        Python-side segment filter (avoids the 1,000-element IN-list limit).
+
+        Returns:
+            {success: True, drilldown: {...}} on success;
+            error dict for 503 (RFM not computed), 400 (invalid segment),
+            or 404 (no transactions for the brand).
+        """
+        err = self._ensure_computed()
+        if err:
+            return err
+
+        if segment not in SEGMENTS:
+            return {'success': False, 'error': f'Invalid segment: {segment}'}
+
+        segment_sids = set(self.repo.list_customer_sids_in_segment(segment))
+        raw = self.repo.fetch_brand_drilldown(brand_name)
+
+        if not raw['totals']:
+            return {'success': False, 'error': 'Brand not found'}
+
+        # Headline metrics — split each customer's contribution by segment
+        # membership.
+        revenue_in_segment = 0
+        revenue_all_segments = 0
+        items_in_segment = 0
+        for r in raw['totals']:
+            revenue_all_segments += r['revenue']
+            if r['customer_sid'] in segment_sids:
+                revenue_in_segment += r['revenue']
+                items_in_segment   += r['items']
+
+        # Distribution helper: pool revenue by name (segment vs all) and emit
+        # sorted [{name, monetary}, ...] lists.
+        def _pool(rows: List[Dict], key: str) -> tuple:
+            seg_d:  Dict[str, int] = defaultdict(int)
+            all_d:  Dict[str, int] = defaultdict(int)
+            for row in rows:
+                name = row[key]
+                all_d[name] += row['revenue']
+                if row['customer_sid'] in segment_sids:
+                    seg_d[name] += row['revenue']
+            seg_list = sorted(
+                ({'name': n, 'monetary': v} for n, v in seg_d.items()),
+                key=lambda x: (-x['monetary'], x['name']),
+            )
+            all_list = sorted(
+                ({'name': n, 'monetary': v} for n, v in all_d.items()),
+                key=lambda x: (-x['monetary'], x['name']),
+            )
+            return seg_list, all_list
+
+        # Season pooling first parses the alpha prefix from each row.
+        season_rows = [
+            {'customer_sid': r['customer_sid'],
+             'season_name': _season_prefix(r['raw_season']),
+             'revenue':     r['revenue']}
+            for r in raw['seasons']
+        ]
+        season_seg, season_all = _pool(season_rows, 'season_name')
+        category_seg, category_all = _pool(raw['categories'], 'category_name')
+
+        return {
+            'success': True,
+            'drilldown': {
+                'revenue_in_segment':            revenue_in_segment,
+                'revenue_all_segments':          revenue_all_segments,
+                'items_in_segment':              items_in_segment,
+                'season_distribution_segment':   season_seg,
+                'season_distribution_all':       season_all,
+                'category_distribution_segment': category_seg,
+                'category_distribution_all':     category_all,
+            },
+        }
 
     # ------------------------------------------------------------------
     # Admin: RFM config management
