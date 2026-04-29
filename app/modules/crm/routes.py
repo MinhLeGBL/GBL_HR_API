@@ -45,6 +45,59 @@ def get_heatmap():
     return jsonify(result), 200
 
 
+# Map service error codes → HTTP status. Service returns
+# {success: False, error: '...', code: '<CODE>'}; routes look up the status.
+_DRILLDOWN_ERROR_STATUS = {
+    'NOT_COMPUTED':    503,
+    'INVALID_SEGMENT': 400,
+    'NOT_FOUND':       404,
+}
+
+
+def _drilldown_response(result):
+    if result['success']:
+        return jsonify(result), 200
+    status = _DRILLDOWN_ERROR_STATUS.get(result.get('code'), 500)
+    return jsonify(result), status
+
+
+@crm_bp.route('/customers/<int:customer_sid>/drilldown', methods=['GET'])
+@token_required
+def get_customer_drilldown(customer_sid):
+    return _drilldown_response(crm_service.get_customer_drilldown(customer_sid))
+
+
+@crm_bp.route('/brand-drilldown', methods=['GET'])
+@token_required
+def get_brand_drilldown():
+    brand_name = request.args.get('brand')
+    segment    = request.args.get('segment')
+    if not brand_name:
+        return jsonify({'success': False,
+                        'error':   'brand query param is required',
+                        'code':    'INVALID_REQUEST'}), 400
+    if not segment:
+        return jsonify({'success': False,
+                        'error':   'segment query param is required',
+                        'code':    'INVALID_REQUEST'}), 400
+    return _drilldown_response(crm_service.get_brand_drilldown(brand_name, segment))
+
+
+@crm_bp.route('/product-analysis', methods=['GET'])
+@token_required
+def get_product_analysis():
+    group_by = request.args.get('group_by')
+    if group_by not in ('brand', 'category'):
+        return jsonify({'success': False,
+                        'error': "group_by must be 'brand' or 'category'"}), 400
+
+    segment = request.args.get('segment') or None
+    result = crm_service.get_product_analysis(group_by=group_by, segment=segment)
+    if not result['success']:
+        return jsonify(result), 503
+    return jsonify(result), 200
+
+
 @crm_bp.route('/admin/config', methods=['GET'])
 @admin_required
 def get_config():
@@ -59,7 +112,9 @@ def update_config():
     if not data:
         return jsonify({'success': False, 'error': 'Request body required'}), 400
 
-    required = ('w_recency', 'w_frequency', 'w_monetary', 'e_recency', 'e_frequency', 'e_monetary')
+    required = ('w_recency',  'w_frequency',  'w_monetary',
+                'e_recency',  'e_frequency',  'e_monetary',
+                'pw_recency', 'pw_frequency', 'pw_monetary')
     missing = [k for k in required if k not in data]
     if missing:
         return jsonify({'success': False, 'error': f'Missing fields: {", ".join(missing)}'}), 400

@@ -6,6 +6,15 @@ docs/
 debug_endpoint.py
 server.log
 
+# Local-only report scripts (Oracle data exports for ad-hoc analysis;
+# not shipped to the deployment server).
+scripts/reports/
+
+# Large local-only catalog/data sources kept outside git (re-fetched
+# on demand, not part of the application).
+document/template/
+document/*.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

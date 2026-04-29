@@ -79,6 +79,158 @@ class CRMRepository:
             for r in rows
         }
 
+    def fetch_product_aggregates(self, group_by: str) -> List[Dict[str, Any]]:
+        """
+        Fetch per-customer per-(brand|category) aggregates for product analytics.
+
+        Each row is one customer's totals for one brand/category, with their
+        own recency (days since their most recent purchase of it). The pooler
+        averages these values across customers per segment (CR #49 nested
+        approach).
+
+        Args:
+            group_by: 'brand' or 'category'.
+
+        Returns:
+            List of dicts with keys:
+                customer_sid (int), group_name (str),
+                items (int, SUM(QTY) for the customer×group),
+                revenue (int VND, the customer's total revenue for the group),
+                customer_recency_days (int, days since customer's most recent
+                                       purchase of the group)
+        """
+        if group_by == 'brand':
+            sql = CRMQueries.PRODUCT_BRAND_AGGREGATES
+        elif group_by == 'category':
+            sql = CRMQueries.PRODUCT_CATEGORY_AGGREGATES
+        else:
+            raise ValueError(f"group_by must be 'brand' or 'category', got {group_by!r}")
+
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql)
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+
+        return [
+            {
+                'customer_sid':          int(r[0]),
+                'group_name':            r[1],
+                'items':                 int(r[2] or 0),
+                'revenue':               int(r[3] or 0),
+                'customer_recency_days': int(r[4] or 0),
+            }
+            for r in rows
+        ]
+
+    def fetch_customer_drilldown(self, customer_sid: int) -> Dict[str, Any]:
+        """
+        Fetch all live aggregates for a single customer's drilldown view.
+
+        Returns a dict with keys:
+            totals: {total_monetary, total_bills, fp_revenue, discounted_revenue}
+                    (None if customer has zero matching transactions)
+            brands: list of {brand_name, revenue, brand_recency_days}
+            categories: list of {category_name, revenue}
+        """
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+
+            cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_TOTALS,
+                        {'customer_sid': customer_sid})
+            row = cur.fetchone()
+            totals = None
+            if row and row[1]:  # row[1] = total_bills; None or 0 → no purchases
+                totals = {
+                    'total_monetary':     int(row[0] or 0),
+                    'total_bills':        int(row[1] or 0),
+                    'fp_revenue':         int(row[2] or 0),
+                    'discounted_revenue': int(row[3] or 0),
+                }
+
+            cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_BRANDS,
+                        {'customer_sid': customer_sid})
+            brands = [
+                {
+                    'brand_name':         r[0],
+                    'revenue':            int(r[1] or 0),
+                    'brand_recency_days': int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_CATEGORIES,
+                        {'customer_sid': customer_sid})
+            categories = [
+                {
+                    'category_name': r[0],
+                    'revenue':       int(r[1] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+            cur.close()
+        finally:
+            conn.close()
+
+        return {'totals': totals, 'brands': brands, 'categories': categories}
+
+    def fetch_brand_drilldown(self, brand_name: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Fetch all per-customer aggregates for a single brand's drilldown
+        view, across every customer in the 24-month window. The service
+        layer filters by segment in Python.
+
+        Returns a dict:
+            totals:     [{customer_sid, revenue, items}, ...]
+            seasons:    [{customer_sid, raw_season, revenue}, ...]
+            categories: [{customer_sid, category_name, revenue}, ...]
+        """
+        conn = get_oracle_connection()
+        try:
+            cur = conn.cursor()
+
+            cur.execute(CRMQueries.BRAND_DRILLDOWN_TOTALS,
+                        {'brand_name': brand_name})
+            totals = [
+                {
+                    'customer_sid': int(r[0]),
+                    'revenue':      int(r[1] or 0),
+                    'items':        int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(CRMQueries.BRAND_DRILLDOWN_SEASONS,
+                        {'brand_name': brand_name})
+            seasons = [
+                {
+                    'customer_sid': int(r[0]),
+                    'raw_season':   r[1],
+                    'revenue':      int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(CRMQueries.BRAND_DRILLDOWN_CATEGORIES,
+                        {'brand_name': brand_name})
+            categories = [
+                {
+                    'customer_sid':  int(r[0]),
+                    'category_name': r[1],
+                    'revenue':       int(r[2] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+            cur.close()
+        finally:
+            conn.close()
+
+        return {'totals': totals, 'seasons': seasons, 'categories': categories}
+
     def fetch_customer_phones(self) -> Dict[int, str]:
         """Fetch primary phone per customer. Customers without a phone are absent."""
         conn = get_oracle_connection()
@@ -100,17 +252,24 @@ class CRMRepository:
         """
         Read RFM config from crm_config table. Returns default weights
         if the table doesn't exist or is empty.
+
+        Three weight sets (CR #46, CR #52):
+        - w_*  segmentation weights
+        - e_*  engagement-score weights
+        - pw_* product-analysis ranking weights
         """
         defaults = {
-            'w_recency': 0.3, 'w_frequency': 0.3, 'w_monetary': 0.4,
-            'e_recency': 0.5, 'e_frequency': 0.3, 'e_monetary': 0.2,
+            'w_recency':  0.3, 'w_frequency':  0.3, 'w_monetary':  0.4,
+            'e_recency':  0.5, 'e_frequency':  0.3, 'e_monetary':  0.2,
+            'pw_recency': 0.3, 'pw_frequency': 0.3, 'pw_monetary': 0.4,
         }
         conn = get_postgres_connection()
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT w_recency, w_frequency, w_monetary,
-                       e_recency, e_frequency, e_monetary
+                SELECT w_recency,  w_frequency,  w_monetary,
+                       e_recency,  e_frequency,  e_monetary,
+                       pw_recency, pw_frequency, pw_monetary
                 FROM crm_config WHERE id = 1
             """)
             row = cur.fetchone()
@@ -118,8 +277,9 @@ class CRMRepository:
             if not row:
                 return defaults
             return {
-                'w_recency': float(row[0]), 'w_frequency': float(row[1]), 'w_monetary': float(row[2]),
-                'e_recency': float(row[3]), 'e_frequency': float(row[4]), 'e_monetary': float(row[5]),
+                'w_recency':  float(row[0]), 'w_frequency':  float(row[1]), 'w_monetary':  float(row[2]),
+                'e_recency':  float(row[3]), 'e_frequency':  float(row[4]), 'e_monetary':  float(row[5]),
+                'pw_recency': float(row[6]), 'pw_frequency': float(row[7]), 'pw_monetary': float(row[8]),
             }
         except Exception:
             return defaults
@@ -141,14 +301,32 @@ class CRMRepository:
                     e_recency NUMERIC(3,2) NOT NULL DEFAULT 0.5,
                     e_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
                     e_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.2,
+                    pw_recency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    pw_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3,
+                    pw_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.4,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            # Idempotent migration for legacy crm_config tables that
+            # pre-date CR #52.
+            cur.execute("""
+                ALTER TABLE crm_config
+                ADD COLUMN IF NOT EXISTS pw_recency NUMERIC(3,2) NOT NULL DEFAULT 0.3
+            """)
+            cur.execute("""
+                ALTER TABLE crm_config
+                ADD COLUMN IF NOT EXISTS pw_frequency NUMERIC(3,2) NOT NULL DEFAULT 0.3
+            """)
+            cur.execute("""
+                ALTER TABLE crm_config
+                ADD COLUMN IF NOT EXISTS pw_monetary NUMERIC(3,2) NOT NULL DEFAULT 0.4
             """)
             cur.execute("INSERT INTO crm_config (id) VALUES (1) ON CONFLICT DO NOTHING")
             cur.execute("""
                 UPDATE crm_config SET
-                    w_recency = %(w_recency)s, w_frequency = %(w_frequency)s, w_monetary = %(w_monetary)s,
-                    e_recency = %(e_recency)s, e_frequency = %(e_frequency)s, e_monetary = %(e_monetary)s,
+                    w_recency  = %(w_recency)s,  w_frequency  = %(w_frequency)s,  w_monetary  = %(w_monetary)s,
+                    e_recency  = %(e_recency)s,  e_frequency  = %(e_frequency)s,  e_monetary  = %(e_monetary)s,
+                    pw_recency = %(pw_recency)s, pw_frequency = %(pw_frequency)s, pw_monetary = %(pw_monetary)s,
                     updated_at = NOW()
                 WHERE id = 1
             """, config)
@@ -257,6 +435,56 @@ class CRMRepository:
                 )
             """
             cur.executemany(insert_sql, scored_customers)
+            inserted = cur.rowcount
+            conn.commit()
+            cur.close()
+            return inserted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def replace_product_scores(self, scored_rows: List[Dict[str, Any]]) -> int:
+        """
+        Atomically replace the entire crm_product_scores table.
+
+        TRUNCATE + bulk INSERT in one transaction so readers see either the
+        old snapshot or the new one, never an empty table mid-recompute.
+        Both 'brand' and 'category' rows live in the same table — pass them
+        all together.
+
+        Args:
+            scored_rows: List of dicts with keys group_by, segment, name,
+                recency_days, frequency, monetary, r_score, f_score, m_score,
+                weighted_score.
+
+        Returns:
+            Number of rows inserted.
+        """
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE crm_product_scores')
+            if not scored_rows:
+                conn.commit()
+                cur.close()
+                return 0
+
+            insert_sql = """
+                INSERT INTO crm_product_scores (
+                    group_by, segment, name, customer_count,
+                    recency_days, frequency, monetary,
+                    r_score, f_score, m_score,
+                    weighted_score, c_score, compound_score
+                ) VALUES (
+                    %(group_by)s, %(segment)s, %(name)s, %(customer_count)s,
+                    %(recency_days)s, %(frequency)s, %(monetary)s,
+                    %(r_score)s, %(f_score)s, %(m_score)s,
+                    %(weighted_score)s, %(c_score)s, %(compound_score)s
+                )
+            """
+            cur.executemany(insert_sql, scored_rows)
             inserted = cur.rowcount
             conn.commit()
             cur.close()
@@ -416,6 +644,70 @@ class CRMRepository:
                                          - (%s || ' months')::INTERVAL)::DATE
                 ORDER BY snapshot_month ASC, segment ASC
             """, (months - 1,))
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur.close()
+            return rows
+        finally:
+            conn.close()
+
+    def list_customer_sids_in_segment(self, segment: str) -> List[int]:
+        """Return the customer_sids assigned to ``segment``. [] if none."""
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT customer_sid FROM crm_customer_scores WHERE segment = %s',
+                (segment,),
+            )
+            sids = [int(r[0]) for r in cur.fetchall()]
+            cur.close()
+            return sids
+        finally:
+            conn.close()
+
+    def count_product_scores(self) -> int:
+        """Cheap existence check used to decide between data and 503."""
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute('SELECT COUNT(*) FROM crm_product_scores')
+            n = cur.fetchone()[0]
+            cur.close()
+            return n
+        except Exception:
+            return 0
+        finally:
+            conn.close()
+
+    def list_product_scores(self, group_by: str,
+                              segment: Optional[str] = None
+                              ) -> List[Dict[str, Any]]:
+        """
+        Fetch product scores filtered by group_by, optionally by segment.
+
+        Returns rows ordered by segment ASC, then weighted_score DESC so the
+        service can group_by segment in input order.
+        """
+        clauses = ['group_by = %s']
+        params: List[Any] = [group_by]
+        if segment:
+            clauses.append('segment = %s')
+            params.append(segment)
+
+        sql = f"""
+            SELECT segment, name, customer_count,
+                   recency_days, frequency, monetary,
+                   r_score, f_score, m_score,
+                   weighted_score, c_score, compound_score
+            FROM crm_product_scores
+            WHERE {' AND '.join(clauses)}
+            ORDER BY segment ASC, compound_score DESC, name ASC
+        """
+        conn = get_postgres_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             cur.close()
