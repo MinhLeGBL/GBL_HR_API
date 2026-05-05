@@ -908,7 +908,7 @@ class TestCalculatePersonalCommissions:
     def test_jewelry_commission_regardless_of_achievement(self, service, mock_repo):
         """Jewelry commission is paid regardless of achievement rate."""
         sales_df = self._make_sales_df([
-            # VHN jewelry: 1% on revenue_before_vat
+            # VHN jewelry: 2% on revenue_before_vat
             [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
              None, 'SID1', 'user1', 'HBT',
              'VHN', 1, 'RINGS', 'JWL', 0.0, 300_000, 272_727],
@@ -935,9 +935,9 @@ class TestCalculatePersonalCommissions:
         )
         emp = result.iloc[0]
 
-        assert emp['commission_vhernier'] == pytest.approx(272_727 * 0.01)
+        assert emp['commission_vhernier'] == pytest.approx(272_727 * 0.02)
         assert emp['commission_rosa_maria'] == pytest.approx(181_818 * 0.03)
-        assert emp['commission_jewelry'] == pytest.approx(272_727 * 0.01 + 181_818 * 0.03)
+        assert emp['commission_jewelry'] == pytest.approx(272_727 * 0.02 + 181_818 * 0.03)
 
     def test_suitcase_commission_flat_rate(self, service, mock_repo):
         """TVL/TIT items earn 500,000 VND per item regardless of achievement."""
@@ -1275,10 +1275,10 @@ class TestEmployeeCommissionException:
         result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
         row = result.iloc[0]
 
-        assert row['commission_vhernier'] == 5_000_000 * 0.01  # 50,000
-        assert row['commission_jewelry'] == 5_000_000 * 0.01
+        assert row['commission_vhernier'] == 5_000_000 * 0.02  # 100,000
+        assert row['commission_jewelry'] == 5_000_000 * 0.02
         assert row['commission_fashion_fp'] == 0  # No qualifying non-jewelry
-        assert row['total'] == 5_000_000 * 0.01
+        assert row['total'] == 5_000_000 * 0.02
 
     def test_hand_carry_still_earned_regardless_of_customer(self, service, mock_repo):
         """Hand carry commission is calculated normally, no customer filter."""
@@ -1341,7 +1341,7 @@ class TestEmployeeCommissionException:
         # Only 10M qualifying non-jewelry earns flat 0.7%, 5M excluded
         assert row['commission_fashion_fp'] == 10_000_000 * 0.007  # 70,000
         assert row['commission_fashion_md'] == 0
-        # VHN jewelry (1%)
-        assert row['commission_vhernier'] == 3_000_000 * 0.01  # 30,000
-        assert row['commission_jewelry'] == 3_000_000 * 0.01
-        assert row['total'] == (10_000_000 * 0.007) + (3_000_000 * 0.01)  # 100,000
+        # VHN jewelry (2%)
+        assert row['commission_vhernier'] == 3_000_000 * 0.02  # 60,000
+        assert row['commission_jewelry'] == 3_000_000 * 0.02
+        assert row['total'] == (10_000_000 * 0.007) + (3_000_000 * 0.02)  # 130,000
