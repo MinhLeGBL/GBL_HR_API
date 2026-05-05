@@ -114,7 +114,7 @@ Mặt hàng được xác định là trang sức dựa trên trường trong h�
 
 **Điều kiện:** Vendor **VHN**.
 
-**Tỷ lệ thưởng:** **1%** trên doanh thu trước thuế.
+**Tỷ lệ thưởng:** **2%** trên doanh thu trước thuế.
 
 ##### c) Trang sức khác
 
@@ -228,7 +228,7 @@ Mọi khoản tiền thưởng hàng tháng sẽ do phòng nhân sự trực ti�
 | Loại | Vendor | Điều kiện | Tỷ lệ | Cơ sở tính |
 |---|---|---|---|---|
 | Rosa Maria | ROM | Loại: EARRINGS | 3% | Trước thuế |
-| Vhernier | VHN | — | 1% | Trước thuế |
+| Vhernier | VHN | — | 2% | Trước thuế |
 | Trang sức khác | ATS, VIS, LUI, NAN, NAK, SPK, TED, BRT, ROM (khác) | — | 2% | Trước thuế |
 
 #### A3. Thưởng hand carry (không phụ thuộc chỉ tiêu)
