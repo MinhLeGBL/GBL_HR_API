@@ -20,6 +20,7 @@ app/
     health/                # Health check endpoints
     bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
     crm/                   # Customer RFM segmentation (luxury hybrid approach)
+    handcarry/             # Hand-carry UPC list management (sub-feature of commission)
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -44,6 +45,7 @@ tests/                     # Mirrors module structure
 | `modules/health` | `health_bp` | `/api/v1/health` | — | API + database health checks |
 | `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
 | `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
+| `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
 
 ## Import Rules
 
@@ -197,6 +199,7 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
 | `feature/bathroom*` | `cr/bathroom-price-check.md` |
 | `feature/crm*` | `cr/crm.md` |
+| `feature/handcarry*` | `cr/handcarry.md` |
 
 ### Status markers
 
