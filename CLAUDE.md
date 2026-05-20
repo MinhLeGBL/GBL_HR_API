@@ -20,6 +20,7 @@ app/
     health/                # Health check endpoints
     bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
     crm/                   # Customer RFM segmentation (luxury hybrid approach)
+    sale_through/          # Sale-through report (imported / sold / on-hand by brand × season × category)
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -27,6 +28,35 @@ scripts/                   # Operational scripts
   deployment/              # Deployment helpers
 tests/                     # Mirrors module structure
 ```
+
+## Branch & Version Conventions
+
+Mirrors the org-wide convention in [GBL_HR_Frontend/docs/API_REFERENCE.md](../GBL_HR_Frontend/docs/API_REFERENCE.md) — source of truth for both repos.
+
+### Long-lived feature branches
+- One branch per module: `feature/<module_name>` (no version suffix — e.g. `feature/crm`, NOT `feature/crm_2.0`)
+- Branch name mirrors `app/modules/<module_name>/`
+- Branches are **never deleted** after merging — the same branch is reused for every iteration of that feature
+
+### Per-module version file
+Each module's `__init__.py` exports its current shipped version:
+```python
+__version__ = '1.0.0'
+```
+Format: 3-part semver (`MAJOR.MINOR.PATCH`). Backend and frontend versions are independent per feature.
+
+| Change | Bump | PR title prefix |
+|--------|------|-----------------|
+| Breaking change / rewrite | MAJOR | `feat!:` |
+| New endpoint / feature | MINOR | `feat:` |
+| Bug fix / refactor / small tweak | PATCH | `fix:` or `chore:` |
+
+### Workflow
+1. Work directly on `feature/<name>` (no sub-branches per change).
+2. Before opening a PR to staging, sync with staging: `git fetch origin && git merge origin/staging`. PR diff must be feature-only — a branch behind staging should not be merged.
+3. Bump `__version__` in the same PR that ships the change.
+4. PR title prefix matches the bump type (table above).
+5. **Squash-merge** into staging. Do NOT delete the branch — it lives on for the next iteration.
 
 ## Module Registry
 
@@ -44,6 +74,7 @@ tests/                     # Mirrors module structure
 | `modules/health` | `health_bp` | `/api/v1/health` | — | API + database health checks |
 | `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
 | `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
+| `modules/sale_through` | `sale_through_bp` | `/api/v1/sale-through` | `SaleThroughService` | Sale-through report: imported / sold / on-hand by brand × season × category (Oracle read-only) |
 
 ## Import Rules
 
@@ -76,13 +107,14 @@ tests/                     # Mirrors module structure
 
 1. Create directory: `app/modules/<name>/`
 2. Create files:
-   - `__init__.py` — re-export public API (blueprint + service class)
+   - `__init__.py` — declares `__version__` + re-exports public API (blueprint + service class)
    - `routes.py` — Flask Blueprint with prefix `/api/v1/<name>`
    - `service.py` — Business logic class, imports `get_postgres_connection` from core
 3. Register blueprint in `app/main.py`
 4. If module needs database tables, add init step to `scripts/database/init_db.py`
 5. Create test directory: `tests/unit/modules/<name>/` with `__init__.py`
 6. Update this CLAUDE.md module registry table
+7. Create the long-lived feature branch `feature/<name>` from staging (never deleted — see Branch & Version Conventions above)
 
 ### Blueprint naming convention
 ```python
@@ -91,6 +123,8 @@ tests/                     # Mirrors module structure
 
 ### `__init__.py` pattern
 ```python
+__version__ = '1.0.0'
+
 from .routes import <name>_bp
 from .service import <Name>Service
 ```
@@ -99,8 +133,9 @@ from .service import <Name>Service
 
 ### Branch-Test Strategy
 
-The full test suite lives on every branch. Never delete tests when creating or
-merging a feature branch — additive merges only.
+Feature branches are long-lived (see Branch & Version Conventions). The full test
+suite lives on every branch — never delete tests when iterating on a feature
+branch — additive merges only.
 
 | Branch | Test files | What CI runs |
 |--------|-----------|--------------|
@@ -189,14 +224,15 @@ Each CR file has two sections separated by `# ═══ Completed CRs (Archive) 
 
 CR files are feature-scoped. Only read/update the CR file matching the current branch:
 
-| Branch pattern | CR file |
-|----------------|---------|
-| `feature/commission*` | `cr/commission.md` |
-| `feature/employee*` | `cr/employees.md` |
-| `feature/permission*` | `cr/permissions.md` |
-| `feature/user*` or `feature/auth*` | `cr/users.md` |
-| `feature/bathroom*` | `cr/bathroom-price-check.md` |
-| `feature/crm*` | `cr/crm.md` |
+| Branch | CR file |
+|--------|---------|
+| `feature/commission` | `cr/commission.md` |
+| `feature/employees` | `cr/employees.md` |
+| `feature/permissions` | `cr/permissions.md` |
+| `feature/users` or `feature/auth` | `cr/users.md` |
+| `feature/bathroom` | `cr/bathroom-price-check.md` |
+| `feature/crm` | `cr/crm.md` |
+| `feature/sale_through` | `cr/sale-through.md` |
 
 ### Status markers
 
@@ -210,8 +246,11 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 1. **Respond in the pending section** of `docs/cr/<feature>.md` — add actual response shapes, implementation notes, mark ⏳ → Done
 2. **Do NOT move CRs to the archive section** — the frontend team handles confirmation and archival
 3. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
-4. **Never remove frontend-written sections** — only annotate with actual implementation details
-5. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
+4. **Bump version in both places**:
+   - `__version__` in `app/modules/<feature>/__init__.py` (per the bump table — MAJOR/MINOR/PATCH)
+   - **Backend** cell in the version table at the top of `docs/cr/<feature>.md` so the frontend can see what version their integration is talking to
+5. **Never remove frontend-written sections** — only annotate with actual implementation details
+6. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
 
 ### Skills
 
