@@ -51,6 +51,9 @@ Format: 3-part semver (`MAJOR.MINOR.PATCH`). Backend and frontend versions are i
 | New endpoint / feature | MINOR | `feat:` |
 | Bug fix / refactor / small tweak | PATCH | `fix:` or `chore:` |
 
+### Per-module CHANGELOG
+Each module has an `app/modules/<name>/CHANGELOG.md` in "Keep a Changelog" format. **Every PR that bumps `__version__` must add a corresponding entry** under a new `## [<version>] — <YYYY-MM-DD>` heading, briefly describing what changed and referencing CR numbers if applicable. Newest entry at the top.
+
 ### Workflow
 1. Work directly on `feature/<name>` (no sub-branches per change).
 2. Before opening a PR to staging, sync with staging: `git fetch origin && git merge origin/staging`. PR diff must be feature-only — a branch behind staging should not be merged.
@@ -110,6 +113,7 @@ Format: 3-part semver (`MAJOR.MINOR.PATCH`). Backend and frontend versions are i
    - `__init__.py` — declares `__version__` + re-exports public API (blueprint + service class)
    - `routes.py` — Flask Blueprint with prefix `/api/v1/<name>`
    - `service.py` — Business logic class, imports `get_postgres_connection` from core
+   - `CHANGELOG.md` — start with a `## [1.0.0] — <date>` entry describing initial scope
 3. Register blueprint in `app/main.py`
 4. If module needs database tables, add init step to `scripts/database/init_db.py`
 5. Create test directory: `tests/unit/modules/<name>/` with `__init__.py`
@@ -246,8 +250,9 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 1. **Respond in the pending section** of `docs/cr/<feature>.md` — add actual response shapes, implementation notes, mark ⏳ → Done
 2. **Do NOT move CRs to the archive section** — the frontend team handles confirmation and archival
 3. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
-4. **Bump version in both places**:
+4. **Bump version in three places**:
    - `__version__` in `app/modules/<feature>/__init__.py` (per the bump table — MAJOR/MINOR/PATCH)
+   - Add a new `## [<version>] — <YYYY-MM-DD>` entry at the top of `app/modules/<feature>/CHANGELOG.md` summarising what landed (reference the CR number)
    - **Backend** cell in the version table at the top of `docs/cr/<feature>.md` so the frontend can see what version their integration is talking to
 5. **Never remove frontend-written sections** — only annotate with actual implementation details
 6. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
