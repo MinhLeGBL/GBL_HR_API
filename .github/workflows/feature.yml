@@ -19,6 +19,7 @@ jobs:
       employees: ${{ steps.changes.outputs.employees }}
       health: ${{ steps.changes.outputs.health }}
       permissions: ${{ steps.changes.outputs.permissions }}
+      sale_through: ${{ steps.changes.outputs.sale_through }}
       stores: ${{ steps.changes.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +60,9 @@ jobs:
             permissions:
               - 'app/modules/permissions/**'
               - 'tests/unit/modules/permissions/**'
+            sale_through:
+              - 'app/modules/sale_through/**'
+              - 'tests/unit/modules/sale_through/**'
             stores:
               - 'app/modules/stores/**'
               - 'tests/unit/modules/stores/**'
@@ -98,6 +102,7 @@ jobs:
           [ "${{ needs.detect.outputs.employees }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/employees"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
+          [ "${{ needs.detect.outputs.sale_through }}" = "true" ] && PATHS="$PATHS tests/unit/modules/sale_through"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"
           if [ -n "$PATHS" ]; then
             echo "Running:$PATHS"
