@@ -20,6 +20,7 @@ app/
     health/                # Health check endpoints
     bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
     crm/                   # Customer RFM segmentation (luxury hybrid approach)
+    custom_reports/        # Cross-domain on-demand reports (size-by-brand-season, etc.)
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -44,6 +45,7 @@ tests/                     # Mirrors module structure
 | `modules/health` | `health_bp` | `/api/v1/health` | — | API + database health checks |
 | `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
 | `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
+| `modules/custom_reports` | `custom_reports_bp` | `/api/v1/custom-reports` | `CustomReportsService` | Cross-domain on-demand reports (size × brand × season, FIFO days-to-sell) |
 
 ## Import Rules
 

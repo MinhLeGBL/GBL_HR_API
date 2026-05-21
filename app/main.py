@@ -13,6 +13,7 @@ from app.modules.dashboard.routes import dashboard_bp
 from app.modules.auth.user_routes import user_bp
 from app.modules.bathroom.routes import bathroom_bp
 from app.modules.crm.routes import crm_bp
+from app.modules.custom_reports.routes import custom_reports_bp
 
 
 def create_app():
@@ -47,6 +48,7 @@ def create_app():
     app.register_blueprint(user_bp)
     app.register_blueprint(bathroom_bp)
     app.register_blueprint(crm_bp)
+    app.register_blueprint(custom_reports_bp)
 
     # Root endpoint
     @app.route('/')
@@ -68,7 +70,8 @@ def create_app():
                 'dashboard': '/api/v1/dashboard',
                 'users': '/api/v1/users',
                 'bathroom': '/api/v1/bathroom',
-                'crm': '/api/v1/crm'
+                'crm': '/api/v1/crm',
+                'custom_reports': '/api/v1/custom-reports'
             }
         }), 200
 
