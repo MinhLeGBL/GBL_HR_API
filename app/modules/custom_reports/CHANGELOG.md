@@ -3,6 +3,27 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.2.0] — 2026-05-21
+
+### Changed
+- `/sizes` now filters to a curated `FOCUS_BRANDS` list by default
+  (13 brands: AKRIS, AKRIS PUNTO, ALAIA, ALEXANDER MCQUEEN, COURREGES,
+  ELEVENTY, IBLUES, JIL SANDER, KHAITE, MAISON MARGIELA MM6, MARELLA,
+  MARNI INTERNATIONAL S.A, THE ATTICO). ELEVENTY and THE ATTICO have
+  no SS25/SS26 items today but are kept in the list for future seasons.
+- Single-brand query param `?brand=X` replaced with multi-brand
+  `?brands=A,B,C` (comma-separated `vendor.vend_name` values).
+- Pass `?brands=*` to disable the focus-brand filter and return every
+  brand (previous v0.1 behaviour).
+- Response now includes a `brands` field echoing the resolved filter
+  (the `FOCUS_BRANDS` list when no override, or `null` when filter is
+  disabled via `?brands=*`).
+
+### Notes
+- Vendor-name resolution for common aliases is encoded in `FOCUS_BRANDS`:
+  AMQ → ALEXANDER MCQUEEN, MARNI → MARNI INTERNATIONAL S.A,
+  MM / MM6 → MAISON MARGIELA MM6 (single vendor row in `rps.vendor`).
+
 ## [0.1.0] — 2026-05-21
 
 Initial release. Pre-1.0 — the API may still change while the reports

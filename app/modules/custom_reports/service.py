@@ -27,6 +27,27 @@ SEASON_RE = re.compile(r'^[A-Za-z0-9]+$')
 # Default seasons for v0.1 — the user's initial scope was SS25 + SS26
 DEFAULT_SEASONS = ('SS25', 'SS26')
 
+# Default brand focus list. Names are exact `vendor.vend_name` values, so
+# upstream resolution (e.g. AMQ → ALEXANDER MCQUEEN, MARNI → MARNI
+# INTERNATIONAL S.A, MM/MM6 → MAISON MARGIELA MM6) happens once here, not
+# in the SQL. ELEVENTY and THE ATTICO have no SS25/SS26 items today but
+# remain in the list so they get picked up automatically for future seasons.
+FOCUS_BRANDS = (
+    'AKRIS',
+    'AKRIS PUNTO',
+    'ALAIA',
+    'ALEXANDER MCQUEEN',
+    'COURREGES',
+    'ELEVENTY',
+    'IBLUES',
+    'JIL SANDER',
+    'KHAITE',
+    'MAISON MARGIELA MM6',
+    'MARELLA',
+    'MARNI INTERNATIONAL S.A',
+    'THE ATTICO',
+)
+
 
 class CustomReportsService:
 
@@ -36,7 +57,7 @@ class CustomReportsService:
     def get_size_by_brand_season(
         self,
         seasons: Optional[List[str]] = None,
-        brand: Optional[str] = None,
+        brands: Optional[List[str]] = None,
         size: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -45,7 +66,10 @@ class CustomReportsService:
         Args:
             seasons: list of season codes (e.g. ['SS25', 'SS26']). Each
                 must match ^[A-Za-z0-9]+$. Defaults to ('SS25', 'SS26').
-            brand: optional vendor_name filter (case-insensitive exact).
+            brands: list of vendor_name values to keep. Case-insensitive
+                exact match. When None, falls back to FOCUS_BRANDS (the
+                13 brands of interest). Pass `['*']` to disable the filter
+                and return every brand.
             size: optional item_size filter (case-insensitive exact).
 
         Returns:
@@ -73,24 +97,39 @@ class CustomReportsService:
 
         seasons_sql = ', '.join(f"'{s.upper()}'" for s in season_list)
 
+        # Resolve brand filter: None → FOCUS_BRANDS; ['*'] → no filter
+        if brands is None:
+            brand_filter = list(FOCUS_BRANDS)
+        elif len(brands) == 1 and brands[0] == '*':
+            brand_filter = None
+        else:
+            brand_filter = list(brands)
+
         # 1. Pull all three datasets from Oracle in one connection
         items_df, receipts_df, sales_df = self._fetch_data(seasons_sql)
         if items_df is None:
             return {'success': False, 'error': 'Failed to fetch data from Oracle'}
 
         if len(items_df) == 0:
-            return {'success': True, 'seasons': season_list, 'rows': [], 'count': 0}
+            return {
+                'success': True,
+                'seasons': season_list,
+                'brands': brand_filter,
+                'rows': [],
+                'count': 0,
+            }
 
         # 2. FIFO-match sold units to receipt batches per item
         matched_df = self._fifo_match(receipts_df, sales_df)
 
         # 3. Aggregate to (brand, size, season)
         rows = self._aggregate(items_df, receipts_df, sales_df, matched_df,
-                               brand=brand, size=size)
+                               brands=brand_filter, size=size)
 
         return {
             'success': True,
             'seasons': season_list,
+            'brands': brand_filter,
             'rows': rows,
             'count': len(rows),
         }
@@ -203,7 +242,7 @@ class CustomReportsService:
         receipts_df: pd.DataFrame,
         sales_df: pd.DataFrame,
         matched_df: pd.DataFrame,
-        brand: Optional[str] = None,
+        brands: Optional[List[str]] = None,
         size: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Roll matched + raw counts up to (brand, size, season)."""
@@ -227,8 +266,9 @@ class CustomReportsService:
         item_stats['matched_qty_days'] = item_stats['item_sid'].map(matched_per_item_qty_days).fillna(0).astype('int64')
 
         # Apply filters
-        if brand is not None:
-            item_stats = item_stats[item_stats['brand'].fillna('').str.upper() == brand.upper()]
+        if brands:
+            wanted = {b.upper() for b in brands}
+            item_stats = item_stats[item_stats['brand'].fillna('').str.upper().isin(wanted)]
         if size is not None:
             item_stats = item_stats[item_stats['item_size'].fillna('').str.upper() == size.upper()]
 

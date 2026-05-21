@@ -25,11 +25,14 @@ class TestSizesEndpoint:
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     @patch('app.modules.custom_reports.routes.custom_reports_service.get_size_by_brand_season')
-    def test_success_default_seasons(self, mock_svc, mock_get_user, mock_verify, client):
+    def test_success_defaults(self, mock_svc, mock_get_user, mock_verify, client):
+        """No params → seasons=None (service applies SS25/SS26 default), brands=None
+        (service applies FOCUS_BRANDS default), size=None."""
         _mock_auth(mock_verify, mock_get_user)
         mock_svc.return_value = {
             'success': True,
             'seasons': ['SS25', 'SS26'],
+            'brands': ['ALEXANDER MCQUEEN'],  # service-side default
             'rows': [],
             'count': 0,
         }
@@ -37,19 +40,36 @@ class TestSizesEndpoint:
         resp = client.get(self.URL, headers=_auth_headers())
 
         assert resp.status_code == 200
-        mock_svc.assert_called_once_with(seasons=None, brand=None, size=None)
+        mock_svc.assert_called_once_with(seasons=None, brands=None, size=None)
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     @patch('app.modules.custom_reports.routes.custom_reports_service.get_size_by_brand_season')
     def test_success_with_filters(self, mock_svc, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        mock_svc.return_value = {'success': True, 'seasons': ['SS25'], 'rows': [], 'count': 0}
+        mock_svc.return_value = {'success': True, 'seasons': ['SS25'], 'brands': ['AKRIS'], 'rows': [], 'count': 0}
 
-        resp = client.get(self.URL + '?seasons=SS25&brand=Theory&size=M', headers=_auth_headers())
+        resp = client.get(
+            self.URL + '?seasons=SS25&brands=AKRIS,AKRIS%20PUNTO&size=M',
+            headers=_auth_headers(),
+        )
 
         assert resp.status_code == 200
-        mock_svc.assert_called_once_with(seasons=['SS25'], brand='Theory', size='M')
+        mock_svc.assert_called_once_with(
+            seasons=['SS25'], brands=['AKRIS', 'AKRIS PUNTO'], size='M'
+        )
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.custom_reports.routes.custom_reports_service.get_size_by_brand_season')
+    def test_brands_star_disables_filter(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.return_value = {'success': True, 'seasons': ['SS25', 'SS26'], 'brands': None, 'rows': [], 'count': 0}
+
+        resp = client.get(self.URL + '?brands=*', headers=_auth_headers())
+
+        assert resp.status_code == 200
+        mock_svc.assert_called_once_with(seasons=None, brands=['*'], size=None)
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')

@@ -65,7 +65,7 @@ class TestAggregate:
         assert rows[0]['sell_through_pct'] is None
         assert rows[0]['avg_days_to_sell'] is None
 
-    def test_filter_by_brand(self):
+    def test_filter_by_single_brand(self):
         items = _items(
             (1, 'ACME', 'M', 'SS25', 1),
             (2, 'OTHER', 'M', 'SS25', 1),
@@ -74,9 +74,46 @@ class TestAggregate:
         sal = _sales((1, '2025-01-06', 1), (2, '2025-01-06', 1))
         matched = CustomReportsService._fifo_match(rec, sal)
 
-        rows = CustomReportsService._aggregate(items, rec, sal, matched, brand='acme')
+        rows = CustomReportsService._aggregate(items, rec, sal, matched, brands=['acme'])
         assert len(rows) == 1
         assert rows[0]['brand'] == 'ACME'
+
+    def test_filter_by_multiple_brands(self):
+        items = _items(
+            (1, 'ACME', 'M', 'SS25', 1),
+            (2, 'BETA', 'M', 'SS25', 1),
+            (3, 'GAMMA', 'M', 'SS25', 1),
+        )
+        rec = _receipts(
+            (1, '2025-01-01', 5),
+            (2, '2025-01-01', 5),
+            (3, '2025-01-01', 5),
+        )
+        sal = _sales(
+            (1, '2025-01-06', 1),
+            (2, '2025-01-06', 1),
+            (3, '2025-01-06', 1),
+        )
+        matched = CustomReportsService._fifo_match(rec, sal)
+
+        rows = CustomReportsService._aggregate(
+            items, rec, sal, matched, brands=['ACME', 'GAMMA']
+        )
+        assert len(rows) == 2
+        kept = {r['brand'] for r in rows}
+        assert kept == {'ACME', 'GAMMA'}
+
+    def test_no_brand_filter_when_none(self):
+        items = _items(
+            (1, 'ACME', 'M', 'SS25', 1),
+            (2, 'BETA', 'M', 'SS25', 1),
+        )
+        rec = _receipts()
+        sal = _sales()
+        matched = CustomReportsService._fifo_match(rec, sal)
+
+        rows = CustomReportsService._aggregate(items, rec, sal, matched, brands=None)
+        assert len(rows) == 2
 
     def test_filter_by_size(self):
         items = _items(

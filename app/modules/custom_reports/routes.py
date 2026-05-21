@@ -26,16 +26,24 @@ def sizes_by_brand_season():
 
     Query params:
         seasons   — comma-separated season codes (default: SS25,SS26)
-        brand     — optional vendor_name filter (case-insensitive exact)
+        brands    — comma-separated vendor_name values to keep.
+                    Defaults to FOCUS_BRANDS (the 13 brands of interest).
+                    Pass `brands=*` to disable the filter (all brands).
         size      — optional item_size filter (case-insensitive exact)
     """
     seasons_raw = request.args.get('seasons')
     seasons = [s.strip() for s in seasons_raw.split(',')] if seasons_raw else None
-    brand = request.args.get('brand')
+
+    brands_raw = request.args.get('brands')
+    if brands_raw is None:
+        brands = None  # service falls back to FOCUS_BRANDS
+    else:
+        brands = [b.strip() for b in brands_raw.split(',') if b.strip()]
+
     size = request.args.get('size')
 
     result = custom_reports_service.get_size_by_brand_season(
-        seasons=seasons, brand=brand, size=size,
+        seasons=seasons, brands=brands, size=size,
     )
     if not result['success']:
         # 400 for input validation errors, 500 for backend failures
