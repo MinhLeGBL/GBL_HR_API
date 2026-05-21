@@ -3,6 +3,26 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.3.0] — 2026-05-21
+
+### Added
+- CLI export script `scripts/reports/generate_size_report.py` that runs
+  the size-by-brand-season report and writes the output to
+  `document/reports/size_report_<seasons>_<YYYY-MM-DD>.xlsx` (+ a `.csv`
+  by default). The Excel file has two sheets: `Size Report` (the rows)
+  and `Metadata` (filter parameters + grand totals).
+- Script flags: `--seasons`, `--brands` (`*` for all), `--format`
+  (`xlsx` / `csv` / `both`), `--out-dir`, `--no-zero-sales`.
+- Both `scripts/reports/` and `document/reports/` are gitignored, so
+  generated files stay local-only.
+
+### Notes
+- Excel output uses `openpyxl`. Header row is frozen and columns are
+  auto-sized for readability.
+- `--no-zero-sales` drops rows with `sold_qty = 0` (the 59 SS26 rows in
+  the current focus-brand snapshot are mostly zero-sale "new arrival"
+  groups — useful to exclude when reading the report by hand).
+
 ## [0.2.0] — 2026-05-21
 
 ### Changed
