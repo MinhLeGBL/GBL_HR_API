@@ -30,6 +30,9 @@ def sizes_by_brand_season():
                     Defaults to FOCUS_BRANDS (the 13 brands of interest).
                     Pass `brands=*` to disable the filter (all brands).
         size      — optional item_size filter (case-insensitive exact)
+        include_never_received — `true` to keep catalog ghost SKUs
+                    (first_rcvd_date IS NULL) in the report. Default:
+                    false — ghosts are dropped to keep totals meaningful.
     """
     seasons_raw = request.args.get('seasons')
     seasons = [s.strip() for s in seasons_raw.split(',')] if seasons_raw else None
@@ -41,9 +44,11 @@ def sizes_by_brand_season():
         brands = [b.strip() for b in brands_raw.split(',') if b.strip()]
 
     size = request.args.get('size')
+    include_never_received = request.args.get('include_never_received', '').lower() == 'true'
 
     result = custom_reports_service.get_size_by_brand_season(
         seasons=seasons, brands=brands, size=size,
+        include_never_received=include_never_received,
     )
     if not result['success']:
         # 400 for input validation errors, 500 for backend failures

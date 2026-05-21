@@ -3,6 +3,25 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.4.0] — 2026-05-21
+
+### Changed
+- `/sizes` now drops "catalog ghost" SKUs by default — items whose
+  `invn_sbs_item.first_rcvd_date` is `NULL` (never physically received).
+  These SKUs were inflating `sku_count` without contributing to any qty
+  metric. For SS25+SS26 focus-brand scope this removed 20 SS25 + 42 SS26
+  master-only entries (e.g. ALEXANDER MCQUEEN SS25 sizes 26/27/28 jeans
+  registered 2024-12-03 with `first_rcvd_date IS NULL` after 17 months).
+- New `include_never_received` parameter on both the service method
+  and the `?include_never_received=true` query string opts back in to
+  the previous behaviour (ghost SKUs included with all-zero qty metrics).
+- `scripts/reports/generate_size_report.py` now accepts
+  `--include-never-received`.
+
+### Internals
+- `SIZE_REPORT_ITEMS` query selects `i.first_rcvd_date` so the filter
+  can be applied in pandas rather than templated into SQL.
+
 ## [0.3.0] — 2026-05-21
 
 ### Added

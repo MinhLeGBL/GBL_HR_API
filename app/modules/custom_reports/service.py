@@ -59,6 +59,7 @@ class CustomReportsService:
         seasons: Optional[List[str]] = None,
         brands: Optional[List[str]] = None,
         size: Optional[str] = None,
+        include_never_received: bool = False,
     ) -> Dict[str, Any]:
         """
         Brand × Size × Season report.
@@ -71,6 +72,10 @@ class CustomReportsService:
                 13 brands of interest). Pass `['*']` to disable the filter
                 and return every brand.
             size: optional item_size filter (case-insensitive exact).
+            include_never_received: when False (default), SKUs whose
+                `first_rcvd_date` is NULL — i.e. catalog ghosts that have
+                never been physically received — are dropped. Setting True
+                keeps them in the report with all-zero qty metrics.
 
         Returns:
             {
@@ -109,6 +114,11 @@ class CustomReportsService:
         items_df, receipts_df, sales_df = self._fetch_data(seasons_sql)
         if items_df is None:
             return {'success': False, 'error': 'Failed to fetch data from Oracle'}
+
+        # 1a. Drop catalog ghosts (never physically received) unless caller opts in.
+        # These inflate sku_count without contributing to any qty metric.
+        if not include_never_received and 'first_rcvd_date' in items_df.columns:
+            items_df = items_df[items_df['first_rcvd_date'].notna()].copy()
 
         if len(items_df) == 0:
             return {

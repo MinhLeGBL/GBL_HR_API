@@ -9,6 +9,9 @@ def _items(*rows):
     df = pd.DataFrame(rows, columns=['item_sid', 'brand', 'item_size', 'season', 'on_hand_qty'])
     df['item_sid'] = df['item_sid'].astype('int64')
     df['on_hand_qty'] = df['on_hand_qty'].astype(int)
+    # Aggregator doesn't need first_rcvd_date directly (the filter happens
+    # in get_size_by_brand_season before _aggregate is called), so we omit
+    # it here for brevity.
     return df
 
 

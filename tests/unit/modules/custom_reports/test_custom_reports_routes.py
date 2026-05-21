@@ -40,7 +40,9 @@ class TestSizesEndpoint:
         resp = client.get(self.URL, headers=_auth_headers())
 
         assert resp.status_code == 200
-        mock_svc.assert_called_once_with(seasons=None, brands=None, size=None)
+        mock_svc.assert_called_once_with(
+            seasons=None, brands=None, size=None, include_never_received=False,
+        )
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
@@ -56,7 +58,22 @@ class TestSizesEndpoint:
 
         assert resp.status_code == 200
         mock_svc.assert_called_once_with(
-            seasons=['SS25'], brands=['AKRIS', 'AKRIS PUNTO'], size='M'
+            seasons=['SS25'], brands=['AKRIS', 'AKRIS PUNTO'], size='M',
+            include_never_received=False,
+        )
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.custom_reports.routes.custom_reports_service.get_size_by_brand_season')
+    def test_include_never_received_flag(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.return_value = {'success': True, 'seasons': ['SS25', 'SS26'], 'brands': None, 'rows': [], 'count': 0}
+
+        resp = client.get(self.URL + '?include_never_received=true', headers=_auth_headers())
+
+        assert resp.status_code == 200
+        mock_svc.assert_called_once_with(
+            seasons=None, brands=None, size=None, include_never_received=True,
         )
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
@@ -69,7 +86,9 @@ class TestSizesEndpoint:
         resp = client.get(self.URL + '?brands=*', headers=_auth_headers())
 
         assert resp.status_code == 200
-        mock_svc.assert_called_once_with(seasons=None, brands=['*'], size=None)
+        mock_svc.assert_called_once_with(
+            seasons=None, brands=['*'], size=None, include_never_received=False,
+        )
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
