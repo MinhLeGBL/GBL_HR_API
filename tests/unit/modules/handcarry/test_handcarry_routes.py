@@ -61,15 +61,39 @@ class TestImport:
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    @patch('app.modules.handcarry.routes.handcarry_service.import_upcs')
-    def test_success(self, mock_svc, mock_get_user, mock_verify, client):
+    @patch('app.modules.handcarry.routes.handcarry_service.import_records')
+    def test_records_body_uses_import_records(self, mock_svc, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user, role='manager')
         mock_svc.return_value = {
             'success': True,
-            'inserted': 2,
-            'skipped': 1,
-            'errors': [],
-            'total_received': 3,
+            'inserted': 2, 'updated': 1, 'skipped': 0,
+            'errors': [], 'total_received': 3,
+        }
+        records = [
+            {'upc': 100, 'quantity_imported': 5,
+             'price_before_vat': 1000, 'price_after_vat': 1100},
+            {'upc': 200, 'quantity_imported': 5,
+             'price_before_vat': 1000, 'price_after_vat': 1100},
+            {'upc': 300, 'quantity_imported': 5,
+             'price_before_vat': 1000, 'price_after_vat': 1100},
+        ]
+
+        resp = client.post(self.URL, json={'records': records}, headers=_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['inserted'] == 2
+        assert data['updated'] == 1
+        mock_svc.assert_called_once_with(records)
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.handcarry.routes.handcarry_service.import_upcs')
+    def test_legacy_upcs_body_still_supported(self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager')
+        mock_svc.return_value = {
+            'success': True,
+            'inserted': 2, 'skipped': 1, 'errors': [], 'total_received': 3,
         }
 
         resp = client.post(self.URL, json={'upcs': [100, 200, 300]}, headers=_auth_headers())
@@ -82,10 +106,12 @@ class TestImport:
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    def test_missing_upcs_returns_400(self, mock_get_user, mock_verify, client):
+    def test_missing_body_returns_400(self, mock_get_user, mock_verify, client):
+        """Empty body (no `records` or `upcs`) → 400."""
         _mock_auth(mock_verify, mock_get_user, role='manager')
         resp = client.post(self.URL, json={}, headers=_auth_headers())
         assert resp.status_code == 400
+        assert "Missing 'records'" in resp.get_json()['error']
 
 
 class TestUpdate:

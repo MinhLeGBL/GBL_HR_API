@@ -31,6 +31,7 @@ from app.modules.dashboard.service import DashboardService
 from app.modules.commission.service import CommissionSettingsService, CommissionStoreSettingsService, CommissionRevenueService
 from app.modules.bathroom.service import BathroomService
 from app.modules.crm.service import CRMService
+from app.modules.handcarry.service import HandCarryService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -55,6 +56,8 @@ INIT_STEPS = [
      BathroomService().init_database),
     ('CRM (customer scores, segment snapshots)',
      CRMService().init_database),
+    ('Hand-carry catalog (rps.carrier_item extended schema)',
+     HandCarryService().init_database),
 ]
 
 

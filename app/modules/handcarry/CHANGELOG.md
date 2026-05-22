@@ -3,6 +3,45 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.2.0] — 2026-05-22
+
+### Added (CR #58)
+- Extended `rps.carrier_item` schema with 9 nullable columns
+  (`description`, `brand`, `category`, `color`, `size`, `season`,
+  `quantity_imported`, `price_before_vat`, `price_after_vat`). Migration
+  lives in `HandCarryService.init_database()` and is idempotent.
+- New `import_records` service method + matching route body shape:
+  ```
+  POST /api/v1/handcarry/import
+  { "records": [ { "upc", "description", "brand", "category", "color",
+                   "size", "season", "quantity_imported",
+                   "price_before_vat", "price_after_vat" }, ... ] }
+  ```
+  REPLACE semantics — existing UPCs have all fields overwritten by the
+  import row's values (the file is the source of truth). Response adds
+  an `updated` count alongside `inserted` / `skipped` / `errors`.
+- `GET /api/v1/handcarry` response extended with all new fields plus
+  `quantity_sold` — live-joined per request from Oracle as the
+  **lifetime** sum of sales for the UPC.
+- Backfill script `scripts/database/backfill_handcarry.py`: one-time
+  migration that, for each of the 1,270 existing rows, sets product
+  info from Oracle and `quantity_imported = lifetime_sold_qty`
+  (or `1` if the UPC has no sales).
+- Shared Oracle queries lifted into `queries.py` (`HandCarryQueries`).
+
+### Backward compatibility
+- The legacy `{ upcs: int[] }` body shape is still accepted by
+  `POST /import` for callers that haven't migrated. New UPCs are
+  inserted with only `scan_upc` set; existing UPCs are skipped (old
+  behaviour). The new `records[]` shape is preferred.
+- The legacy `import_upcs(upcs)` service method is preserved.
+
+### Internals
+- `HandCarryService.fetch_oracle_product_info` and `_lifetime_sold_for`
+  helpers shared between `list_items` and the backfill script.
+- Oracle IN-list calls chunk at 500 UPCs to stay under the 1000-element
+  parser limit.
+
 ## [0.1.0] — 2026-05-20
 
 Initial release. Pre-1.0 — the API may still change while the frontend
