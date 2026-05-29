@@ -3,6 +3,56 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.0.3] — 2026-05-29
+
+### Added — CR #59 Phase B: AR payable detection + commission withholding
+
+- `CommissionRepository.get_unpaid_bill_amounts(year, month)` — replays the
+  per-customer Charge tender ledger (two-tier matching: `REF_SALE_SID` →
+  FIFO) and returns bills created in the target month that remain unpaid
+  at end-of-month. Each entry carries `original_charge`, `remaining_unpaid`,
+  `sale_total_amt`, and an `unpaid_ratio` for proportional withholding.
+- `ORACLE_UNPAID_BILLS_BY_MONTH` SQL query in `CommissionQueries`. Pulls
+  the full Charge ledger up to end-of-month for any customer with at least
+  one in-month Charge bill.
+- `bill_sid` column added to `ALL_SALES_DATA` so the service can look up
+  each line item's bill in the unpaid map. SID is stringified at the
+  repository layer to dodge float64 precision loss (same approach as
+  v1.0.2).
+- `CommissionService._calculate_withheld_by_category` — computes per-
+  category withholding for one employee. Withholding uses the same rate
+  the category's normal commission line uses, applied to the
+  `unpaid_ratio`-weighted revenue.
+- New per-employee response fields on `POST /commission/calculate`:
+  `withheld`, `withheld_by_category`, `released`, `released_by_category`,
+  `payout`. `released = 0` and `released_by_category = {}` are placeholders
+  shipped now per the CR spec; Phase C will populate them.
+- New per-category field `payable_amount` on each `RevenueEntry` returned
+  by `GET /commission/revenue` and `GET /commission/revenue/store-view`,
+  plus top-level per-employee `payable_amount`.
+
+### Behavior
+
+- Bills with `REF_SALE_SID` set are matched to that specific bill first.
+  Bills without are FIFO-matched against the customer's oldest open bills.
+  `NOTES_LOSTDOC` parsing is intentionally not used (free-text Vietnamese
+  with inconsistent formatting; see CR #59 Phase A research).
+- Period scoping: only bills created in the target month appear in that
+  month's payable display. Carry-over bills from prior months are not
+  re-withheld (already withheld in their creation month).
+- `unpaid_ratio = remaining_unpaid / sale_total_amt` — applied uniformly
+  across line items on the same bill. For bills with mixed tenders (only
+  partial AR on Charge), this naturally scales withholding down.
+
+### Verified against user-supplied reference data
+
+- GL005 payable: 56,982,600 ✓
+- GH100 payable: 55,836,000 ✓
+- GH083 payable: 27,019,800 ✓
+- Withheld commission for GL005/GH083 matches `payable_revenue / 1.1 ×
+  tier_rate` exactly. GH100 withheld = 0 because their achievement rate
+  is below 50% (no fashion commission to withhold).
+
 ## [1.0.2] — 2026-05-25
 
 ### Fixed

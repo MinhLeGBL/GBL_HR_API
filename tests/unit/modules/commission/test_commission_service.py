@@ -18,7 +18,10 @@ from app.modules.commission.service import CommissionService
 @pytest.fixture
 def mock_repo():
     """Create a mock repository for dependency injection."""
-    return MagicMock()
+    repo = MagicMock()
+    # CR #59: default — no AR payable bills. Individual tests can override.
+    repo.get_unpaid_bill_amounts.return_value = {}
+    return repo
 
 
 @pytest.fixture
@@ -690,6 +693,10 @@ class TestCalculateCombinedCommission:
             'personal_commission_home_decor',
             'personal_commission_total',
             'total_handout_commission',
+            # CR #59 Phase B: AR payable / withholding
+            'withheld', 'withheld_by_category',
+            'released', 'released_by_category',
+            'payout',
         ]
         assert list(result.columns) == expected_columns
 
@@ -735,6 +742,10 @@ class TestCalculatePersonalCommissions:
         ]
         df = pd.DataFrame(rows, columns=columns)
         df['upc_clean'] = df['upc'].astype(str).str.strip()
+        # CR #59: synth bill_sid per bill_number so tests can reference it
+        # if they want; default unpaid_bills_map (empty) makes all rows have
+        # unpaid_ratio=0, so withholding is zero.
+        df['bill_sid'] = df['bill_number'].astype(str).map(lambda b: f'BILL_SID_{b}')
         return df
 
     def test_missing_month_returns_error_df(self, service, mock_repo):
@@ -1135,6 +1146,10 @@ class TestCalculatePersonalCommissions:
             'commission_vhernier', 'commission_rosa_maria',
             'commission_suitcase', 'commission_hand_carry',
             'commission_home_decor', 'total',
+            # CR #59: AR payable / withholding (Phase B)
+            'withheld', 'withheld_by_category',
+            'released', 'released_by_category',
+            'payout',
         ]
         assert list(result.columns) == expected_columns
 
@@ -1173,6 +1188,80 @@ class TestCalculatePersonalCommissions:
         emp2 = result[result['employee_code'] == 'EMP002'].iloc[0]
         assert emp2['total'] == 0
 
+    def test_withholding_proportional_to_unpaid_ratio(self, service, mock_repo):
+        """CR #59 Phase B: a bill that's 70% unpaid causes 70% of that bill's
+        item commission to be withheld; the remaining 30% is paid normally.
+
+        Setup: one fashion-FP item on bill BILL1 with revenue 1,000,000 (before
+        VAT). Personal target is 2M → achievement = 55% → tier 1 → fashion FP
+        rate = 0.25%. The mocked unpaid_bills_map says BILL1 has 70% unpaid.
+        Target is in tier 1 so we don't tangle with the over-target bonus.
+        """
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_100_000, 1_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        # CR #59: BILL1 → 70% unpaid. The synth bill_sid format from
+        # _make_sales_df is f'BILL_SID_{bill_number}'.
+        mock_repo.get_unpaid_bill_amounts.return_value = {
+            'BILL_SID_BILL1': {
+                'doc_no': 'BILL1',
+                'customer_sid': '999',
+                'original_charge': 1_100_000,
+                'remaining_unpaid': 770_000,
+                'sale_total_amt': 1_100_000,
+                'unpaid_ratio': 0.7,
+            },
+        }
+        employees = [
+            {'employee_code': 'EMP001', 'employee_username': 'user1',
+             'personal_target': 2_000_000, 'full_name': 'Test',
+             'store_code': 'HBT'},
+        ]
+        result = service.calculate_personal_commissions(
+            month=1, year=2025, employees=employees,
+        )
+        row = result.iloc[0]
+
+        # Achievement = 1.1M / 2M = 55% → tier 1 fashion_fp rate 0.25%.
+        assert row['commission_fashion_fp'] == 1_000_000 * 0.0025
+        # Withheld FP = 70% of that.
+        assert row['withheld'] == 1_000_000 * 0.0025 * 0.7
+        assert row['withheld_by_category'] == {'fashion_fp': 1_000_000 * 0.0025 * 0.7}
+        # payout = total - withheld + released; released is 0 in Phase B.
+        assert row['payout'] == row['total'] - row['withheld']
+        assert row['released'] == 0
+        assert row['released_by_category'] == {}
+
+    def test_no_withholding_when_no_unpaid_bills(self, service, mock_repo):
+        """When all bills are paid (empty unpaid_bills_map), withholding is
+        zero across all categories and payout equals total."""
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_100_000, 1_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        mock_repo.get_unpaid_bill_amounts.return_value = {}     # nothing unpaid
+
+        employees = [
+            {'employee_code': 'EMP001', 'employee_username': 'user1',
+             'personal_target': 1_000_000, 'full_name': 'Test',
+             'store_code': 'HBT'},
+        ]
+        result = service.calculate_personal_commissions(
+            month=1, year=2025, employees=employees,
+        )
+        row = result.iloc[0]
+
+        assert row['withheld'] == 0
+        assert row['withheld_by_category'] == {}
+        assert row['payout'] == row['total']
+
 
 class TestEmployeeCommissionException:
     """Tests for EMPLOYEE_COMMISSION_EXCEPTIONS — flat rate on non-jewelry
@@ -1187,7 +1276,10 @@ class TestEmployeeCommissionException:
 
     @pytest.fixture
     def mock_repo(self):
-        return MagicMock()
+        repo = MagicMock()
+        # CR #59: default — no AR payable bills
+        repo.get_unpaid_bill_amounts.return_value = {}
+        return repo
 
     @pytest.fixture
     def service(self, mock_repo):
@@ -1203,6 +1295,8 @@ class TestEmployeeCommissionException:
         ]
         df = pd.DataFrame(rows, columns=columns)
         df['upc_clean'] = df['upc'].astype(str).str.strip()
+        # CR #59: synth bill_sid (see TestCalculatePersonalCommissions._make_sales_df)
+        df['bill_sid'] = df['bill_number'].astype(str).map(lambda b: f'BILL_SID_{b}')
         return df
 
     def test_flat_rate_qualifying_customer(self, service, mock_repo):

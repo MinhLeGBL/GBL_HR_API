@@ -253,6 +253,7 @@ class CommissionQueries:
             di.SID                                                                as sale_id,
             di.SCAN_UPC                                                           as upc,
             d.DOC_NO                                                              as bill_number,
+            d.SID                                                                 as bill_sid,
             d.STORE_CODE                                                          as doc_store_code,
             TRUNC(d.invc_post_date)                                               as sale_date,
             TO_CHAR(d.CREATED_DATETIME, 'HH24:MI:SS')                             as sale_time,
@@ -286,6 +287,42 @@ class CommissionQueries:
           AND di.ITEM_TYPE IN (1, 2)
           AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD HH24:MI:SS')
           AND d.invc_post_date <= TO_DATE(:end_date, 'YYYY-MM-DD HH24:MI:SS')
+    """
+
+    # Customer Charge tender ledger for AR payable detection (CR #59).
+    # Pulls every Charge tender event (positive sales + negative payments)
+    # for any customer who has at least one Charge bill in the target month,
+    # ordered chronologically for FIFO replay.
+    #
+    # Replay rule (REF_SALE_SID → FIFO) is in CommissionRepository — see
+    # `get_unpaid_bill_amounts`. NOTES_LOSTDOC parsing intentionally not used
+    # (free-text, unreliable — see CR #59 Phase A research).
+    ORACLE_UNPAID_BILLS_BY_MONTH = """
+        WITH target_month_customers AS (
+            SELECT DISTINCT d.bt_cuid AS customer_sid
+            FROM rps.document d
+            JOIN rps.tender t ON t.doc_sid = d.sid
+                              AND t.tender_name = 'Charge'
+                              AND t.amount > 0
+            WHERE d.status = 4
+              AND TO_CHAR(d.invc_post_date, 'YYYY-MM') = :target_month
+        )
+        SELECT
+            d.bt_cuid                                AS customer_sid,
+            d.sid                                    AS doc_sid,
+            d.doc_no                                 AS doc_no,
+            t.amount                                 AS charge_amount,
+            d.invc_post_date                         AS post_date,
+            d.ref_sale_sid                           AS ref_sale_sid,
+            d.sale_total_amt                         AS sale_total_amt,
+            TO_CHAR(d.invc_post_date, 'YYYY-MM')     AS post_month
+        FROM rps.document d
+        JOIN rps.tender t ON t.doc_sid = d.sid
+                          AND t.tender_name = 'Charge'
+        JOIN target_month_customers c ON c.customer_sid = d.bt_cuid
+        WHERE d.status = 4
+          AND d.invc_post_date < TO_DATE(:period_end_exclusive, 'YYYY-MM-DD HH24:MI:SS')
+        ORDER BY d.bt_cuid, d.invc_post_date, d.doc_no
     """
 
     # Get employee information including tenure
