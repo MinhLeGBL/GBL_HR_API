@@ -37,9 +37,11 @@ STANDARD_RATES = {
 # ============================================================================
 # Employee who receives a flat rate on non-jewelry sales only when
 # selling to a specific customer. No personal target, no achievement tiers.
+# SIDs are stored as strings (v1.0.3) to dodge float64 precision loss on
+# the 18-digit Oracle SIDs — see CommissionRepository.get_all_sales_data.
 EMPLOYEE_COMMISSION_EXCEPTIONS = {
-    690036963000170943: {                               # employee SID
-        'qualifying_customer_sid': 690837303000121462,
+    '690036963000170943': {                             # employee SID
+        'qualifying_customer_sid': '690837303000121462',
         'flat_rate': 0.007,                             # 0.7% on all non-jewelry
     }
 }
