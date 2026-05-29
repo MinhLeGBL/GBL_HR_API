@@ -143,6 +143,16 @@ class CommissionRepository:
         if 'upc_clean' not in df.columns and 'upc' in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
 
+        # Oracle SIDs are 18-digit integers that overflow float64's ~15-digit
+        # mantissa. Pandas defaults to float64 when a numeric column has any
+        # NULLs (LEFT JOIN → walk-ins), which silently rounds the last few
+        # digits. That breaks exact-int lookups against hardcoded SIDs (e.g.
+        # EMPLOYEE_COMMISSION_EXCEPTIONS). Cast to nullable Int64 so the
+        # exact value survives even with NaN.
+        for col in ('sale_id', 'employee_sid', 'customer_sid'):
+            if col in df.columns:
+                df[col] = df[col].astype('Int64')
+
         # Only COSM department items with HEA vendor are not eligible for commission.
         # Re-attribute to SYSADMIN so they count toward store revenue total
         # but not toward any employee's personal total or commission.

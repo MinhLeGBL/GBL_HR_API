@@ -3,6 +3,20 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.0.2] — 2026-05-25
+
+### Fixed
+- Preserve Oracle SID precision in `get_all_sales_data`. Oracle SIDs are
+  18-digit integers; pandas was defaulting `sale_id`, `employee_sid`, and
+  `customer_sid` to `float64` (because LEFT JOINs introduce NaNs), which
+  silently rounded the last few digits. This broke exact-int lookups
+  against hardcoded SIDs — notably the `EMPLOYEE_COMMISSION_EXCEPTIONS`
+  dict, causing the one exception employee (GL018) to fall through to
+  the standard achievement-tier path and earn 0 fashion FP commission
+  instead of their flat-rate 0.7% on qualifying-customer sales.
+  Fix: cast all three SID columns to pandas' nullable `Int64` right
+  after building the DataFrame.
+
 ## [1.0.1] — 2026-05-20
 
 ### Verified (no code change)
