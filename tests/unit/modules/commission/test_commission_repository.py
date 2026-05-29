@@ -140,18 +140,19 @@ class TestCommissionRepository:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.description = [
-            ("SALE_ID",), ("UPC",), ("BILL_NUMBER",), ("DOC_STORE_CODE",),
-            ("SALE_DATE",), ("SALE_TIME",), ("CUSTOMER_SID",),
-            ("EMPLOYEE_SID",), ("EMPLOYEE_USERNAME",), ("STORE_CODE",),
-            ("VENDOR_CODE",), ("IS_JEWELRY",), ("CATEGORY",), ("DEPARTMENT",),
-            ("DISCOUNT_RATE",), ("REVENUE_WITH_VAT",), ("REVENUE_BEFORE_VAT",),
+            ("SALE_ID",), ("UPC",), ("BILL_NUMBER",), ("BILL_SID",),
+            ("DOC_STORE_CODE",), ("SALE_DATE",), ("SALE_TIME",),
+            ("CUSTOMER_SID",), ("EMPLOYEE_SID",), ("EMPLOYEE_USERNAME",),
+            ("STORE_CODE",), ("VENDOR_CODE",), ("IS_JEWELRY",),
+            ("CATEGORY",), ("DEPARTMENT",), ("DISCOUNT_RATE",),
+            ("REVENUE_WITH_VAT",), ("REVENUE_BEFORE_VAT",),
         ]
         mock_cursor.fetchall.return_value = [
-            (1, "111222333", "D001", "S01", "2025-01-15", "10:30:00", 201,
-             101, "john.doe", "S01", "VND", 0, "Shoes", "FWOM",
+            (1, "111222333", "D001", 9001, "S01", "2025-01-15", "10:30:00",
+             201, 101, "john.doe", "S01", "VND", 0, "Shoes", "FWOM",
              0.0, 11000, 10000),
-            (2, "444555666", "D002", "S01", "2025-01-16", "14:00:00", 202,
-             102, "jane.smith", "S01", "VHN", 1, "Rings", "WJEW",
+            (2, "444555666", "D002", 9002, "S01", "2025-01-16", "14:00:00",
+             202, 102, "jane.smith", "S01", "VHN", 1, "Rings", "WJEW",
              0.1, 5500, 5000),
         ]
         mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
@@ -166,8 +167,10 @@ class TestCommissionRepository:
         # Columns should be lowercased
         assert "sale_id" in df.columns
         assert "employee_username" in df.columns
-        # sale_id is stringified to preserve 18-digit Oracle SID precision
+        assert "bill_sid" in df.columns
+        # sale_id and bill_sid are stringified to preserve 18-digit Oracle SID precision
         assert df.iloc[0]["sale_id"] == "1"
+        assert df.iloc[0]["bill_sid"] == "9001"
         assert df.iloc[1]["employee_username"] == "jane.smith"
         # upc_clean column should be added
         assert "upc_clean" in df.columns
@@ -198,10 +201,11 @@ class TestCommissionRepository:
         assert isinstance(df, pd.DataFrame)
         assert df.empty
         expected_columns = [
-            "sale_id", "upc", "bill_number", "doc_store_code", "sale_date",
-            "sale_time", "customer_sid", "employee_sid", "employee_username",
-            "store_code", "vendor_code", "is_jewelry", "category", "department",
-            "discount_rate", "revenue_with_vat", "revenue_before_vat",
+            "sale_id", "upc", "bill_number", "bill_sid", "doc_store_code",
+            "sale_date", "sale_time", "customer_sid", "employee_sid",
+            "employee_username", "store_code", "vendor_code", "is_jewelry",
+            "category", "department", "discount_rate",
+            "revenue_with_vat", "revenue_before_vat",
         ]
         assert list(df.columns) == expected_columns
 
@@ -232,23 +236,27 @@ class TestCommissionRepository:
         EXACT_EMPLOYEE_SID = "690036963000170943"
         EXACT_CUSTOMER_SID = "690837303000121462"
         EXACT_SALE_ID      = "778100000000000123"
+        EXACT_BILL_SID     = "773740427000120629"  # CR #59: bill_sid also stringified
 
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.description = [
-            ("SALE_ID",), ("UPC",), ("BILL_NUMBER",), ("DOC_STORE_CODE",),
-            ("SALE_DATE",), ("SALE_TIME",), ("CUSTOMER_SID",),
-            ("EMPLOYEE_SID",), ("EMPLOYEE_USERNAME",), ("STORE_CODE",),
-            ("VENDOR_CODE",), ("IS_JEWELRY",), ("CATEGORY",), ("DEPARTMENT",),
-            ("DISCOUNT_RATE",), ("REVENUE_WITH_VAT",), ("REVENUE_BEFORE_VAT",),
+            ("SALE_ID",), ("UPC",), ("BILL_NUMBER",), ("BILL_SID",),
+            ("DOC_STORE_CODE",), ("SALE_DATE",), ("SALE_TIME",),
+            ("CUSTOMER_SID",), ("EMPLOYEE_SID",), ("EMPLOYEE_USERNAME",),
+            ("STORE_CODE",), ("VENDOR_CODE",), ("IS_JEWELRY",),
+            ("CATEGORY",), ("DEPARTMENT",), ("DISCOUNT_RATE",),
+            ("REVENUE_WITH_VAT",), ("REVENUE_BEFORE_VAT",),
         ]
         # oracledb returns Python int for NUMBER columns; the fix must
         # stringify these before they hit pandas.
         mock_cursor.fetchall.return_value = [
-            (int(EXACT_SALE_ID), "111", "D001", "S01", "2026-04-15", "10:30:00",
+            (int(EXACT_SALE_ID), "111", "D001", int(EXACT_BILL_SID),
+             "S01", "2026-04-15", "10:30:00",
              int(EXACT_CUSTOMER_SID), int(EXACT_EMPLOYEE_SID), "linh.luu",
              "RWR", "GUC", 0, "Bag", "WRTW", 0.0, 11000, 10000),
-            (int(EXACT_SALE_ID) + 1, "222", "D002", "S01", "2026-04-16", "14:00:00",
+            (int(EXACT_SALE_ID) + 1, "222", "D002", None,
+             "S01", "2026-04-16", "14:00:00",
              None, None, None,
              None, "VND", 0, "Shoes", "WSHOE", 0.0, 5500, 5000),
         ]
@@ -263,16 +271,21 @@ class TestCommissionRepository:
         assert df["sale_id"].dtype == object
         assert df["employee_sid"].dtype == object
         assert df["customer_sid"].dtype == object
+        assert df["bill_sid"].dtype == object
 
         # Exact value preservation — string comparison can't be defeated by
         # float64 precision loss the way int comparison was.
         assert df.iloc[0]["sale_id"]      == EXACT_SALE_ID
         assert df.iloc[0]["employee_sid"] == EXACT_EMPLOYEE_SID
         assert df.iloc[0]["customer_sid"] == EXACT_CUSTOMER_SID
+        assert df.iloc[0]["bill_sid"]     == EXACT_BILL_SID
 
-        # The dict-membership check that originally failed for GL018.
+        # The dict-membership check that originally failed for GL018,
+        # extended to bill_sid (CR #59 uses the same pattern for AR lookup).
         exception_dict = {EXACT_EMPLOYEE_SID: "expected-match"}
         assert df.iloc[0]["employee_sid"] in exception_dict
+        bill_map = {EXACT_BILL_SID: "expected-match"}
+        assert df.iloc[0]["bill_sid"] in bill_map
 
         # NULL SIDs from the walk-in row survive as None — not stringified
         # to "None", not coerced to NaN-then-rounded.
@@ -407,3 +420,171 @@ class TestCommissionRepository:
 
         assert result == []
         mock_conn.close.assert_called_once()
+
+    # ------------------------------------------------------------------ #
+    #  get_unpaid_bill_amounts (CR #59 Phase B — AR payable detection)
+    # ------------------------------------------------------------------ #
+
+    @patch("app.modules.commission.repository.get_oracle_connection")
+    def test_get_unpaid_bill_amounts_ref_sale_sid_settles_bill(
+        self, mock_get_conn, mock_queries_cls
+    ):
+        """A payment with REF_SALE_SID = bill.sid fully settles that bill;
+        nothing left in payable map for that bill."""
+        from datetime import datetime
+        BILL_SID = '100000000000000001'
+        OTHER_BILL_SID = '100000000000000002'
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.description = [
+            ('CUSTOMER_SID',), ('DOC_SID',), ('DOC_NO',), ('CHARGE_AMOUNT',),
+            ('POST_DATE',), ('REF_SALE_SID',), ('SALE_TOTAL_AMT',), ('POST_MONTH',),
+        ]
+        mock_cursor.fetchall.return_value = [
+            ('555', int(BILL_SID),       '2869',  50_000_000,
+             datetime(2026, 4, 5),  None,                 50_000_000, '2026-04'),
+            ('555', int(OTHER_BILL_SID), '2870',  30_000_000,
+             datetime(2026, 4, 10), None,                 30_000_000, '2026-04'),
+            # Payment with REF_SALE_SID pointing to the second bill.
+            ('555', 999,                 '4381', -30_000_000,
+             datetime(2026, 4, 15), int(OTHER_BILL_SID),  0,          '2026-04'),
+        ]
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        repo = CommissionRepository()
+        result = repo.get_unpaid_bill_amounts(2026, 4)
+
+        # Only the first bill (no REF-settled payment) is still open.
+        assert set(result.keys()) == {BILL_SID}
+        assert result[BILL_SID]['remaining_unpaid'] == 50_000_000
+        assert result[BILL_SID]['unpaid_ratio'] == 1.0
+
+    @patch("app.modules.commission.repository.get_oracle_connection")
+    def test_get_unpaid_bill_amounts_fifo_oldest_first(
+        self, mock_get_conn, mock_queries_cls
+    ):
+        """A payment with no REF flows FIFO: consumes oldest open bill first."""
+        from datetime import datetime
+        OLDEST = '200000000000000001'
+        NEWER  = '200000000000000002'
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.description = [
+            ('CUSTOMER_SID',), ('DOC_SID',), ('DOC_NO',), ('CHARGE_AMOUNT',),
+            ('POST_DATE',), ('REF_SALE_SID',), ('SALE_TOTAL_AMT',), ('POST_MONTH',),
+        ]
+        mock_cursor.fetchall.return_value = [
+            ('777', int(OLDEST), '2701', 40_000_000,
+             datetime(2026, 4, 1),  None, 40_000_000, '2026-04'),
+            ('777', int(NEWER),  '2789', 60_000_000,
+             datetime(2026, 4, 5),  None, 60_000_000, '2026-04'),
+            # No-REF payment of 70M flows FIFO: 40M to OLDEST (settles it),
+            # then 30M to NEWER (leaving 30M remaining).
+            ('777', 800,         '4400', -70_000_000,
+             datetime(2026, 4, 10), None, 0,          '2026-04'),
+        ]
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        repo = CommissionRepository()
+        result = repo.get_unpaid_bill_amounts(2026, 4)
+
+        assert OLDEST not in result   # fully settled by FIFO
+        assert NEWER in result
+        assert result[NEWER]['remaining_unpaid'] == 30_000_000
+        assert result[NEWER]['unpaid_ratio'] == 0.5
+
+    @patch("app.modules.commission.repository.get_oracle_connection")
+    def test_get_unpaid_bill_amounts_filters_to_target_month_only(
+        self, mock_get_conn, mock_queries_cls
+    ):
+        """Bills created BEFORE the target month never appear, even if unpaid.
+        Period scoping per CR #59: each month's payable shows only that
+        month's bills — prior-month carry-over is handled in its creation
+        month, not re-displayed here."""
+        from datetime import datetime
+        PRIOR = '300000000000000001'
+        TARGET = '300000000000000002'
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.description = [
+            ('CUSTOMER_SID',), ('DOC_SID',), ('DOC_NO',), ('CHARGE_AMOUNT',),
+            ('POST_DATE',), ('REF_SALE_SID',), ('SALE_TOTAL_AMT',), ('POST_MONTH',),
+        ]
+        mock_cursor.fetchall.return_value = [
+            ('888', int(PRIOR),  '2500', 20_000_000,
+             datetime(2026, 3, 5), None, 20_000_000, '2026-03'),
+            ('888', int(TARGET), '2900', 15_000_000,
+             datetime(2026, 4, 12), None, 15_000_000, '2026-04'),
+        ]
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        repo = CommissionRepository()
+        result = repo.get_unpaid_bill_amounts(2026, 4)
+
+        # The March bill is unpaid but filtered out (period scoping).
+        assert PRIOR not in result
+        assert TARGET in result
+
+    @patch("app.modules.commission.repository.get_oracle_connection")
+    def test_get_unpaid_bill_amounts_partial_payment_keeps_residual(
+        self, mock_get_conn, mock_queries_cls
+    ):
+        """Partial payments leave residual in the payable map with the
+        correct unpaid_ratio for proportional withholding."""
+        from datetime import datetime
+        BILL = '400000000000000001'
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.description = [
+            ('CUSTOMER_SID',), ('DOC_SID',), ('DOC_NO',), ('CHARGE_AMOUNT',),
+            ('POST_DATE',), ('REF_SALE_SID',), ('SALE_TOTAL_AMT',), ('POST_MONTH',),
+        ]
+        # Bill 100M with REF-targeted payment of 30M → 70M remaining.
+        mock_cursor.fetchall.return_value = [
+            ('999', int(BILL), '2950', 100_000_000,
+             datetime(2026, 4, 1), None, 100_000_000, '2026-04'),
+            ('999', 500,       '4500', -30_000_000,
+             datetime(2026, 4, 20), int(BILL), 0,    '2026-04'),
+        ]
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        repo = CommissionRepository()
+        result = repo.get_unpaid_bill_amounts(2026, 4)
+
+        assert BILL in result
+        assert result[BILL]['remaining_unpaid'] == 70_000_000
+        assert result[BILL]['unpaid_ratio'] == 0.7
+
+    @patch("app.modules.commission.repository.get_oracle_connection")
+    def test_get_unpaid_bill_amounts_connection_failure_returns_empty(
+        self, mock_get_conn, mock_queries_cls
+    ):
+        """Repository returns empty dict instead of raising on conn failure."""
+        mock_get_conn.return_value = None
+        repo = CommissionRepository()
+        result = repo.get_unpaid_bill_amounts(2026, 4)
+        assert result == {}
+
+    def test_replay_charge_ledger_static_helper(self, mock_queries_cls):
+        """The ledger-replay helper is pure and side-effect-free; test it
+        directly without DB mocking for a tight unit on the matching rules."""
+        events = [
+            {'doc_sid': 'A', 'doc_no': '1', 'charge_amount': 100, 'ref_sale_sid': None,
+             'sale_total_amt': 100, 'post_month': '2026-04'},
+            {'doc_sid': 'B', 'doc_no': '2', 'charge_amount': 200, 'ref_sale_sid': None,
+             'sale_total_amt': 200, 'post_month': '2026-04'},
+            # Payment with REF→B settles B; FIFO leaves A open.
+            {'doc_sid': 'P1', 'doc_no': '3', 'charge_amount': -200, 'ref_sale_sid': 'B',
+             'sale_total_amt': 0, 'post_month': '2026-04'},
+        ]
+        bills, _payments = CommissionRepository._replay_charge_ledger(events)
+        assert bills['A']['remaining'] == 100
+        assert bills['B']['remaining'] == 0
