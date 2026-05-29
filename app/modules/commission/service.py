@@ -615,6 +615,36 @@ class CommissionService:
                 )
             out['over_target'] = ot_unpaid_rev * rates['over_100']
 
+        # ── Non-fashion categories share their compute with the exception
+        #     path. See _withheld_for_non_fashion for jewelry / vhernier /
+        #     rosa_maria / hand_carry / suitcase / home_decor breakdown.
+        out.update(self._withheld_for_non_fashion(
+            hand_carry_df=hand_carry_df,
+            suitcase_df=suitcase_df,
+            home_decor_df=home_decor_df,
+            jewelry_df=jewelry_df,
+        ))
+        return out
+
+    @staticmethod
+    def _withheld_for_non_fashion(
+        hand_carry_df, suitcase_df, home_decor_df, jewelry_df,
+    ) -> Dict[str, float]:
+        """Compute withholding for the categories whose rate logic is
+        identical between the main path and the exception path.
+
+        Returns dict with keys: jewelry (total), vhernier, rosa_maria,
+        hand_carry, suitcase, home_decor.
+        """
+        result: Dict[str, float] = {
+            'jewelry':    0.0,
+            'vhernier':   0.0,
+            'rosa_maria': 0.0,
+            'hand_carry': 0.0,
+            'suitcase':   0.0,
+            'home_decor': 0.0,
+        }
+
         # ── Jewelry (VHN 1% / ROM-EAR 3% / other 2%) ────────────────────
         if len(jewelry_df) > 0:
             vhn = jewelry_df[jewelry_df['vendor_code'] == 'VHN']
@@ -624,16 +654,16 @@ class CommissionService:
             ]
             other_mask = ~jewelry_df.index.isin(vhn.index) & ~jewelry_df.index.isin(rom_ear.index)
             other = jewelry_df[other_mask]
-            out['vhernier'] = float(
+            result['vhernier'] = float(
                 (vhn['revenue_before_vat'] * vhn['unpaid_ratio']).sum()
             ) * JEWELRY_RATE_VHN
-            out['rosa_maria'] = float(
+            result['rosa_maria'] = float(
                 (rom_ear['revenue_before_vat'] * rom_ear['unpaid_ratio']).sum()
             ) * JEWELRY_RATE_ROM_EARRINGS
             jw_other_withheld = float(
                 (other['revenue_before_vat'] * other['unpaid_ratio']).sum()
             ) * JEWELRY_RATE_OTHER
-            out['jewelry'] = out['vhernier'] + out['rosa_maria'] + jw_other_withheld
+            result['jewelry'] = result['vhernier'] + result['rosa_maria'] + jw_other_withheld
 
         # ── Hand carry (per-vendor rates on with-VAT revenue) ───────────
         if len(hand_carry_df) > 0:
@@ -650,21 +680,21 @@ class CommissionService:
                     hc_total += weighted_rev * HC_RATE_2PCT
                 else:
                     hc_total += weighted_rev * HC_RATE_1PCT
-            out['hand_carry'] = hc_total
+            result['hand_carry'] = hc_total
 
         # ── Suitcase (flat per item × unpaid_ratio) ─────────────────────
         if len(suitcase_df) > 0:
-            out['suitcase'] = float(
+            result['suitcase'] = float(
                 (suitcase_df['unpaid_ratio'] * SUITCASE_FLAT_AMOUNT).sum()
             )
 
         # ── Home decor (flat 1% on revenue_before_vat) ──────────────────
         if len(home_decor_df) > 0:
-            out['home_decor'] = float(
+            result['home_decor'] = float(
                 (home_decor_df['revenue_before_vat'] * home_decor_df['unpaid_ratio']).sum()
             ) * HOME_DECOR_RATE
 
-        return out
+        return result
 
     def calculate_personal_commissions(
         self,
@@ -827,29 +857,25 @@ class CommissionService:
                 exc_total = exc_flat_commission + hc['total'] + sc + hd + jw['total']
 
                 # CR #59: withholding for the exception employee.
-                # Reuse the standard withholding helper for hand_carry / suitcase
-                # / home_decor / jewelry. The fashion line is unique to the
-                # exception (flat 0.7% on qualifying-customer non-jewelry), so
-                # we compute it directly here.
-                exc_fashion_withheld = float(
-                    (qualifying_sales['revenue_before_vat'] * qualifying_sales['unpaid_ratio']).sum()
-                ) * flat_rate
-                exc_withheld = self._calculate_withheld_by_category(
-                    employee_sales_df=exc_sales_df,
-                    non_jewelry_fp_df=exc_sales_df.iloc[0:0],   # not used in exception path
-                    non_jewelry_disc_df=exc_sales_df.iloc[0:0],
-                    hand_carry_df=separated['hand_carry'],
-                    suitcase_df=separated['suitcase'],
-                    home_decor_df=separated['home_decor'],
-                    jewelry_df=separated['jewelry'],
-                    rates=STANDARD_RATES,           # placeholder; fashion path disabled below
-                    achievement_rate=0,             # disables fashion FP/MD withholding
-                    fp_non_jewelry_after_target=0,
-                    target_bill_items_local=None,
-                    bills_after_target_local=None,
-                    hand_carry_upcs=hand_carry_upcs,
-                )
-                exc_withheld['fashion_fp'] = exc_fashion_withheld
+                # The exception path uses a flat 0.7% on qualifying-customer
+                # non-jewelry sales (not the standard tier-based fashion path),
+                # so we compute fashion_fp withholding directly. The other
+                # categories (jewelry / hand_carry / suitcase / home_decor)
+                # use the same rules as the main path, so we delegate those
+                # to the focused per-category helpers.
+                exc_withheld = {
+                    'fashion_fp':  float(
+                        (qualifying_sales['revenue_before_vat'] * qualifying_sales['unpaid_ratio']).sum()
+                    ) * flat_rate,
+                    'fashion_md':  0.0,
+                    'over_target': 0.0,
+                    **self._withheld_for_non_fashion(
+                        hand_carry_df=separated['hand_carry'],
+                        suitcase_df=separated['suitcase'],
+                        home_decor_df=separated['home_decor'],
+                        jewelry_df=separated['jewelry'],
+                    ),
+                }
                 exc_withheld_total = sum(exc_withheld.values())
                 exc_payout = exc_total - exc_withheld_total
 
@@ -970,6 +996,14 @@ class CommissionService:
 
             # Find full-price NON-JEWELRY sales after reaching 100% target (for >100% tier bonus)
             fp_non_jewelry_after_target = 0
+            # CR #59: explicitly initialise the OT-related DataFrames so the
+            # withholding helper below can always reference them — they get
+            # populated only inside `if achievement_rate > 100`, but we always
+            # pass them down (previously fetched via `locals().get(...)`,
+            # which silently returned None and broke if the names ever
+            # changed). Now the contract is explicit.
+            target_bill_items = None
+            fp_non_jewelry_after_df = None
 
             if achievement_rate > 100:
                 # Find the BILL where target was first reached or exceeded
@@ -1139,8 +1173,8 @@ class CommissionService:
                 rates=rates,
                 achievement_rate=achievement_rate,
                 fp_non_jewelry_after_target=fp_non_jewelry_after_target,
-                target_bill_items_local=locals().get('target_bill_items'),
-                bills_after_target_local=locals().get('fp_non_jewelry_after_df'),
+                target_bill_items_local=target_bill_items,
+                bills_after_target_local=fp_non_jewelry_after_df,
                 hand_carry_upcs=local_hand_carry_upcs,
             )
             withheld_total = sum(withheld.values())
@@ -1779,14 +1813,22 @@ class CommissionService:
                     # CR #59 Phase B: AR payable / withholding fields.
                     # withheld_by_category / released_by_category come through as
                     # dicts from the combined DataFrame; serialise per-category
-                    # values as ints. Zero-valued keys are filtered out at
-                    # compute time so the dict only carries non-zero entries.
+                    # values as ints. We compute `withheld` total as the sum of
+                    # the int-cast category values so the invariant
+                    # `withheld == sum(withheld_by_category.values())` always
+                    # holds — avoids ±1 rounding drift between a separately-cast
+                    # total and the sum of independently-cast categories.
                     withheld_by_cat = row.get('withheld_by_category') or {}
                     if not isinstance(withheld_by_cat, dict):
                         withheld_by_cat = {}
                     released_by_cat = row.get('released_by_category') or {}
                     if not isinstance(released_by_cat, dict):
                         released_by_cat = {}
+                    withheld_by_cat_int = {k: int(v) for k, v in withheld_by_cat.items()}
+                    released_by_cat_int = {k: int(v) for k, v in released_by_cat.items()}
+                    withheld_total_int = sum(withheld_by_cat_int.values())
+                    released_total_int = sum(released_by_cat_int.values())
+                    employee_total_int = int(row.get('total_handout_commission', 0) or 0)
 
                     employees_response.append({
                         'employee_code': row['employee_code'],
@@ -1806,13 +1848,13 @@ class CommissionService:
                             'home_decor':            int(row.get('personal_commission_home_decor', 0) or 0),
                             'store_total':           int(row.get('total_store_commission', 0) or 0),
                             'personal_total':        int(row.get('personal_commission_total', 0) or 0),
-                            'employee_total':        int(row.get('total_handout_commission', 0) or 0),
+                            'employee_total':        employee_total_int,
                             # CR #59 Phase B
-                            'withheld':              int(row.get('withheld', 0) or 0),
-                            'withheld_by_category':  {k: int(v) for k, v in withheld_by_cat.items()},
-                            'released':              int(row.get('released', 0) or 0),
-                            'released_by_category':  {k: int(v) for k, v in released_by_cat.items()},
-                            'payout':                int(row.get('payout', 0) or 0),
+                            'withheld':              withheld_total_int,
+                            'withheld_by_category':  withheld_by_cat_int,
+                            'released':              released_total_int,
+                            'released_by_category':  released_by_cat_int,
+                            'payout':                employee_total_int - withheld_total_int + released_total_int,
                         }
                     })
 
@@ -2000,14 +2042,22 @@ class CommissionService:
                     # CR #59 Phase B: AR payable / withholding fields.
                     # withheld_by_category / released_by_category come through as
                     # dicts from the combined DataFrame; serialise per-category
-                    # values as ints. Zero-valued keys are filtered out at
-                    # compute time so the dict only carries non-zero entries.
+                    # values as ints. We compute `withheld` total as the sum of
+                    # the int-cast category values so the invariant
+                    # `withheld == sum(withheld_by_category.values())` always
+                    # holds — avoids ±1 rounding drift between a separately-cast
+                    # total and the sum of independently-cast categories.
                     withheld_by_cat = row.get('withheld_by_category') or {}
                     if not isinstance(withheld_by_cat, dict):
                         withheld_by_cat = {}
                     released_by_cat = row.get('released_by_category') or {}
                     if not isinstance(released_by_cat, dict):
                         released_by_cat = {}
+                    withheld_by_cat_int = {k: int(v) for k, v in withheld_by_cat.items()}
+                    released_by_cat_int = {k: int(v) for k, v in released_by_cat.items()}
+                    withheld_total_int = sum(withheld_by_cat_int.values())
+                    released_total_int = sum(released_by_cat_int.values())
+                    employee_total_int = int(row.get('total_handout_commission', 0) or 0)
 
                     employees_response.append({
                         'employee_code': row['employee_code'],
@@ -2027,13 +2077,13 @@ class CommissionService:
                             'home_decor':            int(row.get('personal_commission_home_decor', 0) or 0),
                             'store_total':           int(row.get('total_store_commission', 0) or 0),
                             'personal_total':        int(row.get('personal_commission_total', 0) or 0),
-                            'employee_total':        int(row.get('total_handout_commission', 0) or 0),
+                            'employee_total':        employee_total_int,
                             # CR #59 Phase B
-                            'withheld':              int(row.get('withheld', 0) or 0),
-                            'withheld_by_category':  {k: int(v) for k, v in withheld_by_cat.items()},
-                            'released':              int(row.get('released', 0) or 0),
-                            'released_by_category':  {k: int(v) for k, v in released_by_cat.items()},
-                            'payout':                int(row.get('payout', 0) or 0),
+                            'withheld':              withheld_total_int,
+                            'withheld_by_category':  withheld_by_cat_int,
+                            'released':              released_total_int,
+                            'released_by_category':  released_by_cat_int,
+                            'payout':                employee_total_int - withheld_total_int + released_total_int,
                         }
                     })
 

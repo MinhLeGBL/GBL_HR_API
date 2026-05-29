@@ -1325,6 +1325,47 @@ class TestEmployeeCommissionException:
         assert row['commission_over_100'] == 0
         assert row['total'] == 10_000_000 * 0.007
 
+    def test_exception_path_withholds_proportionally(self, service, mock_repo):
+        """CR #59: exception employee's fashion_fp (flat 0.7%) is also subject
+        to withholding when the bill is unpaid. A bill that's 40% unpaid causes
+        40% of the exception flat-rate commission to be withheld; jewelry /
+        hand_carry / etc on the same bill withhold via the shared non-fashion
+        helper. Covers the exception-path withholding code that was previously
+        a kwargs-disable hack on _calculate_withheld_by_category."""
+        sales_df = self._make_sales_df([
+            # Non-jewelry to qualifying customer → exception flat 0.7%
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.QUALIFYING_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 11_000_000, 10_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        # BILL1 is 40% unpaid at end of month.
+        mock_repo.get_unpaid_bill_amounts.return_value = {
+            'BILL_SID_BILL1': {
+                'doc_no': 'BILL1', 'customer_sid': self.QUALIFYING_CUSTOMER,
+                'original_charge': 11_000_000, 'remaining_unpaid': 4_400_000,
+                'sale_total_amt': 11_000_000, 'unpaid_ratio': 0.4,
+            },
+        }
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        # Gross commission stays at 70,000 (0.7% of 10M).
+        assert row['commission_fashion_fp'] == 10_000_000 * 0.007
+        # Withheld = 40% of the gross commission.
+        assert row['withheld'] == 10_000_000 * 0.007 * 0.4    # 28,000
+        assert row['withheld_by_category'] == {'fashion_fp': 10_000_000 * 0.007 * 0.4}
+        # payout = total − withheld + released; released is 0 in Phase B.
+        assert row['payout'] == row['total'] - row['withheld']
+
     def test_non_qualifying_customer_no_commission(self, service, mock_repo):
         """Non-jewelry sales to other customers earn zero FP/discount commission."""
         sales_df = self._make_sales_df([
