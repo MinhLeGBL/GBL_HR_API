@@ -3,7 +3,14 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
-## [1.0.3] — 2026-05-29
+## [2.0.0] — 2026-05-29
+
+MAJOR bump: introduces the `withheld` / `payout` concept on every commission
+result. Previously the only "amount the employee receives" was `employee_total`;
+that is now the **gross** value, and the new `payout` field is the actual
+take-home after AR-payable withholding. Existing clients that read only
+`employee_total` keep working but lose the new accounting nuance — hence the
+MAJOR bump even though the response is technically additive.
 
 ### Added — CR #59 Phase B: AR payable detection + commission withholding
 
