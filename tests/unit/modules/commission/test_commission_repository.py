@@ -166,7 +166,8 @@ class TestCommissionRepository:
         # Columns should be lowercased
         assert "sale_id" in df.columns
         assert "employee_username" in df.columns
-        assert df.iloc[0]["sale_id"] == 1
+        # sale_id is stringified to preserve 18-digit Oracle SID precision
+        assert df.iloc[0]["sale_id"] == "1"
         assert df.iloc[1]["employee_username"] == "jane.smith"
         # upc_clean column should be added
         assert "upc_clean" in df.columns
@@ -209,6 +210,74 @@ class TestCommissionRepository:
         params = call_args[0][1]
         assert params["start_date"] == "2025-06-01 00:00:00"
         assert params["end_date"] == "2025-06-30 23:59:59"
+
+    @patch("app.modules.commission.repository.get_oracle_connection")
+    def test_get_all_sales_data_preserves_18_digit_sid_precision(
+        self, mock_get_conn, mock_queries_cls
+    ):
+        """Regression test for v1.0.2: 18-digit Oracle SIDs must round-trip
+        exactly even when LEFT JOIN walk-ins put NULLs in the column.
+
+        Pandas promotes any numeric column with NULLs to float64, whose
+        ~15-digit mantissa silently rounds 18-digit SIDs (this was the
+        actual bug that zeroed GL018's flat-rate commission because the
+        corrupted SID stopped matching the EMPLOYEE_COMMISSION_EXCEPTIONS
+        dict key). The fix stringifies SIDs *before* pandas touches them,
+        so precision can't be lost regardless of NULLs.
+        """
+        # The exact SID hardcoded in EMPLOYEE_COMMISSION_EXCEPTIONS, plus
+        # a customer_sid and sale_id of the same magnitude. The walk-in
+        # row (row 2) has NULL employee/customer SIDs — this is the case
+        # that triggered the float64 promotion in real Oracle data.
+        EXACT_EMPLOYEE_SID = "690036963000170943"
+        EXACT_CUSTOMER_SID = "690837303000121462"
+        EXACT_SALE_ID      = "778100000000000123"
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.description = [
+            ("SALE_ID",), ("UPC",), ("BILL_NUMBER",), ("DOC_STORE_CODE",),
+            ("SALE_DATE",), ("SALE_TIME",), ("CUSTOMER_SID",),
+            ("EMPLOYEE_SID",), ("EMPLOYEE_USERNAME",), ("STORE_CODE",),
+            ("VENDOR_CODE",), ("IS_JEWELRY",), ("CATEGORY",), ("DEPARTMENT",),
+            ("DISCOUNT_RATE",), ("REVENUE_WITH_VAT",), ("REVENUE_BEFORE_VAT",),
+        ]
+        # oracledb returns Python int for NUMBER columns; the fix must
+        # stringify these before they hit pandas.
+        mock_cursor.fetchall.return_value = [
+            (int(EXACT_SALE_ID), "111", "D001", "S01", "2026-04-15", "10:30:00",
+             int(EXACT_CUSTOMER_SID), int(EXACT_EMPLOYEE_SID), "linh.luu",
+             "RWR", "GUC", 0, "Bag", "WRTW", 0.0, 11000, 10000),
+            (int(EXACT_SALE_ID) + 1, "222", "D002", "S01", "2026-04-16", "14:00:00",
+             None, None, None,
+             None, "VND", 0, "Shoes", "WSHOE", 0.0, 5500, 5000),
+        ]
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        repo = CommissionRepository()
+        df = repo.get_all_sales_data(2026, 4)
+
+        # SID columns must be object dtype carrying strings — never float64.
+        assert df["sale_id"].dtype == object
+        assert df["employee_sid"].dtype == object
+        assert df["customer_sid"].dtype == object
+
+        # Exact value preservation — string comparison can't be defeated by
+        # float64 precision loss the way int comparison was.
+        assert df.iloc[0]["sale_id"]      == EXACT_SALE_ID
+        assert df.iloc[0]["employee_sid"] == EXACT_EMPLOYEE_SID
+        assert df.iloc[0]["customer_sid"] == EXACT_CUSTOMER_SID
+
+        # The dict-membership check that originally failed for GL018.
+        exception_dict = {EXACT_EMPLOYEE_SID: "expected-match"}
+        assert df.iloc[0]["employee_sid"] in exception_dict
+
+        # NULL SIDs from the walk-in row survive as None — not stringified
+        # to "None", not coerced to NaN-then-rounded.
+        assert df.iloc[1]["employee_sid"] is None
+        assert df.iloc[1]["customer_sid"] is None
 
     # ------------------------------------------------------------------ #
     #  get_employee_info

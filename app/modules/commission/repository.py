@@ -134,6 +134,19 @@ class CommissionRepository:
 
         results = self.execute_query(self.queries.ALL_SALES_DATA, parameters)
 
+        # Oracle SIDs are 18-digit integers — past float64's ~15-digit
+        # mantissa. The moment a single LEFT JOIN walk-in produces a NULL
+        # in a SID column, pandas promotes the whole column to float64 and
+        # every SID in it gets silently rounded (off by up to ~100). That
+        # breaks exact-value lookups against hardcoded SIDs (notably
+        # `EMPLOYEE_COMMISSION_EXCEPTIONS`). Stringify SIDs before pandas
+        # ever sees them so the column lands as object dtype with intact
+        # values; downstream code compares string-to-string.
+        for row in results:
+            for field in ('SALE_ID', 'EMPLOYEE_SID', 'CUSTOMER_SID'):
+                if row.get(field) is not None:
+                    row[field] = str(row[field])
+
         df = pd.DataFrame(results)
 
         if df.empty:
@@ -142,16 +155,6 @@ class CommissionRepository:
         df.columns = df.columns.str.lower()
         if 'upc_clean' not in df.columns and 'upc' in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
-
-        # Oracle SIDs are 18-digit integers that overflow float64's ~15-digit
-        # mantissa. Pandas defaults to float64 when a numeric column has any
-        # NULLs (LEFT JOIN → walk-ins), which silently rounds the last few
-        # digits. That breaks exact-int lookups against hardcoded SIDs (e.g.
-        # EMPLOYEE_COMMISSION_EXCEPTIONS). Cast to nullable Int64 so the
-        # exact value survives even with NaN.
-        for col in ('sale_id', 'employee_sid', 'customer_sid'):
-            if col in df.columns:
-                df[col] = df[col].astype('Int64')
 
         # Only COSM department items with HEA vendor are not eligible for commission.
         # Re-attribute to SYSADMIN so they count toward store revenue total

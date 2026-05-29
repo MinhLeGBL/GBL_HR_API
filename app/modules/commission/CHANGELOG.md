@@ -6,16 +6,22 @@ All notable changes to this module. Versioning per
 ## [1.0.2] — 2026-05-25
 
 ### Fixed
-- Preserve Oracle SID precision in `get_all_sales_data`. Oracle SIDs are
-  18-digit integers; pandas was defaulting `sale_id`, `employee_sid`, and
-  `customer_sid` to `float64` (because LEFT JOINs introduce NaNs), which
-  silently rounded the last few digits. This broke exact-int lookups
-  against hardcoded SIDs — notably the `EMPLOYEE_COMMISSION_EXCEPTIONS`
-  dict, causing the one exception employee (GL018) to fall through to
-  the standard achievement-tier path and earn 0 fashion FP commission
-  instead of their flat-rate 0.7% on qualifying-customer sales.
-  Fix: cast all three SID columns to pandas' nullable `Int64` right
-  after building the DataFrame.
+- Preserve Oracle SID precision in `get_all_sales_data` by stringifying
+  SIDs at the row-dict level **before** they enter pandas. Oracle SIDs
+  are 18-digit integers; the moment a single LEFT JOIN walk-in produces
+  a NULL in `sale_id` / `employee_sid` / `customer_sid`, pandas promotes
+  the whole column to `float64` and every SID in it gets silently rounded
+  (off by up to ~100). The corrupted SID then stops matching exact
+  hardcoded values — notably the `EMPLOYEE_COMMISSION_EXCEPTIONS` dict,
+  which is the only known production-visible failure: GL018 fell through
+  to the standard achievement-tier path and earned 0 fashion FP
+  commission instead of their flat-rate 0.7% on qualifying-customer
+  sales (~2.1M VND/month).
+- `EMPLOYEE_COMMISSION_EXCEPTIONS` keys and `qualifying_customer_sid`
+  are now stored as strings to match the stringified SID column.
+- Stringifying *before* the DataFrame constructor (rather than casting
+  after) is what actually fixes the bug — casting after pandas has
+  already promoted to float64 cannot recover the lost digits.
 
 ## [1.0.1] — 2026-05-20
 
