@@ -1,5 +1,5 @@
 """
-One-time backfill for the handcarry catalog (CR #58).
+One-time backfill for the handcarry catalog (CR #58 / v0.2.2).
 
 The pre-CR-58 `rps.carrier_item` was a flat (sid, scan_upc) flag list.
 After `python scripts/database/init_db.py` adds the new columns, the
@@ -8,17 +8,24 @@ fills them in:
 
 - Product info (description, brand, category, color, size, season,
   price_before_vat, price_after_vat) → joined from Oracle by UPC.
-- `quantity_imported` → set equal to the UPC's **lifetime sold qty**.
-  If the UPC has zero sales, default to 1 (per CR #58 answer:
-  "we treat old import = sale, if there are no sale then we leave
-  import value at 1").
+- `quantity_imported` → for Oracle-known UPCs, set equal to the UPC's
+  **lifetime received qty** from Oracle's posted receiving vouchers
+  (v0.2.2 — same source Oracle uses for non-hand-carry items). Floors
+  to 1 if the UPC has zero receiving records. For orphan UPCs that
+  Oracle doesn't know about, default to 1.
+- `quantity_sold` (stored override) → set to `quantity_imported` for
+  orphan UPCs that Oracle no longer knows about (pre-Oracle items sold
+  before the migration cut-off). This forces them to display as
+  sold-out (remaining = 0) instead of the live Oracle join's 0.
 
 Idempotent: only touches rows where every CR-58 column is NULL. Re-runs
-are no-ops.
+are no-ops. Use `--force` to re-backfill every row (e.g. to correct
+existing rows after the v0.2.2 received-qty rule change).
 
 Usage:
     python scripts/database/backfill_handcarry.py
     python scripts/database/backfill_handcarry.py --dry-run
+    python scripts/database/backfill_handcarry.py --force
 """
 import argparse
 import os
@@ -63,18 +70,29 @@ def main():
         if args.force:
             cur.execute('SELECT sid, scan_upc FROM rps.carrier_item ORDER BY sid')
         else:
+            # Pick up:
+            #   (a) rows that have never been backfilled (every column NULL); or
+            #   (b) orphan rows from the previous backfill that still have
+            #       no quantity_sold override set. The orphan-detection
+            #       criterion mirrors the rule used downstream: no
+            #       description AND no brand AND quantity_sold IS NULL.
             cur.execute("""
                 SELECT sid, scan_upc
                 FROM rps.carrier_item
-                WHERE description       IS NULL
-                  AND brand             IS NULL
-                  AND category          IS NULL
-                  AND color             IS NULL
-                  AND size              IS NULL
-                  AND season            IS NULL
-                  AND quantity_imported IS NULL
-                  AND price_before_vat  IS NULL
-                  AND price_after_vat   IS NULL
+                WHERE (
+                        description       IS NULL
+                    AND brand             IS NULL
+                    AND category          IS NULL
+                    AND color             IS NULL
+                    AND size              IS NULL
+                    AND season            IS NULL
+                    AND price_before_vat  IS NULL
+                    AND price_after_vat   IS NULL
+                )
+                   OR (
+                        description IS NULL AND brand IS NULL
+                    AND quantity_sold IS NULL
+                )
                 ORDER BY sid
             """)
         candidates = cur.fetchall()
@@ -89,24 +107,42 @@ def main():
 
     upcs = [int(r[1]) for r in candidates]
 
-    # 2. Pull product info + lifetime sold from Oracle
+    # 2. Pull product info + lifetime received from Oracle
     print(f'Querying Oracle product info for {len(upcs)} UPCs...')
     product_info = HandCarryService.fetch_oracle_product_info(upcs)
     print(f'  matched {len(product_info)} / {len(upcs)} in Oracle')
 
-    print(f'Querying Oracle lifetime sold qty for {len(upcs)} UPCs...')
-    sold_by_upc = HandCarryService._lifetime_sold_for(upcs)
-    print(f'  matched {len(sold_by_upc)} / {len(upcs)} have sales history')
+    print(f'Querying Oracle lifetime received qty for {len(upcs)} UPCs...')
+    received_by_upc = HandCarryService._lifetime_received_for(upcs)
+    print(f'  matched {len(received_by_upc)} / {len(upcs)} have receiving vouchers')
 
     # 3. Compute the update tuple per row
     updates = []  # list of (description, brand, category, color, size,
-                  #          season, quantity_imported, price_before_vat,
-                  #          price_after_vat, sid)
+                  #          season, quantity_imported, quantity_sold,
+                  #          price_before_vat, price_after_vat, sid)
+    orphan_count = 0
     for sid, scan_upc in candidates:
         upc = int(scan_upc)
-        info = product_info.get(upc, {})
-        sold = sold_by_upc.get(upc, 0)
-        qty_imp = sold if sold > 0 else 1   # ← CR #58 answer
+        info = product_info.get(upc)
+
+        # Orphan = Oracle has no master record for this UPC.
+        # For orphans, freeze quantity_sold = quantity_imported = 1 so
+        # they display as sold-out (remaining = 0).
+        # For Oracle-matched items, drive quantity_imported from the
+        # receiving voucher sum (v0.2.2 — matches how Oracle tracks
+        # imports for every other item). Floor at 1 so the row never
+        # shows imported=0.
+        is_orphan = info is None
+        if is_orphan:
+            qty_imp = 1
+            quantity_sold_override = 1
+            orphan_count += 1
+        else:
+            received = received_by_upc.get(upc, 0)
+            qty_imp = max(1, received)
+            quantity_sold_override = None
+
+        info = info or {}
         updates.append((
             info.get('description'),
             info.get('brand'),
@@ -115,24 +151,23 @@ def main():
             info.get('size'),
             info.get('season'),
             qty_imp,
+            quantity_sold_override,
             info.get('price_before_vat'),
             info.get('price_after_vat'),
             int(sid),
         ))
 
     # 4. Summary
-    matched = sum(1 for u in updates if u[0] or u[1] or u[2] or u[3] or u[4] or u[5])
     print(f'\nRows about to be updated:        {len(updates)}')
-    print(f'  with any Oracle product info:  {matched}')
-    print(f'  with no Oracle match:          {len(updates) - matched}')
-    print(f'  qty_imported = sold_qty (>0):  {sum(1 for u in updates if u[6] > 1 or (u[6] == 1 and sold_by_upc.get(int(candidates[i][1]), 0) > 0 for i in range(len(candidates))))}'  # noqa
-          if False else '')
+    print(f'  with Oracle product info:      {len(updates) - orphan_count}')
+    print(f'  orphans (no Oracle match):     {orphan_count}')
+    print(f'  → orphans get quantity_sold = quantity_imported (sold-out)')
 
     if args.dry_run:
         print('\n(dry-run; nothing written)')
-        # Show a few sample rows
         for u in updates[:3]:
-            print(f'  sid={u[-1]} → qty_imp={u[6]}, brand={u[1]!r}, season={u[5]!r}, price_after_vat={u[8]}')
+            print(f'  sid={u[-1]} → qty_imp={u[6]}, qty_sold_override={u[7]}, '
+                  f'brand={u[1]!r}')
         return
 
     # 5. Apply
@@ -152,6 +187,7 @@ def main():
                 size              = %s,
                 season            = %s,
                 quantity_imported = %s,
+                quantity_sold     = %s,
                 price_before_vat  = %s,
                 price_after_vat   = %s
             WHERE sid = %s

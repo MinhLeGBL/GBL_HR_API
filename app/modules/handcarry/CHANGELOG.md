@@ -3,6 +3,58 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.2.2] — 2026-05-25
+
+### Changed
+- `quantity_imported` for Oracle-known UPCs now comes from Oracle's
+  posted receiving vouchers (`rps.voucher` + `rps.vou_item`,
+  `vou_class=0, vou_type=0, status=4`) — the same source Oracle uses
+  for non-hand-carry inventory. Previously the v0.2.0 backfill used
+  lifetime sold qty, which under-reported imported counts whenever
+  some units were still on hand. Floors at 1 so the row never shows
+  imported=0.
+- Orphan UPCs (no Oracle master record) keep the v0.2.1 behaviour —
+  `quantity_imported = quantity_sold = 1` so they display as sold-out.
+
+### Added
+- `HandCarryQueries.ORACLE_LIFETIME_RECEIVED` — per-UPC sum of receiving
+  voucher qty.
+- `HandCarryService._lifetime_received_for(upcs)` helper, mirrors
+  `_lifetime_sold_for`.
+
+### Data migration
+- One-off reconciliation against the canonical hand-carry template
+  (`document/template/LIST ITEM TỔNG HỢP HÀNG CHA.xlsx`):
+  - Deleted 83 junk rows that had been mis-imported as UPCs (80 Excel
+    date serials in the 40K–50K range, plus 5 small numbers that were
+    likely TK declaration numbers). Two rows in those numeric ranges
+    were preserved because Oracle confirmed they're real products
+    (UPC 27111 Fornasetti, UPC 45629 Marc Jacobs).
+  - Inserted 126 new UPCs from the template — all Oracle-matched, no
+    orphans.
+- Re-ran `backfill_handcarry.py --force` with the new received-qty
+  rule to correct `quantity_imported` for every Oracle-known row.
+
+## [0.2.1] — 2026-05-25
+
+### Changed
+- Added a stored `quantity_sold` column to `rps.carrier_item` (nullable)
+  that **takes precedence over the live Oracle join** when populated.
+  Used for orphan UPCs — items in our hand-carry catalog that Oracle
+  doesn't have a master record for (pre-Oracle items sold before the
+  late-2023 migration cut-off, 573 of them in our dev DB).
+- The one-time backfill script now sets `quantity_sold = quantity_imported`
+  for those orphan rows, so they display as sold-out (remaining = 0)
+  instead of "imported = N, sold = 0, remaining = N".
+- Active items (those Oracle still knows about) keep `quantity_sold`
+  NULL in storage — the live Oracle lifetime-sales join continues to
+  drive the response value, so new sales keep updating in real time.
+
+### API
+- No contract change — `GET /api/v1/handcarry` still returns
+  `quantity_sold` per item; the value just has a different source for
+  orphans.
+
 ## [0.2.0] — 2026-05-22
 
 ### Added (CR #58)

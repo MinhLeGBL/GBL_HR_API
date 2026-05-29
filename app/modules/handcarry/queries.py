@@ -1,15 +1,20 @@
 """
 Oracle SQL queries for the handcarry module.
 
-Two queries are needed across both `list_items` (live join when GET runs)
+Three queries are needed across both `list_items` (live join when GET runs)
 and the one-time `backfill_handcarry.py` migration:
 
-  - ORACLE_PRODUCT_INFO   per UPC: description, brand, category, colour,
-                          size, season, selling price.
-  - ORACLE_LIFETIME_SOLD  per UPC: sum of all sold qty (net of returns)
-                          across all time. Lifetime per CR #58 spec.
+  - ORACLE_PRODUCT_INFO     per UPC: description, brand, category, colour,
+                            size, season, selling price.
+  - ORACLE_LIFETIME_SOLD    per UPC: sum of all sold qty (net of returns)
+                            across all time. Lifetime per CR #58 spec.
+  - ORACLE_LIFETIME_RECEIVED per UPC: sum of all received qty from posted
+                            receiving vouchers. Drives the stored
+                            `quantity_imported` for Oracle-known UPCs
+                            (v0.2.2 — the same source Oracle uses for
+                            non-hand-carry inventory).
 
-Both queries accept a comma-separated bind-safe UPC list via the
+All queries accept a comma-separated bind-safe UPC list via the
 `{upcs}` placeholder. The caller is responsible for validating that
 every value is an integer before interpolation.
 """
@@ -55,6 +60,25 @@ class HandCarryQueries:
           AND d.receipt_type IN (0, 1)
           AND d.status = 4
           AND di.item_type IN (1, 2)
+          AND TO_CHAR(i.upc) IN ({upcs})
+        GROUP BY TO_CHAR(i.upc)
+    """
+
+    # Lifetime received qty per UPC. Posted receiving vouchers only
+    # (vou_class=0 receiving, vou_type=0, slip_flag=0, held=0, status=4).
+    # Same filter set the custom_reports size FIFO uses.
+    ORACLE_LIFETIME_RECEIVED = """
+        SELECT
+            TO_CHAR(i.upc) AS upc,
+            SUM(vi.qty)    AS quantity_received
+        FROM rps.voucher vh
+        JOIN rps.vou_item vi      ON vi.vou_sid = vh.sid
+        JOIN rps.invn_sbs_item i  ON i.sid = vi.item_sid
+        WHERE vh.vou_class = 0
+          AND vh.slip_flag = 0
+          AND vh.held = 0
+          AND vh.status = 4
+          AND vh.vou_type = 0
           AND TO_CHAR(i.upc) IN ({upcs})
         GROUP BY TO_CHAR(i.upc)
     """

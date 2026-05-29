@@ -13,12 +13,14 @@ def _mock_conn(fetchall=None, fetchone=None):
     return conn, cur
 
 
-# Full 11-column row layout matching `_CATALOG_COLUMNS` in service.py
+# Full 12-column row layout matching `_CATALOG_COLUMNS` in service.py
 def _catalog_row(sid, scan_upc, description=None, brand=None, category=None,
                  color=None, size=None, season=None, quantity_imported=None,
+                 quantity_sold=None,
                  price_before_vat=None, price_after_vat=None):
     return (sid, scan_upc, description, brand, category, color, size, season,
-            quantity_imported, price_before_vat, price_after_vat)
+            quantity_imported, quantity_sold,
+            price_before_vat, price_after_vat)
 
 
 class TestListItems:
@@ -69,6 +71,26 @@ class TestListItems:
 
         assert result['items'][0]['quantity_sold'] == 0
         assert result['items'][0]['quantity_imported'] == 3
+
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
+    @patch('app.modules.handcarry.service.get_postgres_connection')
+    def test_stored_quantity_sold_takes_precedence_over_oracle(self, mock_conn, mock_sold):
+        """Orphan rows with stored quantity_sold ignore the Oracle live join."""
+        conn, _cur = _mock_conn(fetchall=[
+            _catalog_row(1, 12345, quantity_imported=5, quantity_sold=5),   # orphan, frozen
+            _catalog_row(2, 67890, quantity_imported=10),                   # active, live
+        ])
+        mock_conn.return_value = conn
+        # Oracle would say UPC 12345 had no sales, UPC 67890 had 4 sales
+        mock_sold.return_value = {12345: 0, 67890: 4}
+
+        result = HandCarryService().list_items()
+
+        items_by_upc = {it['upc']: it for it in result['items']}
+        # Orphan: stored override wins even though Oracle says 0
+        assert items_by_upc[12345]['quantity_sold'] == 5
+        # Active: stored is NULL → use Oracle's 4
+        assert items_by_upc[67890]['quantity_sold'] == 4
 
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
     @patch('app.modules.handcarry.service.get_postgres_connection')

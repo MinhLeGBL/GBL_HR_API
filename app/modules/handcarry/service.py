@@ -43,7 +43,8 @@ _ORACLE_IN_CHUNK = 500
 _CATALOG_COLUMNS = (
     'sid', 'scan_upc',
     'description', 'brand', 'category', 'color', 'size', 'season',
-    'quantity_imported', 'price_before_vat', 'price_after_vat',
+    'quantity_imported', 'quantity_sold',
+    'price_before_vat', 'price_after_vat',
 )
 _CATALOG_SELECT = ', '.join(_CATALOG_COLUMNS)
 
@@ -116,6 +117,10 @@ class HandCarryService:
                 """)
                 # All new columns are nullable so existing 1,270 rows
                 # don't need backfill before the migration runs.
+                # `quantity_sold` (v0.2.1) is a stored override — when
+                # non-NULL, it takes precedence over the live Oracle join.
+                # Used for orphan UPCs that aren't in Oracle's catalog
+                # (treated as already sold-through).
                 cur.execute("""
                     ALTER TABLE rps.carrier_item
                         ADD COLUMN IF NOT EXISTS description       TEXT,
@@ -125,6 +130,7 @@ class HandCarryService:
                         ADD COLUMN IF NOT EXISTS size              TEXT,
                         ADD COLUMN IF NOT EXISTS season            TEXT,
                         ADD COLUMN IF NOT EXISTS quantity_imported INTEGER,
+                        ADD COLUMN IF NOT EXISTS quantity_sold     INTEGER,
                         ADD COLUMN IF NOT EXISTS price_before_vat  NUMERIC(14, 2),
                         ADD COLUMN IF NOT EXISTS price_after_vat   NUMERIC(14, 2)
                 """)
@@ -193,8 +199,19 @@ class HandCarryService:
         items = []
         for r in rows:
             (sid, scan_upc, description, brand, category, color, size,
-             season, qty_imp, price_before, price_after) = r
+             season, qty_imp, qty_sold_stored,
+             price_before, price_after) = r
             upc_int = int(scan_upc)
+
+            # quantity_sold precedence: stored value (used for orphan
+            # UPCs that Oracle no longer recognises) takes priority over
+            # the live Oracle join. Active items leave the stored value
+            # NULL so sales keep updating in real time.
+            if qty_sold_stored is not None:
+                quantity_sold = int(qty_sold_stored)
+            else:
+                quantity_sold = int(sold_by_upc.get(upc_int, 0))
+
             items.append({
                 'id':                int(sid),
                 'upc':                upc_int,
@@ -205,7 +222,7 @@ class HandCarryService:
                 'size':               size,
                 'season':             season,
                 'quantity_imported':  int(qty_imp) if qty_imp is not None else None,
-                'quantity_sold':      int(sold_by_upc.get(upc_int, 0)),
+                'quantity_sold':      quantity_sold,
                 'price_before_vat':   float(price_before) if price_before is not None else None,
                 'price_after_vat':    float(price_after) if price_after is not None else None,
             })
@@ -241,6 +258,41 @@ class HandCarryService:
                 chunk = safe[i:i + _ORACLE_IN_CHUNK]
                 upc_list_sql = ', '.join(f"'{u}'" for u in chunk)
                 cur.execute(HandCarryQueries.ORACLE_LIFETIME_SOLD.format(upcs=upc_list_sql))
+                for row in cur.fetchall():
+                    upc_int = int(row[0])
+                    result[upc_int] = int(row[1] or 0)
+            cur.close()
+        except Exception:
+            return {}
+        finally:
+            conn.close()
+
+        return result
+
+    @staticmethod
+    def _lifetime_received_for(upcs: List[int]) -> Dict[int, int]:
+        """For a list of UPCs, return {upc: lifetime_received_qty} pulled
+        from Oracle's posted receiving vouchers (v0.2.2). Used by the
+        backfill script to set `quantity_imported` for Oracle-known UPCs
+        from the same source Oracle uses for non-hand-carry inventory.
+
+        Chunks the IN list at `_ORACLE_IN_CHUNK`. Returns an empty dict
+        on Oracle connection failure.
+        """
+        if not upcs:
+            return {}
+        safe = [int(u) for u in upcs]
+        result: Dict[int, int] = {}
+
+        conn = get_oracle_connection()
+        if conn is None:
+            return {}
+        try:
+            cur = conn.cursor()
+            for i in range(0, len(safe), _ORACLE_IN_CHUNK):
+                chunk = safe[i:i + _ORACLE_IN_CHUNK]
+                upc_list_sql = ', '.join(f"'{u}'" for u in chunk)
+                cur.execute(HandCarryQueries.ORACLE_LIFETIME_RECEIVED.format(upcs=upc_list_sql))
                 for row in cur.fetchall():
                     upc_int = int(row[0])
                     result[upc_int] = int(row[1] or 0)
