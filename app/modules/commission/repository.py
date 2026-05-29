@@ -134,6 +134,19 @@ class CommissionRepository:
 
         results = self.execute_query(self.queries.ALL_SALES_DATA, parameters)
 
+        # Oracle SIDs are 18-digit integers — past float64's ~15-digit
+        # mantissa. The moment a single LEFT JOIN walk-in produces a NULL
+        # in a SID column, pandas promotes the whole column to float64 and
+        # every SID in it gets silently rounded (off by up to ~100). That
+        # breaks exact-value lookups against hardcoded SIDs (notably
+        # `EMPLOYEE_COMMISSION_EXCEPTIONS`). Stringify SIDs before pandas
+        # ever sees them so the column lands as object dtype with intact
+        # values; downstream code compares string-to-string.
+        for row in results:
+            for field in ('SALE_ID', 'EMPLOYEE_SID', 'CUSTOMER_SID'):
+                if row.get(field) is not None:
+                    row[field] = str(row[field])
+
         df = pd.DataFrame(results)
 
         if df.empty:

@@ -1178,9 +1178,12 @@ class TestEmployeeCommissionException:
     """Tests for EMPLOYEE_COMMISSION_EXCEPTIONS — flat rate on non-jewelry
     sold to a qualifying customer only."""
 
-    EXCEPTION_EMP_SID = 690036963000170943
-    QUALIFYING_CUSTOMER = 690837303000121462
-    OTHER_CUSTOMER = 999999999999999999
+    # SIDs are stringified at the repository layer to dodge float64
+    # precision loss; the exception dict + the test fixtures use the
+    # same string form so the lookup works.
+    EXCEPTION_EMP_SID = '690036963000170943'
+    QUALIFYING_CUSTOMER = '690837303000121462'
+    OTHER_CUSTOMER = '999999999999999999'
 
     @pytest.fixture
     def mock_repo(self):
