@@ -997,7 +997,7 @@ class CommissionService:
                 # CR #61: HEA-as-fashion post-cutoff means we don't exclude
                 # COSM+HEA items from per-employee processing. Pre-cutoff
                 # behavior preserved for historical commission stability.
-                if hea_is_fashion(year, month):
+                if _hea_as_fashion_period:
                     exc_sales_df = employee_sales_df.copy()
                 else:
                     exc_sales_df = employee_sales_df[
@@ -1126,7 +1126,7 @@ class CommissionService:
             # as fashion and earn commission — skip this filter for those periods.
             # Non-HEA COSM items always pass through (earn commission as fashion).
             # HOME items are NEVER excluded here — they earn commission via home_decor.
-            if not hea_is_fashion(year, month):
+            if not _hea_as_fashion_period:
                 employee_sales_df = employee_sales_df[
                     ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
                 ].copy()
@@ -1173,6 +1173,19 @@ class CommissionService:
             # changed). Now the contract is explicit.
             target_bill_items = None
             fp_non_jewelry_after_df = None
+            # CR #61: snapshot maps — populated INLINE by the over-target
+            # block below as it iterates items_over_target and
+            # fp_non_jewelry_after_df. Single source of truth: the snapshot
+            # consumes whatever the main pipeline qualified, so the two can
+            # never drift apart.
+            ot_qualifying_sale_ids: set = set()
+            ot_blended_rates_by_sale_id: dict = {}
+            # CR #61: `rates` is referenced inside the over-target block when
+            # computing the crossing item's blended rate. The original assignment
+            # at line ~1320 came AFTER this block; pull it forward so the OT
+            # block can compute the blended rate in the same pass.
+            use_special_rates = ENABLE_RWD_SPECIAL_RATES and emp_store_code == 'RWD'
+            rates = RWD_SPECIAL_RATES if use_special_rates else STANDARD_RATES
 
             if achievement_rate > 100:
                 # Find the BILL where target was first reached or exceeded
@@ -1195,7 +1208,7 @@ class CommissionService:
                     # qualify as fashion. Pre-cutoff keeps them out.
                     _ot_cosm_hea_exclude = (
                         pd.Series(True, index=target_bill_items.index)
-                        if hea_is_fashion(year, month)
+                        if _hea_as_fashion_period
                         else (~((target_bill_items['department'] == 'COSM')
                                 & (target_bill_items['vendor_code'] == COSM_EXCLUDED_VENDOR)))
                     )
@@ -1230,16 +1243,22 @@ class CommissionService:
 
                             # First crossing item: proportional share if FP qualifying
                             if first_crossing['is_ot_qualifying'] and first_crossing['revenue_with_vat'] != 0:
-                                proportional_before_vat = first_crossing['revenue_before_vat'] * (
-                                    amount_over_vat / first_crossing['revenue_with_vat']
-                                )
+                                over_ratio = amount_over_vat / first_crossing['revenue_with_vat']
+                                proportional_before_vat = first_crossing['revenue_before_vat'] * over_ratio
                                 fp_non_jewelry_after_target = proportional_before_vat
+                                # CR #61: snapshot — blended rate for the crossing item.
+                                # over_ratio ∈ [0, 1] by construction (this item straddles target).
+                                ot_blended_rates_by_sale_id[first_crossing['sale_id']] = (
+                                    rates['tier3']['fp'] + over_ratio * rates['over_100']
+                                )
                             # else: first crossing is non-qualifying (MD/jewelry/etc), no OT from it
 
                             # Remaining items: only count FP qualifying ones
                             if len(items_over_target) > 1:
                                 remaining_qualifying = items_over_target.iloc[1:][items_over_target.iloc[1:]['is_ot_qualifying']]
                                 fp_non_jewelry_after_target += remaining_qualifying['revenue_before_vat'].sum()
+                                # CR #61: snapshot — fully-over items get tier3_fp + over_100.
+                                ot_qualifying_sale_ids.update(remaining_qualifying['sale_id'])
 
                     # Get all bills AFTER the target-reaching bill
                     target_bill_index = bill_totals_df[bill_totals_df['bill_number'] == target_bill_number].index[0]
@@ -1258,7 +1277,7 @@ class CommissionService:
                         # CR #61: HEA qualifies post-cutoff (fashion); pre-cutoff excluded.
                         _after_target_cosm_hea_exclude = (
                             pd.Series(True, index=items_after_target.index)
-                            if hea_is_fashion(year, month)
+                            if _hea_as_fashion_period
                             else (~((items_after_target['department'] == 'COSM')
                                     & (items_after_target['vendor_code'] == COSM_EXCLUDED_VENDOR)))
                         )
@@ -1273,6 +1292,9 @@ class CommissionService:
 
                         # Add to fp_non_jewelry_after_target (use revenue_before_vat)
                         fp_non_jewelry_after_target = fp_non_jewelry_after_target + fp_non_jewelry_after_df['revenue_before_vat'].sum()
+                        # CR #61: snapshot — items in bills AFTER the target bill that
+                        # passed the qualifying filter get tier3_fp + over_100.
+                        ot_qualifying_sale_ids.update(fp_non_jewelry_after_df['sale_id'])
 
             # HAND CARRY, SUITCASE, HOME DECOR, JEWELRY COMMISSIONS
             # All paid REGARDLESS of achievement rate
@@ -1297,11 +1319,9 @@ class CommissionService:
             commission_over_100 = 0  # Track over 100% bonus separately
 
             # ============================================================================
-            # DETERMINE WHICH COMMISSION RATES TO USE
-            # ============================================================================
-            # Check if this store should use special rates (TEMPORARY - easy to revert)
-            use_special_rates = ENABLE_RWD_SPECIAL_RATES and emp_store_code == 'RWD'
-            rates = RWD_SPECIAL_RATES if use_special_rates else STANDARD_RATES
+            # COMMISSION RATES — `use_special_rates` / `rates` are now set ABOVE
+            # the over-target block (CR #61 needs `rates` to compute the
+            # crossing item's blended rate during the OT pass).
             # ============================================================================
 
             # TIER 1: 50% - 70% of target
@@ -1367,33 +1387,11 @@ class CommissionService:
             # ─────────────────────────────────────────────────────────────
             # CR #61: per-item rate snapshot
             # ─────────────────────────────────────────────────────────────
-            # For each line item this employee sold in this period, record
-            # the effective rate that the pipeline would apply. Account
-            # Payable (CR #60) reads this when computing release commission.
-            ot_qualifying_sale_ids: set = set()
-            ot_blended_rates_by_sale_id: dict = {}
-            if achievement_rate > 100 and fp_non_jewelry_after_target > 0:
-                # Items from the target-crossing bill that exceeded the target.
-                if target_bill_items is not None and len(target_bill_items) > 0:
-                    items_over = target_bill_items[
-                        target_bill_items['item_running_total'] >= target
-                    ]
-                    for idx_i, (_idx, ot_row) in enumerate(items_over.iterrows()):
-                        if not ot_row.get('is_ot_qualifying'):
-                            continue
-                        sid = ot_row['sale_id']
-                        if idx_i == 0 and ot_row['revenue_with_vat'] != 0:
-                            # Crossing item — blended rate.
-                            amount_over_vat = ot_row['item_running_total'] - target
-                            over_ratio = amount_over_vat / ot_row['revenue_with_vat']
-                            blended = rates['tier3']['fp'] + over_ratio * rates['over_100']
-                            ot_blended_rates_by_sale_id[sid] = blended
-                        else:
-                            ot_qualifying_sale_ids.add(sid)
-                # Items from bills after the target-crossing bill.
-                if fp_non_jewelry_after_df is not None and len(fp_non_jewelry_after_df) > 0:
-                    ot_qualifying_sale_ids.update(fp_non_jewelry_after_df['sale_id'])
-
+            # `ot_qualifying_sale_ids` and `ot_blended_rates_by_sale_id` were
+            # populated inline by the over-target block above. The snapshot
+            # reads from those maps directly — no qualification logic is
+            # duplicated here, so the snapshot rates always match what the
+            # main pipeline paid.
             for _, item_row in employee_sales_df.iterrows():
                 bill_sid = item_row.get('bill_sid')
                 upc = item_row.get('upc_clean')
@@ -2949,17 +2947,35 @@ class CommissionRevenueService:
             # so Account Payable (CR #60) can compute release commission at the
             # exact rate the original commission used. Shared read by the
             # account_payable module.
+            #
+            # NUMERIC(6,5) caps at 9.99999 — realistic max rate is ~0.02
+            # (tier3_fp 1% + over_100 1%). Older deploys may have created the
+            # column as NUMERIC(10,8); the ALTER below narrows them idempotently.
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS payable_bill_rates (
                     bill_sid       VARCHAR(40)    NOT NULL,
                     upc            VARCHAR(50)    NOT NULL,
                     revenue_type   VARCHAR(20)    NOT NULL,
                     fp_or_md       CHAR(2),
-                    effective_rate NUMERIC(10,8)  NOT NULL,
+                    effective_rate NUMERIC(6,5)   NOT NULL,
                     source_month   CHAR(7)        NOT NULL,
                     updated_at     TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (bill_sid, upc)
                 )
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'payable_bill_rates'
+                          AND column_name = 'effective_rate'
+                          AND numeric_precision > 6
+                    ) THEN
+                        ALTER TABLE payable_bill_rates
+                            ALTER COLUMN effective_rate TYPE NUMERIC(6,5);
+                    END IF;
+                END $$;
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_payable_bill_rates_period

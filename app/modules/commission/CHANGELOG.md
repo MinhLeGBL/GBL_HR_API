@@ -39,20 +39,40 @@ All notable changes to this module. Versioning per
   - `calculate_personal_commissions` — main path filter, exception path
     filter, and both over-target qualification filters all gated.
 
-### Bumped MINOR (additive, backward-compatible)
+### Behavior change warning — replaying older months is NOT idempotent across versions
 
-`POST /commission/calculate` response shape unchanged. The new
-`payable_bill_rates` rows are a side effect, not a response field.
-Existing clients are unaffected.
+The HEA reclassification is **target-month keyed**: re-running `calculate` for
+**April 2026 or later** with this version produces commission numbers that
+include HEA in fashion, whereas the same call on **v2.0.0** excluded HEA via
+SYSADMIN. Pre-cutoff months (March 2026 and earlier) reproduce v2.0.0 numbers
+exactly.
+
+If you regenerate snapshots for a previously-paid period >= 2026-04 with this
+version, employees who sold HEA items will see different commission than the
+v2.0.0 payout they received. Treat v2.1.0 calculate output for periods >=
+2026-04 as authoritative going forward, but don't use it to retroactively
+re-pay older periods.
+
+### Bumped MINOR (additive response shape, behavior change for HEA periods)
+
+`POST /commission/calculate` response **shape** is unchanged. The new
+`payable_bill_rates` rows are a side effect, not a response field. The MINOR
+bump is justified by shape compatibility; the HEA cutoff is a behavior change
+for periods >= 2026-04 (see warning above).
 
 ### Verified
 
-- 201 unit tests pass (5 new for `_classify_item_rate` + cutoff helper).
+- 210 unit tests pass (14 new — 5 original CR #61 + 9 follow-up covering
+  hand-carry / suitcase / home / jewelry / sub-50% / blended OT classifier
+  branches + end-to-end snapshot integration; 196 prior).
 - Live April 2026 calculate populated 116 snapshot rows for
   GL005/GH100/GH083 with the expected tier rate distribution
   (tier-1 0.25% FP, tier-1 0.125% MD, 1% hand carry, 2% jewelry-other).
 - GL005/GH100/GH083 commission payable + withheld numbers unchanged
   from v2.0.0 reference data (none of their items are COSM+HEA).
+- Snapshot's over-target maps are populated INLINE by the main pipeline
+  (no logic duplication) — the snapshot rate for an over-target item is
+  guaranteed to match the rate that paid that item.
 
 ## [2.0.0] — 2026-05-29
 
