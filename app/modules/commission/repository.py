@@ -158,16 +158,17 @@ class CommissionRepository:
         if 'upc_clean' not in df.columns and 'upc' in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
 
-        # Only COSM department items with HEA vendor are not eligible for commission.
-        # Re-attribute to SYSADMIN so they count toward store revenue total
-        # but not toward any employee's personal total or commission.
-        # Non-HEA COSM items (e.g. NOTES DE BAS DE PAJE, ANN QUEEN) stay with
-        # the original employee and are classified as fashion (FP/MD).
-        cosm_hea_mask = (df['department'] == 'COSM') & (df['vendor_code'] == 'HEA')
-        if cosm_hea_mask.any():
-            df.loc[cosm_hea_mask, 'employee_sid'] = None
-            df.loc[cosm_hea_mask, 'employee_username'] = 'SYSADMIN'
-            df.loc[cosm_hea_mask, 'store_code'] = None
+        # COSM+HEA items historically went to SYSADMIN (no commission). CR #61
+        # (effective from `HEA_AS_FASHION_FROM_MONTH`) reclassifies them as
+        # fashion. For pre-cutoff periods we keep the old rewrite so historical
+        # commission output stays stable.
+        from app.modules.commission.service import hea_is_fashion
+        if not hea_is_fashion(year, month):
+            cosm_hea_mask = (df['department'] == 'COSM') & (df['vendor_code'] == 'HEA')
+            if cosm_hea_mask.any():
+                df.loc[cosm_hea_mask, 'employee_sid'] = None
+                df.loc[cosm_hea_mask, 'employee_username'] = 'SYSADMIN'
+                df.loc[cosm_hea_mask, 'store_code'] = None
 
         return df
 

@@ -1262,6 +1262,293 @@ class TestCalculatePersonalCommissions:
         assert row['withheld_by_category'] == {}
         assert row['payout'] == row['total']
 
+    def test_cr61_classify_item_rate_fashion_below_target(self):
+        """CR #61 classifier: tier-1 FP fashion item gets tier1 fp rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        assert result == ('fashion', 'fp', 0.0025)
+
+    def test_cr61_classify_item_rate_fashion_over_target(self):
+        """CR #61 classifier: a fully-over-target FP item gets tier3 + over_100."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_OT',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=120,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids={'S_OT'}, ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        # tier3 fp (0.01) + over_100 (0.01) = 0.02
+        assert result == ('fashion', 'fp', 0.02)
+
+    def test_cr61_classify_item_rate_hea_below_cutoff_is_other(self):
+        """CR #61: pre-cutoff (hea_as_fashion_period=False), COSM+HEA items
+        classify as 'other' with rate 0."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'HEA', 'upc_clean': 'X', 'department': 'COSM',
+            'is_jewelry': 0, 'category': 'CREAM', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('other', None, 0.0)
+
+    def test_cr61_classify_item_rate_hea_post_cutoff_is_fashion(self):
+        """CR #61: post-cutoff (hea_as_fashion_period=True), COSM+HEA items
+        flow into fashion classification with the corresponding tier rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'HEA', 'upc_clean': 'X', 'department': 'COSM',
+            'is_jewelry': 0, 'category': 'CREAM', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        # tier 2 fp rate at 80% achievement
+        assert result == ('fashion', 'fp', 0.005)
+
+    def test_cr61_hea_is_fashion_helper(self):
+        """CR #61: cutoff helper returns True from April 2026 onward."""
+        from app.modules.commission.service import hea_is_fashion
+        assert hea_is_fashion(2026, 3) is False   # March — pre-cutoff
+        assert hea_is_fashion(2026, 4) is True    # April — cutoff month, inclusive
+        assert hea_is_fashion(2026, 12) is True
+        assert hea_is_fashion(2025, 12) is False  # any 2025 month — pre-cutoff
+
+    def test_cr61_classify_hand_carry_rom_earrings(self):
+        """CR #61: ROM + EARRINGS hand-carry items get the 3% rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, HC_RATE_ROM_EARRINGS,
+        )
+        row = {
+            'vendor_code': 'ROM', 'upc_clean': 'HC1', 'department': 'JWLY',
+            'is_jewelry': 1, 'category': 'EARRINGS', 'sale_id': 'S_HC',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs={'HC1'},
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('hand_carry', None, HC_RATE_ROM_EARRINGS)
+
+    def test_cr61_classify_hand_carry_2pct_vendor(self):
+        """CR #61: HC_VENDORS_2PCT (e.g. CGI) hand-carry items get the 2% rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, HC_RATE_2PCT,
+        )
+        row = {
+            'vendor_code': 'CGI', 'upc_clean': 'HC2', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_HC2',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs={'HC2'},
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('hand_carry', None, HC_RATE_2PCT)
+
+    def test_cr61_classify_suitcase_returns_none(self):
+        """CR #61: suitcase vendors (TVL/TIT) are skipped — flat per-item amount."""
+        from app.modules.commission.service import CommissionService, STANDARD_RATES
+        row = {
+            'vendor_code': 'TVL', 'upc_clean': 'SC1', 'department': 'BAGS',
+            'is_jewelry': 0, 'category': 'TRAVEL', 'sale_id': 'S_SC',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result is None
+
+    def test_cr61_classify_home_decor(self):
+        """CR #61: HOME department → home_decor at 1% flat."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, HOME_DECOR_RATE,
+        )
+        row = {
+            'vendor_code': 'IKE', 'upc_clean': 'HD1', 'department': 'HOME',
+            'is_jewelry': 0, 'category': 'DECOR', 'sale_id': 'S_HD',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=120,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('home_decor', None, HOME_DECOR_RATE)
+
+    def test_cr61_classify_jewelry_vhn(self):
+        """CR #61: VHN jewelry → vhernier at 1%."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, JEWELRY_RATE_VHN,
+        )
+        row = {
+            'vendor_code': 'VHN', 'upc_clean': 'J1', 'department': 'JWLY',
+            'is_jewelry': 1, 'category': 'NECKLACE', 'sale_id': 'S_VHN',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('vhernier', None, JEWELRY_RATE_VHN)
+
+    def test_cr61_classify_jewelry_other(self):
+        """CR #61: generic jewelry → jewelry at 2%."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, JEWELRY_RATE_OTHER,
+        )
+        row = {
+            'vendor_code': 'OTH', 'upc_clean': 'J2', 'department': 'JWLY',
+            'is_jewelry': 1, 'category': 'RING', 'sale_id': 'S_OJ',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('jewelry', None, JEWELRY_RATE_OTHER)
+
+    def test_cr61_classify_fashion_below_50_achievement_zero_rate(self):
+        """CR #61: fashion items at <50% achievement get rate 0 (no commission earned)."""
+        from app.modules.commission.service import CommissionService, STANDARD_RATES
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'F1', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'SHIRT', 'sale_id': 'S_F1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=40,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('fashion', 'fp', 0.0)
+
+    def test_cr61_classify_blended_over_target_rate(self):
+        """CR #61: a crossing item's blended rate comes from ot_blended_rates_by_sale_id."""
+        from app.modules.commission.service import CommissionService, STANDARD_RATES
+        # Simulate the main pipeline having pre-computed a blended rate of
+        # tier3_fp + 0.4 × over_100 for the crossing item.
+        blended = STANDARD_RATES['tier3']['fp'] + 0.4 * STANDARD_RATES['over_100']
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_BLEND',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=110,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(),
+            ot_blended_rates_by_sale_id={'S_BLEND': blended},
+            hea_as_fashion_period=True,
+        )
+        assert result == ('fashion', 'fp', blended)
+
+    def test_cr61_snapshot_integration_writes_expected_entries(self, service, mock_repo):
+        """CR #61: end-to-end check that calculate_personal_commissions writes
+        the expected snapshot entries via _upsert_payable_bill_rates.
+
+        Scenario: one employee, two items in one bill — one fashion FP, one HC —
+        below target so no over-target maps populated. Verifies revenue_type +
+        fp_or_md + rate match what the classifier would produce."""
+        sales_df = self._make_sales_df([
+            # Fashion FP item — below 50% target → rate 0.
+            [1, 'UPCFP', 'BILL_A', 'HBT', '2026-04-15', '10:00:00',
+             None, 'SIDX', 'userx', 'HBT',
+             'GUC', 0, 'SHIRT', 'WRTW', 0.0, 1_100_000, 1_000_000],
+            # Hand-carry item — 2pct vendor.
+            [2, 'UPCHC', 'BILL_A', 'HBT', '2026-04-15', '10:00:00',
+             None, 'SIDX', 'userx', 'HBT',
+             'CGI', 0, 'BAG', 'WRTW', 0.0, 2_200_000, 2_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = ['UPCHC']
+
+        employees = [{
+            'employee_code':     'EMPX',
+            'employee_username': 'userx',
+            'full_name':         'Test User',
+            'personal_target':   1_000_000_000,   # so achievement << 50%
+            'store_code':        'HBT',
+        }]
+
+        captured = []
+        original = CommissionService._upsert_payable_bill_rates
+
+        def capture(entries):
+            captured.extend(entries)
+        # Patch the static helper for this test only.
+        with patch.object(CommissionService, '_upsert_payable_bill_rates',
+                          side_effect=capture):
+            service.calculate_personal_commissions(
+                month=4, year=2026, employees=employees,
+            )
+
+        # Two items → two snapshot entries.
+        assert len(captured) == 2
+        by_upc = {e[1]: e for e in captured}
+
+        # Fashion FP, achievement < 50% → rate 0, fp_or_md='fp'.
+        fp_entry = by_upc['UPCFP']
+        assert fp_entry[2] == 'fashion'
+        assert fp_entry[3] == 'fp'
+        assert fp_entry[4] == 0.0
+        assert fp_entry[5] == '2026-04'
+
+        # Hand carry CGI vendor → HC_RATE_2PCT, fp_or_md=None.
+        hc_entry = by_upc['UPCHC']
+        assert hc_entry[2] == 'hand_carry'
+        assert hc_entry[3] is None
+        assert hc_entry[4] == 0.02
+
+        # Both entries should reference the same bill_sid (synth from bill_number).
+        assert fp_entry[0] == 'BILL_SID_BILL_A'
+        assert hc_entry[0] == 'BILL_SID_BILL_A'
+
 
 class TestEmployeeCommissionException:
     """Tests for EMPLOYEE_COMMISSION_EXCEPTIONS — flat rate on non-jewelry
