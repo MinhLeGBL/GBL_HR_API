@@ -33,7 +33,8 @@ class TestInitDatabase:
         # CREATE TABLE + 2 migrations + 2 named drops + DO$$ drop + delete invalid types
         # + month check + revenue_type check + CREATE INDEX
         # + CR #28: add store_code col + drop old unique + add new unique + delete old rows
-        assert mock_cursor.execute.call_count == 14
+        # + CR #61: create payable_bill_rates table + its index
+        assert mock_cursor.execute.call_count == 16
         mock_conn.commit.assert_called_once()
         mock_cursor.close.assert_called_once()
         mock_conn.close.assert_called_once()

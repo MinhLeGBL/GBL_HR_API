@@ -1262,6 +1262,90 @@ class TestCalculatePersonalCommissions:
         assert row['withheld_by_category'] == {}
         assert row['payout'] == row['total']
 
+    def test_cr61_classify_item_rate_fashion_below_target(self):
+        """CR #61 classifier: tier-1 FP fashion item gets tier1 fp rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        assert result == ('fashion', 'fp', 0.0025)
+
+    def test_cr61_classify_item_rate_fashion_over_target(self):
+        """CR #61 classifier: a fully-over-target FP item gets tier3 + over_100."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_OT',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=120,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids={'S_OT'}, ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        # tier3 fp (0.01) + over_100 (0.01) = 0.02
+        assert result == ('fashion', 'fp', 0.02)
+
+    def test_cr61_classify_item_rate_hea_below_cutoff_is_other(self):
+        """CR #61: pre-cutoff (hea_as_fashion_period=False), COSM+HEA items
+        classify as 'other' with rate 0."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'HEA', 'upc_clean': 'X', 'department': 'COSM',
+            'is_jewelry': 0, 'category': 'CREAM', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('other', None, 0.0)
+
+    def test_cr61_classify_item_rate_hea_post_cutoff_is_fashion(self):
+        """CR #61: post-cutoff (hea_as_fashion_period=True), COSM+HEA items
+        flow into fashion classification with the corresponding tier rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'HEA', 'upc_clean': 'X', 'department': 'COSM',
+            'is_jewelry': 0, 'category': 'CREAM', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        # tier 2 fp rate at 80% achievement
+        assert result == ('fashion', 'fp', 0.005)
+
+    def test_cr61_hea_is_fashion_helper(self):
+        """CR #61: cutoff helper returns True from April 2026 onward."""
+        from app.modules.commission.service import hea_is_fashion
+        assert hea_is_fashion(2026, 3) is False   # March — pre-cutoff
+        assert hea_is_fashion(2026, 4) is True    # April — cutoff month, inclusive
+        assert hea_is_fashion(2026, 12) is True
+        assert hea_is_fashion(2025, 12) is False  # any 2025 month — pre-cutoff
+
 
 class TestEmployeeCommissionException:
     """Tests for EMPLOYEE_COMMISSION_EXCEPTIONS — flat rate on non-jewelry

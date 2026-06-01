@@ -3,6 +3,57 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.1.0] — 2026-06-01
+
+### Added — CR #61: per-item release rate snapshot + HEA-as-fashion cutoff
+
+- New Postgres table `payable_bill_rates` keyed on `(bill_sid, upc)` with
+  `revenue_type`, `fp_or_md`, `effective_rate`, `source_month`, `updated_at`.
+  Created in `CommissionRevenueService.init_database()` alongside the
+  existing adjustment table.
+- `POST /commission/calculate` and `POST /personal/calculate` now batch
+  UPSERT one row per line item that an employee sold in the target month.
+  The rate is the exact rate the existing pipeline would apply if the item
+  were paid in full — tier rate by category, plus the over-target bonus for
+  FP fashion items above the 100% threshold (a single bill-crossing item
+  gets a proportional blended rate). Items with no commission concept (e.g.
+  suitcase, which is a flat per-item amount) are skipped.
+- Account Payable (CR #60) reads from `payable_bill_rates` directly to
+  compute release commission — no new commission endpoint needed.
+- Snapshot is best-effort: a failure logs a warning but does NOT abort
+  the calculate response.
+
+### Changed — HEA-as-fashion reclassification (effective April 2026)
+
+- New module constant `HEA_AS_FASHION_FROM_MONTH = '2026-04'` + helper
+  `hea_is_fashion(year, month)`.
+- For target months **>= 2026-04**, COSM+HEA products are now classified
+  as fashion (same tier rate + over-target bonus). Pre-cutoff months
+  preserve the legacy SYSADMIN routing so historical commission output
+  remains stable.
+- Touchpoints made conditional on the cutoff:
+  - `CommissionRepository.get_all_sales_data` — skips the SYSADMIN
+    rewrite post-cutoff.
+  - `_compute_revenue_by_type` — accepts `year` / `month` kwargs; routes
+    HEA to fashion post-cutoff. All 7 internal callers updated.
+  - `calculate_personal_commissions` — main path filter, exception path
+    filter, and both over-target qualification filters all gated.
+
+### Bumped MINOR (additive, backward-compatible)
+
+`POST /commission/calculate` response shape unchanged. The new
+`payable_bill_rates` rows are a side effect, not a response field.
+Existing clients are unaffected.
+
+### Verified
+
+- 201 unit tests pass (5 new for `_classify_item_rate` + cutoff helper).
+- Live April 2026 calculate populated 116 snapshot rows for
+  GL005/GH100/GH083 with the expected tier rate distribution
+  (tier-1 0.25% FP, tier-1 0.125% MD, 1% hand carry, 2% jewelry-other).
+- GL005/GH100/GH083 commission payable + withheld numbers unchanged
+  from v2.0.0 reference data (none of their items are COSM+HEA).
+
 ## [2.0.0] — 2026-05-29
 
 MAJOR bump: introduces the `withheld` / `payout` concept on every commission
