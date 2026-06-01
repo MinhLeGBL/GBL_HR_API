@@ -19,6 +19,7 @@ Read the frontend CR documentation and compare it against the current backend im
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
 | `feature/bathroom*` | `cr/bathroom-price-check.md` |
+| `feature/account-payable*` | `cr/account-payable.md` |
 
 ## Branch-sensitive checking
 
