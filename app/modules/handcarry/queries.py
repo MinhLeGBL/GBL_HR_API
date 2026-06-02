@@ -1,18 +1,19 @@
 """
-Oracle SQL queries for the handcarry module.
+Oracle SQL queries for the handcarry module — every read joins live
+from Oracle (CR #64), so `list_items` calls all four queries per request:
 
-Three queries are needed across both `list_items` (live join when GET runs)
-and the one-time `backfill_handcarry.py` migration:
-
-  - ORACLE_PRODUCT_INFO     per UPC: description, brand, category, colour,
-                            size, season, selling price.
-  - ORACLE_LIFETIME_SOLD    per UPC: sum of all sold qty (net of returns)
-                            across all time. Lifetime per CR #58 spec.
-  - ORACLE_LIFETIME_RECEIVED per UPC: sum of all received qty from posted
-                            receiving vouchers. Drives the stored
-                            `quantity_imported` for Oracle-known UPCs
-                            (v0.2.2 — the same source Oracle uses for
-                            non-hand-carry inventory).
+  - ORACLE_PRODUCT_INFO       per UPC: description, brand, category, colour,
+                              size, season, selling price.
+  - ORACLE_LIFETIME_SOLD      per UPC: sum of all sold qty (net of returns)
+                              across all time.
+  - ORACLE_LIFETIME_RECEIVED  per UPC: sum of received qty from posted
+                              receiving vouchers (vou_class=0, vou_type=0,
+                              status=4). Same source Oracle uses for
+                              non-hand-carry inventory.
+  - ORACLE_LIFETIME_ADJ_IN    per UPC: sum of direct stock-in adjustments
+                              (ADJ_TYPE=1, status=4). Unioned with
+                              ORACLE_LIFETIME_RECEIVED at the service layer
+                              for the full "ever received" count (CR #65).
 
 All queries accept a comma-separated bind-safe UPC list via the
 `{upcs}` placeholder. The caller is responsible for validating that
