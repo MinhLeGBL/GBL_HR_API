@@ -451,6 +451,62 @@ class AccountPayableService:
         raise NotImplementedError('CR #60 endpoint not yet implemented')
 
     # ------------------------------------------------------------------
+    # Classifier — bucket-only port of CommissionService._classify_item_rate
+    # ------------------------------------------------------------------
+    # Used by `set_item_custom_rate` to derive (revenue_type, fp_or_md) for
+    # a legacy item so propagation can scope to the same category. Mirrors
+    # the priority chain in commission's classifier; rate computation
+    # omitted (AP only needs the bucket).
+    #
+    # If commission's bucket logic ever changes, this needs to follow.
+    # Kept inline (rather than importing private helper) to honor CLAUDE.md's
+    # "no cross-module internals" rule — the two implementations are
+    # cross-checked via the AP integration test in tests/integration.
+
+    _HC_VENDORS_1PCT = frozenset(['ATQ', 'AQU', 'ERE', 'GEO', 'GDC', 'BDA', 'SKY', 'CHI', 'MNC', 'DAP'])
+    _HC_VENDORS_2PCT = frozenset(['CGI', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'ROM', 'SPK', 'TED', 'BRT'])
+    _SUITCASE_VENDORS = frozenset(['TVL', 'TIT'])
+    _DISCOUNT_THRESHOLD = 0.30  # >0.30 → MD; ≤0.30 → FP
+    _HEA_AS_FASHION_FROM_MONTH = '2026-04'
+
+    @classmethod
+    def _classify_item_bucket(
+        cls,
+        item: Dict[str, Any],
+        hand_carry_upcs: set,
+        creation_month: str,   # 'YYYY-MM' — bill's invc_post_date month
+    ) -> Optional[tuple]:
+        """Return (revenue_type, fp_or_md) for an item, or None when the
+        category has no rate concept (suitcase).
+
+        `creation_month` controls the HEA-as-fashion cutoff (CR #61).
+        """
+        vendor = item.get('vendor_code')
+        upc = item.get('upc')
+        department = item.get('department')
+        is_jewelry = item.get('is_jewelry', 0)
+        category = item.get('category', '') or ''
+        discount_rate = item.get('discount_rate', 0) or 0
+
+        if upc in hand_carry_upcs:
+            return ('hand_carry', None)
+        if vendor in cls._SUITCASE_VENDORS:
+            return None    # flat rate — no propagation/category
+        if department == 'HOME':
+            return ('home_decor', None)
+        hea_as_fashion = creation_month >= cls._HEA_AS_FASHION_FROM_MONTH
+        if department == 'COSM' and vendor == 'HEA' and not hea_as_fashion:
+            return ('other', None)
+        if is_jewelry == 1:
+            if vendor == 'VHN':
+                return ('vhernier', None)
+            if vendor == 'ROM' and category == 'EARRINGS':
+                return ('rosa_maria', None)
+            return ('jewelry', None)
+        is_fp = discount_rate <= cls._DISCOUNT_THRESHOLD
+        return ('fashion', 'fp' if is_fp else 'md')
+
+    # ------------------------------------------------------------------
     # Write endpoints — Phase D
     # ------------------------------------------------------------------
     def reconcile(
@@ -459,14 +515,490 @@ class AccountPayableService:
         allocations: List[Dict[str, Any]],
         created_by_user_sid: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Save a manual linkage (or update an existing one).
+        """Save (or replace) a payment→bill linkage.
 
-        Enforces cumulative cap: per allocation,
-            SUM(amount_applied for bill_sid) + new_amount ≤ original_charge.
-        Also: SUM(allocations.amount) == payment.amount (no partial confirms in v1).
+        Validations:
+        - payment_doc_sid is a digit string; the payment exists in Oracle.
+        - allocations is non-empty; each has bill_sid (digit) + amount (positive int).
+        - `SUM(allocations.amount) == payment.amount` (no partial confirms in v1).
+        - For each allocation: existing reconciliations' sum + new amount
+          ≤ bill.original_charge (cumulative cap).
+
+        Behavior:
+        - First reconcile for the payment → INSERT rows.
+        - Existing rows with identical shape → no-op (200, idempotent).
+        - Existing rows with different shape → edit (DELETE + INSERT in one tx).
+        - Concurrent edit (row count changed mid-tx) → 409.
+
+        Returns ServiceResult<ReconcileResult>:
+        - outcome: 'released' when the payment's calendar month is past,
+          'matched_pending' when it's the current month.
+        - affected_months: the distinct YYYY-MM of all touched payments
+          (just one in v1 — single payment per request).
+        - For released outcome, also computes affected_employee_count +
+          total_release_amount so the frontend toast can summarize.
+        - payment: null in v1 (full PendingPayment shape lands with Phase C-5).
         """
-        raise NotImplementedError('CR #60 endpoint not yet implemented')
+        # ── 1. Validate inputs ────────────────────────────────────────
+        if not str(payment_doc_sid).isdigit():
+            return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
+        if not allocations:
+            return {'success': False, 'error': 'allocations must be non-empty'}
+        validated: List[tuple] = []  # (bill_sid_str, amount_int)
+        for a in allocations:
+            b_sid = str(a.get('bill_sid') or '')
+            if not b_sid.isdigit():
+                return {'success': False, 'error': f'allocation.bill_sid must be numeric; got {b_sid!r}'}
+            amt = a.get('amount')
+            if not isinstance(amt, int) or amt <= 0:
+                return {'success': False, 'error': f'allocation.amount must be a positive int; got {amt!r}'}
+            validated.append((b_sid, amt))
+        total_alloc = sum(a for _, a in validated)
+
+        # ── 2. Fetch payment from Oracle ──────────────────────────────
+        payment = self.repository.get_payment_meta(payment_doc_sid)
+        if not payment:
+            return {
+                'success': False,
+                'error': f'Payment {payment_doc_sid} not found or not a Charge receipt',
+                'not_found': True,
+            }
+        if total_alloc != payment['amount']:
+            return {
+                'success': False,
+                'error': (
+                    f'allocations sum ({total_alloc:,}) must equal '
+                    f'payment amount ({payment["amount"]:,}) — partial confirms unsupported'
+                ),
+            }
+
+        # ── 3. Bill lookups (single ledger replay) ────────────────────
+        bills = self.repository.get_all_bills()
+        for b_sid, amt in validated:
+            if b_sid not in bills:
+                return {
+                    'success': False,
+                    'error': f'Bill {b_sid} not found in active AP ledger',
+                    'not_found': True,
+                }
+
+        # ── 4. Transaction: read existing, enforce cap, write ────────
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                # Existing linkages for THIS payment.
+                cur.execute('''
+                    SELECT bill_sid, amount_applied
+                    FROM payable_reconciliations
+                    WHERE payment_doc_sid = %s
+                    ORDER BY bill_sid
+                ''', (str(payment_doc_sid),))
+                existing = [(r[0], int(r[1])) for r in cur.fetchall()]
+                existing_sorted = sorted(existing)
+                requested_sorted = sorted(validated)
+                if existing_sorted == requested_sorted:
+                    # Idempotent — nothing to write.
+                    conn.commit()
+                    return self._reconcile_response(
+                        payment=payment, allocations=validated, bills=bills,
+                    )
+
+                # Cumulative cap: SUM(existing amount for bill X across ALL payments)
+                # excluding our own existing rows + new amount ≤ original_charge.
+                # If we're editing, our own rows are about to be deleted, so
+                # subtract them from the cap baseline.
+                own_by_bill: Dict[str, int] = {}
+                for b_sid, amt in existing:
+                    own_by_bill[b_sid] = own_by_bill.get(b_sid, 0) + amt
+                for b_sid, new_amt in validated:
+                    cur.execute('''
+                        SELECT COALESCE(SUM(amount_applied), 0)
+                        FROM payable_reconciliations
+                        WHERE bill_sid = %s
+                    ''', (b_sid,))
+                    other_total = int(cur.fetchone()[0]) - own_by_bill.get(b_sid, 0)
+                    bill = bills[b_sid]
+                    cap = bill['original_charge']
+                    if other_total + new_amt > cap:
+                        conn.rollback()
+                        overflow = other_total + new_amt - cap
+                        return {
+                            'success': False,
+                            'error': (
+                                f'Bill #{bill["doc_no"]} would exceed its original '
+                                f'charge by {overflow:,} VND'
+                            ),
+                        }
+
+                # Replace: DELETE then INSERT in the same tx.
+                if existing:
+                    cur.execute(
+                        'DELETE FROM payable_reconciliations WHERE payment_doc_sid = %s',
+                        (str(payment_doc_sid),),
+                    )
+                    if cur.rowcount != len(existing):
+                        # Another session changed the row count between our
+                        # SELECT and our DELETE → 409 + rollback.
+                        conn.rollback()
+                        return {
+                            'success': False,
+                            'error': 'Payment was reconciled by another user — refresh required',
+                            'conflict': True,
+                        }
+                cur.executemany('''
+                    INSERT INTO payable_reconciliations
+                        (payment_doc_sid, bill_sid, amount_applied, created_by)
+                    VALUES (%s, %s, %s, %s)
+                ''', [
+                    (str(payment_doc_sid), b_sid, amt, created_by_user_sid)
+                    for b_sid, amt in validated
+                ])
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'reconcile failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        return self._reconcile_response(
+            payment=payment, allocations=validated, bills=bills,
+        )
+
+    def _reconcile_response(
+        self, *, payment: Dict[str, Any], allocations: List[tuple],
+        bills: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build the ReconcileResult: outcome + affected_months + (for released)
+        the employee/release totals."""
+        today = _today()
+        pay_month = payment['payment_date'][:7]
+        cur_month = _current_month_str(today)
+        outcome = 'released' if pay_month < cur_month else 'matched_pending'
+
+        result: Dict[str, Any] = {
+            'outcome':         outcome,
+            # `payment` shape is the queue PendingPayment (Phase C-5).
+            # Until that lands, return null and let the frontend refetch.
+            'payment':         None,
+            'affected_months': [pay_month],
+        }
+        if outcome == 'released':
+            # Compute release totals: revenue × effective_rate × (amount / original_charge)
+            # per item on each allocated bill, then aggregate by employee.
+            alloc_bill_sids = [b_sid for b_sid, _ in allocations]
+            items = self.repository.get_bill_items(alloc_bill_sids)
+            auto = self._load_auto_rates(alloc_bill_sids)
+            custom = self._load_custom_rates(alloc_bill_sids)
+            by_emp: Dict[str, int] = {}
+            total_release = 0
+            for b_sid, amt in allocations:
+                bill = bills[b_sid]
+                if bill['original_charge'] <= 0:
+                    continue
+                share_ratio = amt / bill['original_charge']
+                for it in items:
+                    if it['bill_sid'] != b_sid:
+                        continue
+                    a = auto.get((b_sid, it['upc']))
+                    c = custom.get((b_sid, it['upc']))
+                    effective = c if c is not None else (
+                        a['effective_rate'] if (a and a['effective_rate'] is not None) else 0.0
+                    )
+                    released = int(round((it['revenue_with_vat'] or 0) * effective * share_ratio))
+                    if released == 0:
+                        continue
+                    code = it.get('employee_code') or '__unknown__'
+                    by_emp[code] = by_emp.get(code, 0) + released
+                    total_release += released
+            result['affected_employee_count'] = len(by_emp)
+            result['total_release_amount'] = total_release
+        return {'success': True, 'data': result}
 
     def unmatch(self, payment_doc_sid: str) -> Dict[str, Any]:
-        """Remove an existing manual linkage for a payment."""
-        raise NotImplementedError('CR #60 endpoint not yet implemented')
+        """Remove every linkage for `payment_doc_sid`.
+
+        Returns `{success, data: {payment_doc_sid, deleted_count}}`. The full
+        PendingPayment shape comes back via Phase C-5; the frontend refetches
+        the queue after a successful unmatch.
+        """
+        if not str(payment_doc_sid).isdigit():
+            return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'DELETE FROM payable_reconciliations WHERE payment_doc_sid = %s',
+                    (str(payment_doc_sid),),
+                )
+                deleted = cur.rowcount
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'unmatch failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return {
+            'success': True,
+            'data': {
+                'payment_doc_sid': str(payment_doc_sid),
+                'deleted_count':   deleted,
+            },
+        }
+
+    def set_item_custom_rate(
+        self,
+        bill_sid: str,
+        upc: str,
+        custom_release_rate: Optional[float],
+        set_by_user_sid: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """UPSERT or DELETE a per-item rate override, with legacy propagation.
+
+        Per CR §"Custom rate legacy-propagation rule":
+        - Clearing (null) → DELETE the targeted row only. No propagation.
+        - Setting (non-null) on a non-legacy item → UPSERT targeted row only.
+        - Setting (non-null) on a LEGACY item (no `payable_bill_rates` row or
+          rate IS NULL) → UPSERT targeted row AND propagate the same rate to
+          every other legacy item with the same `(revenue_type, fp_or_md)`
+          across every open/partial bill in the same creation month.
+
+        Returns ServiceResult<UpdateItemRateResult>: `bill` (refreshed
+        BillDetail), `propagated_to_bill_count`, `propagated_item_count`.
+        """
+        # ── Validate ──────────────────────────────────────────────────
+        if not str(bill_sid).isdigit():
+            return {'success': False, 'error': 'bill_sid must be a numeric string'}
+        upc = str(upc).strip() if upc is not None else None
+        if not upc:
+            return {'success': False, 'error': 'upc is required'}
+        if custom_release_rate is not None:
+            if not isinstance(custom_release_rate, (int, float)) or custom_release_rate < 0:
+                return {'success': False, 'error': 'custom_release_rate must be a non-negative number or null'}
+            if custom_release_rate > 9.99999:   # NUMERIC(6,5) safety
+                return {'success': False, 'error': 'custom_release_rate exceeds maximum (9.99999)'}
+
+        # Targeted bill must exist (we'll need it for the response payload).
+        bills = self.repository.get_all_bills()
+        targeted_bill = bills.get(bill_sid)
+        if not targeted_bill:
+            return {
+                'success': False,
+                'error': f'Bill {bill_sid} not found in active AP ledger',
+                'not_found': True,
+            }
+
+        # ── Clear path: DELETE only, no propagation ───────────────────
+        if custom_release_rate is None:
+            conn = get_postgres_connection()
+            if conn is None:
+                return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+            try:
+                with conn.cursor() as cur:
+                    cur.execute('''
+                        DELETE FROM payable_item_custom_rates
+                        WHERE bill_sid = %s AND upc = %s
+                    ''', (bill_sid, upc))
+                    conn.commit()
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return {'success': False, 'error': f'clear custom rate failed: {e}'}
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            # Refresh bill detail for the response.
+            return self._wrap_with_bill_detail(bill_sid, 0, 0)
+
+        # ── Set path: UPSERT targeted + maybe propagate ──────────────
+        # 1) Look up the targeted item from Oracle (needed for classification).
+        targeted_items = self.repository.get_bill_items([bill_sid])
+        targeted_item = next((it for it in targeted_items if it['upc'] == upc), None)
+        if not targeted_item:
+            return {
+                'success': False,
+                'error': f'Item with upc {upc} not found on bill {bill_sid}',
+                'not_found': True,
+            }
+
+        # 2) Determine if targeted is legacy.
+        auto_rates = self._load_auto_rates([bill_sid])
+        auto_row = auto_rates.get((bill_sid, upc))
+        is_legacy = auto_row is None or auto_row.get('effective_rate') is None
+
+        # 3) UPSERT targeted row.
+        propagated_to_bill_count = 0
+        propagated_item_count = 0
+        propagation_targets: List[tuple] = []   # (bill_sid, upc) pairs
+
+        if is_legacy:
+            propagation_targets = self._find_legacy_propagation_targets(
+                targeted_bill=targeted_bill,
+                targeted_item=targeted_item,
+                bills=bills,
+                exclude_key=(bill_sid, upc),
+            )
+
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                # 3a) UPSERT the targeted row.
+                cur.execute('''
+                    INSERT INTO payable_item_custom_rates
+                        (bill_sid, upc, custom_release_rate, set_by)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (bill_sid, upc) DO UPDATE SET
+                        custom_release_rate = EXCLUDED.custom_release_rate,
+                        set_by              = EXCLUDED.set_by,
+                        set_at              = NOW()
+                ''', (bill_sid, upc, custom_release_rate, set_by_user_sid))
+
+                # 3b) UPSERT propagation targets.
+                if propagation_targets:
+                    cur.executemany('''
+                        INSERT INTO payable_item_custom_rates
+                            (bill_sid, upc, custom_release_rate, set_by)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (bill_sid, upc) DO UPDATE SET
+                            custom_release_rate = EXCLUDED.custom_release_rate,
+                            set_by              = EXCLUDED.set_by,
+                            set_at              = NOW()
+                    ''', [
+                        (b_sid, u, custom_release_rate, set_by_user_sid)
+                        for b_sid, u in propagation_targets
+                    ])
+                    propagated_to_bill_count = len({b for b, _ in propagation_targets})
+                    propagated_item_count = len(propagation_targets)
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'set custom rate failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        return self._wrap_with_bill_detail(
+            bill_sid, propagated_to_bill_count, propagated_item_count,
+        )
+
+    def _load_hand_carry_upcs(self) -> set:
+        """Load hand-carry UPC set via commission's repository.
+
+        Lazy-imported to honor CLAUDE.md's circular-import guidance for
+        cross-module dependencies. Returns an empty set on failure rather
+        than aborting propagation — worst case, HC items just don't
+        propagate (HC has a single rate regardless of category anyway).
+        """
+        try:
+            from app.modules.commission.repository import CommissionRepository
+            return set(CommissionRepository().get_hand_carry_upcs() or [])
+        except Exception as e:
+            print(f'[WARN] AP hand_carry_upcs load failed; treating no items as HC: {e}')
+            return set()
+
+    def _find_legacy_propagation_targets(
+        self,
+        *,
+        targeted_bill: Dict[str, Any],
+        targeted_item: Dict[str, Any],
+        bills: Dict[str, Dict[str, Any]],
+        exclude_key: tuple,
+    ) -> List[tuple]:
+        """Find (bill_sid, upc) pairs eligible for legacy propagation.
+
+        Eligibility:
+        - Bill is open or partial.
+        - Bill's invc_post_date month == targeted bill's month.
+        - Item has NO `payable_bill_rates` row (or row with NULL rate) — i.e. legacy.
+        - Item classifies to the same (revenue_type, fp_or_md) as the targeted item.
+        """
+        hc_upcs = self._load_hand_carry_upcs()
+
+        # 1. Classify the targeted item.
+        targeted_month = targeted_bill['post_month']   # 'YYYY-MM'
+        targeted_bucket = self._classify_item_bucket(
+            targeted_item, hand_carry_upcs=hc_upcs, creation_month=targeted_month,
+        )
+        if targeted_bucket is None:
+            # Suitcase or skipped — no propagation.
+            return []
+
+        # 2. Candidate bills: open/partial AND same post_month.
+        candidate_bill_sids = [
+            b_sid for b_sid, b in bills.items()
+            if b['status'] in ('open', 'partial') and b['post_month'] == targeted_month
+        ]
+        if not candidate_bill_sids:
+            return []
+
+        # 3. Items + auto-rate lookup for legacy determination.
+        candidate_items = self.repository.get_bill_items(candidate_bill_sids)
+        auto = self._load_auto_rates(candidate_bill_sids)
+
+        targets: List[tuple] = []
+        for it in candidate_items:
+            key = (it['bill_sid'], it['upc'])
+            if key == exclude_key:
+                continue
+            a = auto.get(key)
+            if a is not None and a.get('effective_rate') is not None:
+                continue
+            bucket = self._classify_item_bucket(
+                it, hand_carry_upcs=hc_upcs,
+                creation_month=bills[it['bill_sid']]['post_month'],
+            )
+            if bucket != targeted_bucket:
+                continue
+            targets.append(key)
+        return targets
+
+    def _wrap_with_bill_detail(
+        self, bill_sid: str, propagated_to_bill_count: int, propagated_item_count: int,
+    ) -> Dict[str, Any]:
+        """Return UpdateItemRateResult shape: refreshed bill + propagation counts."""
+        detail = self.get_bill_detail(bill_sid)
+        if not detail.get('success'):
+            # Treat detail-lookup failure as a partial success — the write
+            # already happened. Frontend should refetch.
+            return {
+                'success': True,
+                'data': {
+                    'bill': None,
+                    'propagated_to_bill_count': propagated_to_bill_count,
+                    'propagated_item_count':    propagated_item_count,
+                },
+            }
+        return {
+            'success': True,
+            'data': {
+                'bill': detail['data'],
+                'propagated_to_bill_count': propagated_to_bill_count,
+                'propagated_item_count':    propagated_item_count,
+            },
+        }

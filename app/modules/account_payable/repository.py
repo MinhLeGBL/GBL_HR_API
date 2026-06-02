@@ -303,3 +303,49 @@ class AccountPayableRepository:
             row['upc'] = str(row['upc']).strip() if row['upc'] is not None else None
             out.append(row)
         return out
+
+    # ------------------------------------------------------------------
+    # Single payment lookup (for reconcile / unmatch)
+    # ------------------------------------------------------------------
+    def get_payment_meta(self, payment_doc_sid: str) -> Optional[Dict[str, Any]]:
+        """Return one payment's metadata (amount, customer, date, etc.) or None.
+
+        The amount is the absolute value of the SUMMED Charge tenders on
+        the document — typically there's one Charge row per payment, but
+        we don't rely on that.
+        """
+        if not str(payment_doc_sid).isdigit():
+            raise ValueError(f'payment_doc_sid must be numeric; got {payment_doc_sid!r}')
+
+        conn = get_oracle_connection()
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    self.queries.ORACLE_PAYMENT_BY_SID,
+                    {'payment_doc_sid': str(payment_doc_sid)},
+                )
+                row = cursor.fetchone()
+                columns = [d[0].lower() for d in cursor.description]
+        except Exception as e:
+            print(f"ERROR querying AP payment meta: {e}")
+            return None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        if not row:
+            return None
+        meta = dict(zip(columns, row))
+        meta['doc_sid'] = str(meta['doc_sid'])
+        meta['customer_sid'] = (
+            str(meta['customer_sid']) if meta['customer_sid'] is not None else None
+        )
+        meta['ref_sale_sid'] = (
+            str(meta['ref_sale_sid']) if meta['ref_sale_sid'] is not None else None
+        )
+        meta['amount'] = int(meta['amount'] or 0)
+        return meta

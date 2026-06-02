@@ -11,7 +11,7 @@ and `docs/cr/account-payable.md`.
 Auth: token + admin/manager. Department gate (HR, ACC) is enforced by
 section permissions once the `ACCOUNT_PAYABLE` section is seeded.
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from app.core.auth import token_required, manager_required
 from .service import AccountPayableService
@@ -95,6 +95,11 @@ def get_pending_payments():
 # Write endpoints — Phase D
 # ─────────────────────────────────────────────────────────────────────
 
+def _current_user_sid() -> int:
+    """Pull the authenticated user's SID off Flask `g` (set by token_required)."""
+    return getattr(g, 'user_sid', None)
+
+
 @account_payable_bp.route('/reconcile', methods=['POST'])
 @manager_required
 def reconcile():
@@ -102,11 +107,55 @@ def reconcile():
 
     Request: { payment_doc_sid, allocations: [{ bill_sid, amount }] }
     """
-    return _not_implemented('POST /account-payable/reconcile')
+    body = request.get_json(silent=True) or {}
+    payment_doc_sid = body.get('payment_doc_sid')
+    allocations = body.get('allocations') or []
+    if not payment_doc_sid:
+        return jsonify({'success': False, 'error': 'payment_doc_sid is required'}), 400
+
+    result = _service.reconcile(
+        payment_doc_sid=str(payment_doc_sid),
+        allocations=allocations,
+        created_by_user_sid=_current_user_sid(),
+    )
+    if result.get('success'):
+        return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
+    if result.get('conflict'):
+        return jsonify(result), 409
+    return jsonify(result), 400
 
 
 @account_payable_bp.route('/payments/<payment_doc_sid>/unmatch', methods=['POST'])
 @manager_required
 def unmatch_payment(payment_doc_sid: str):
     """Remove an existing manual linkage for the given payment."""
-    return _not_implemented(f'POST /account-payable/payments/{payment_doc_sid}/unmatch')
+    result = _service.unmatch(str(payment_doc_sid))
+    if result.get('success'):
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
+@account_payable_bp.route('/bills/<bill_sid>/items/<upc>/rate', methods=['PATCH'])
+@manager_required
+def set_item_custom_rate(bill_sid: str, upc: str):
+    """Set or clear a per-item custom release rate (with legacy propagation)."""
+    body = request.get_json(silent=True) or {}
+    if 'custom_release_rate' not in body:
+        return jsonify({
+            'success': False,
+            'error': 'custom_release_rate is required (number or null)',
+        }), 400
+    rate = body['custom_release_rate']
+    result = _service.set_item_custom_rate(
+        bill_sid=bill_sid,
+        upc=upc,
+        custom_release_rate=rate,
+        set_by_user_sid=_current_user_sid(),
+    )
+    if result.get('success'):
+        return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
+    return jsonify(result), 400

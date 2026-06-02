@@ -145,6 +145,36 @@ class AccountPayableQueries:
         ORDER BY d.SID, di.SCAN_UPC
     """
 
+    # ────────────────────────────────────────────────────────────────────
+    # Oracle — fetch one Charge payment receipt's metadata.
+    # ────────────────────────────────────────────────────────────────────
+    # Used by `reconcile` and `unmatch` to validate the payment exists,
+    # determine the amount we must allocate against, and surface the
+    # date/store/customer/notes back in the response.
+    #
+    # A "payment receipt" is a document with a negative Charge tender (the
+    # bill being paid). We sum the magnitudes in case a document has
+    # multiple Charge rows.
+    ORACLE_PAYMENT_BY_SID = """
+        SELECT
+            d.SID                                                          AS doc_sid,
+            d.DOC_NO                                                       AS doc_no,
+            d.STORE_CODE                                                   AS doc_store_code,
+            d.BT_CUID                                                      AS customer_sid,
+            TRIM(c.FIRST_NAME)                                             AS customer_name,
+            d.NOTES_LOSTDOC                                                AS notes_lostdoc,
+            d.REF_SALE_SID                                                 AS ref_sale_sid,
+            TO_CHAR(d.invc_post_date, 'YYYY-MM-DD')                        AS payment_date,
+            ABS(NVL(SUM(t.amount), 0))                                     AS amount
+        FROM DOCUMENT d
+        JOIN TENDER t ON t.DOC_SID = d.SID AND t.TENDER_NAME = 'Charge' AND t.AMOUNT < 0
+        LEFT JOIN CUSTOMER c ON c.SID = d.BT_CUID
+        WHERE d.STATUS = 4
+          AND d.SID = :payment_doc_sid
+        GROUP BY d.SID, d.DOC_NO, d.STORE_CODE, d.BT_CUID, c.FIRST_NAME,
+                 d.NOTES_LOSTDOC, d.REF_SALE_SID, d.invc_post_date
+    """
+
     # Postgres DDL — per-item user-set release-rate overrides.
     # Effective rate per item = custom_release_rate ?? auto_release_rate ?? 0
     # where auto_release_rate comes from commission's `payable_bill_rates`.
