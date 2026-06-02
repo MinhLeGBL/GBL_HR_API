@@ -13,6 +13,7 @@ from app.modules.dashboard.routes import dashboard_bp
 from app.modules.auth.user_routes import user_bp
 from app.modules.bathroom.routes import bathroom_bp
 from app.modules.crm.routes import crm_bp
+from app.modules.handcarry.routes import handcarry_bp
 from app.modules.account_payable.routes import account_payable_bp
 
 
@@ -48,6 +49,7 @@ def create_app():
     app.register_blueprint(user_bp)
     app.register_blueprint(bathroom_bp)
     app.register_blueprint(crm_bp)
+    app.register_blueprint(handcarry_bp)
     app.register_blueprint(account_payable_bp)
 
     # Root endpoint
@@ -71,6 +73,7 @@ def create_app():
                 'users': '/api/v1/users',
                 'bathroom': '/api/v1/bathroom',
                 'crm': '/api/v1/crm',
+                'handcarry': '/api/v1/handcarry',
                 'account_payable': '/api/v1/account-payable'
             }
         }), 200
