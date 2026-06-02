@@ -3,6 +3,62 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.3.0] — 2026-06-02
+
+### Changed — CR #64: revert catalog to a UPC flag list, source product info live from Oracle
+
+Oracle is the system of record for hand-carry items: goods are received
+into Oracle first (with all metadata), then the user merely tags UPCs
+in this tool. CR #58's denormalized columns were duplicating that data
+and got skipped in real-world workflow — 616 of 1,313 rows in production
+had NULL description/brand/etc. because the import dialog wasn't being
+used.
+
+#### Schema
+- `rps.carrier_item` reverted to a UPC flag list. Idempotent
+  `DROP COLUMN IF EXISTS` in `init_database` removes
+  `description, brand, category, color, size, season, quantity_imported,
+  price_before_vat, price_after_vat`.
+- **Kept** `quantity_sold` (orphan-UPC override from v0.2.2) — for items
+  Oracle no longer recognises, a non-NULL stored value wins over the
+  (null) live join so the row shows as already sold-through.
+- Final schema: `sid, scan_upc, quantity_sold`.
+
+#### `GET /api/v1/handcarry`
+- Response shape **unchanged** — same 12 fields per item. All except
+  `id`, `upc`, and `quantity_sold` (override) now come live from Oracle
+  via three existing helpers:
+  - `fetch_oracle_product_info` → description, brand, category, color, size,
+    season, prices.
+  - `_lifetime_received_for` → `quantity_imported`.
+  - `_lifetime_sold_for` → `quantity_sold` when the override is NULL.
+- Live verification on 1,313 production UPCs: 823 (63%) now have full
+  description/brand/price (up from the CR #58 backfill's 697 / 53%).
+  Orphan UPCs continue to use their stored `quantity_sold` value.
+
+#### `POST /api/v1/handcarry/import`
+- Body simplifies back to `{ upcs: int[] }` (CR #57's original shape).
+  The `records[]` path is removed entirely — there's no per-row data
+  left to import. SKIP-on-exists semantics for existing UPCs.
+- Response: `{ success, inserted, skipped, errors, total_received }`.
+  `updated` field removed (nothing to update).
+
+#### Tests
+- 27 unit tests pass. `TestListItems` rewritten to mock the three Oracle
+  join helpers + the simplified Postgres SELECT. `TestImportRecords`
+  removed entirely. Route test `test_records_body_no_longer_accepted`
+  asserts the legacy shape returns 400.
+
+#### Migration / live impact
+- `init_db.py` reverts the schema with idempotent `DROP COLUMN IF EXISTS`.
+  All 1,313 UPC rows preserved; 490 orphan-override rows preserved.
+  Existing UI calls keep working — same response shape, fresher data.
+
+#### Bumped MINOR — breaking request body, additive shape stability
+The `POST /import` request body shape narrows (drops `records[]`), so
+strict MINOR per Keep-A-Changelog. `GET /handcarry` response is identical,
+so existing UI doesn't need to ship for the backend change.
+
 ## [0.2.2] — 2026-05-25
 
 ### Changed

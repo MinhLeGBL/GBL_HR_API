@@ -1,31 +1,29 @@
 """
 Hand Carry Service.
 
-Manages the `rps.carrier_item` Postgres catalog — the canonical list of
-UPCs that are treated as hand-carry, with the per-item product info,
-import qty, and prices the frontend uploads via Excel (CR #58).
+Manages the `rps.carrier_item` Postgres catalog — a simple UPC flag list
+identifying which items should be treated as hand-carry. All product info
+(description, brand, category, color, size, season, prices) is sourced
+live from Oracle on read (CR #64).
 
 Used by the commission pipeline (see `CommissionRepository.get_hand_carry_upcs`)
 to filter hand-carry items out of the store commission pool while keeping
 them eligible for the per-employee `hand_carry` personal-commission line
 (CR #56).
 
-Table schema (post CR #58):
+Table schema (post CR #64):
     rps.carrier_item
-        sid                integer    PK (serial)
-        scan_upc           integer    NOT NULL   — UPC
-        description        text       — product description (from import)
-        brand              text       — vendor name (from import / Oracle)
-        category           text       — category (from import / Oracle)
-        color              text       — colour (from import / Oracle)
-        size               text       — size (from import / Oracle)
-        season             text       — e.g. 'SS25' (from import / Oracle)
-        quantity_imported  integer    — qty hand-carried in this shipment
-        price_before_vat   numeric    — selling price excluding VAT
-        price_after_vat    numeric    — selling price including VAT
+        sid             integer  PK (serial)
+        scan_upc        integer  NOT NULL  — UPC flagged as hand-carry
+        quantity_sold   integer  NULL      — override for orphan UPCs that
+                                              Oracle no longer recognises
+                                              (treated as already sold-through).
+                                              When NULL, live Oracle sales
+                                              count is used.
 
-`quantity_sold` is NOT stored — it's joined live from Oracle (lifetime
-sales for the UPC) every time `list_items` is called.
+Every other field on the GET response (description / brand / category /
+color / size / season / quantity_imported / quantity_sold / prices) is
+joined live from Oracle on every list call.
 """
 from typing import Any, Dict, List, Optional
 
@@ -37,15 +35,9 @@ from .queries import HandCarryQueries
 # to leave headroom for future growth.
 _ORACLE_IN_CHUNK = 500
 
-# Columns selected from `rps.carrier_item` in the order the GET response
-# uses. Kept as a module constant so list_items and the backfill script
-# can share the layout.
-_CATALOG_COLUMNS = (
-    'sid', 'scan_upc',
-    'description', 'brand', 'category', 'color', 'size', 'season',
-    'quantity_imported', 'quantity_sold',
-    'price_before_vat', 'price_after_vat',
-)
+# Columns selected from `rps.carrier_item`. CR #64 reverted the table to
+# a UPC flag list; `quantity_sold` remains as an orphan-UPC override.
+_CATALOG_COLUMNS = ('sid', 'scan_upc', 'quantity_sold')
 _CATALOG_SELECT = ', '.join(_CATALOG_COLUMNS)
 
 
@@ -115,26 +107,31 @@ class HandCarryService:
                         scan_upc  INTEGER NOT NULL
                     )
                 """)
-                # All new columns are nullable so existing 1,270 rows
-                # don't need backfill before the migration runs.
-                # `quantity_sold` (v0.2.1) is a stored override — when
-                # non-NULL, it takes precedence over the live Oracle join.
-                # Used for orphan UPCs that aren't in Oracle's catalog
-                # (treated as already sold-through).
+                # CR #64: catalog reverts to a UPC flag list — all product
+                # info is sourced live from Oracle. Keep `quantity_sold`
+                # as an orphan-UPC override (non-NULL value takes precedence
+                # over the live Oracle sales count — used for items Oracle
+                # no longer recognises so they show as already sold-through).
                 cur.execute("""
                     ALTER TABLE rps.carrier_item
-                        ADD COLUMN IF NOT EXISTS description       TEXT,
-                        ADD COLUMN IF NOT EXISTS brand             TEXT,
-                        ADD COLUMN IF NOT EXISTS category          TEXT,
-                        ADD COLUMN IF NOT EXISTS color             TEXT,
-                        ADD COLUMN IF NOT EXISTS size              TEXT,
-                        ADD COLUMN IF NOT EXISTS season            TEXT,
-                        ADD COLUMN IF NOT EXISTS quantity_imported INTEGER,
-                        ADD COLUMN IF NOT EXISTS quantity_sold     INTEGER,
-                        ADD COLUMN IF NOT EXISTS price_before_vat  NUMERIC(14, 2),
-                        ADD COLUMN IF NOT EXISTS price_after_vat   NUMERIC(14, 2)
+                        ADD COLUMN IF NOT EXISTS quantity_sold INTEGER
                 """)
-                # Not unique — duplicates are handled in app code so the
+                # CR #64 migration: drop the denormalized product columns
+                # that CR #58 introduced. Idempotent — IF EXISTS makes
+                # re-running the init script safe.
+                cur.execute("""
+                    ALTER TABLE rps.carrier_item
+                        DROP COLUMN IF EXISTS description,
+                        DROP COLUMN IF EXISTS brand,
+                        DROP COLUMN IF EXISTS category,
+                        DROP COLUMN IF EXISTS color,
+                        DROP COLUMN IF EXISTS size,
+                        DROP COLUMN IF EXISTS season,
+                        DROP COLUMN IF EXISTS quantity_imported,
+                        DROP COLUMN IF EXISTS price_before_vat,
+                        DROP COLUMN IF EXISTS price_after_vat
+                """)
+                # Not unique — duplicates handled in app code so the
                 # import flow can report them rather than raise an IntegrityError.
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS carrier_item_scan_upc_idx
@@ -156,16 +153,17 @@ class HandCarryService:
     # ------------------------------------------------------------------
     def list_items(self, search: Optional[str] = None) -> Dict[str, Any]:
         """
-        Return the full hand-carry catalogue.
+        Return the full hand-carry catalogue (CR #64).
 
-        CR #58 extends each item with product info, `quantity_imported`,
-        `quantity_sold` (live Oracle lifetime sales), and selling prices.
+        Postgres holds just the UPC flag list + an optional quantity_sold
+        override. Product info, prices, and lifetime imported/sold counts
+        come live from Oracle on every call.
 
         Args:
             search: optional partial-UPC substring; case-insensitive contains
                 match against `scan_upc` cast to text.
         """
-        # 1. Pull the catalog rows from Postgres
+        # 1. Pull the UPC flag list + override from Postgres
         conn = get_postgres_connection()
         if conn is None:
             return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
@@ -192,39 +190,38 @@ class HandCarryService:
         finally:
             conn.close()
 
-        # 2. Compute lifetime sold qty per UPC from Oracle (live join)
-        upcs_in_catalog = [int(r[1]) for r in rows]
-        sold_by_upc = self._lifetime_sold_for(upcs_in_catalog)
+        upcs = [int(r[1]) for r in rows]
+
+        # 2. Live Oracle joins — single round-trip each (with internal chunking)
+        product_info = self.fetch_oracle_product_info(upcs)
+        received_by_upc = self._lifetime_received_for(upcs)
+        sold_by_upc = self._lifetime_sold_for(upcs)
 
         items = []
-        for r in rows:
-            (sid, scan_upc, description, brand, category, color, size,
-             season, qty_imp, qty_sold_stored,
-             price_before, price_after) = r
+        for sid, scan_upc, qty_sold_stored in rows:
             upc_int = int(scan_upc)
+            info = product_info.get(upc_int, {})
 
-            # quantity_sold precedence: stored value (used for orphan
-            # UPCs that Oracle no longer recognises) takes priority over
-            # the live Oracle join. Active items leave the stored value
-            # NULL so sales keep updating in real time.
+            # quantity_sold precedence: stored override (for orphan UPCs
+            # Oracle no longer recognises) wins; otherwise live Oracle count.
             if qty_sold_stored is not None:
                 quantity_sold = int(qty_sold_stored)
             else:
                 quantity_sold = int(sold_by_upc.get(upc_int, 0))
 
             items.append({
-                'id':                int(sid),
+                'id':                 int(sid),
                 'upc':                upc_int,
-                'description':        description,
-                'brand':              brand,
-                'category':           category,
-                'color':              color,
-                'size':               size,
-                'season':             season,
-                'quantity_imported':  int(qty_imp) if qty_imp is not None else None,
+                'description':        info.get('description'),
+                'brand':              info.get('brand'),
+                'category':           info.get('category'),
+                'color':              info.get('color'),
+                'size':               info.get('size'),
+                'season':             info.get('season'),
+                'quantity_imported':  int(received_by_upc.get(upc_int, 0)) if upc_int in received_by_upc else None,
                 'quantity_sold':      quantity_sold,
-                'price_before_vat':   float(price_before) if price_before is not None else None,
-                'price_after_vat':    float(price_after) if price_after is not None else None,
+                'price_before_vat':   info.get('price_before_vat'),
+                'price_after_vat':    info.get('price_after_vat'),
             })
 
         return {'success': True, 'items': items, 'count': len(items)}
@@ -348,124 +345,7 @@ class HandCarryService:
         return result
 
     # ------------------------------------------------------------------
-    # Bulk import — CR #58: full-record REPLACE semantics
-    # ------------------------------------------------------------------
-    def import_records(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Bulk upsert hand-carry catalog rows from full records.
-
-        Each record: { upc, description?, brand?, category?, color?, size?,
-                       season?, quantity_imported, price_before_vat,
-                       price_after_vat }
-
-        Required fields: upc (positive int), quantity_imported
-        (non-negative int), price_before_vat (non-negative number),
-        price_after_vat (non-negative number).
-
-        Behaviour:
-            - If `scan_upc` already exists, **all fields are replaced**
-              with the import row's values (the file is the source of
-              truth, not an additive log — CR #58).
-            - If new, INSERT a new row.
-            - Within a single batch, duplicate UPCs collapse to the
-              **last** occurrence (matches "file wins" semantics).
-            - Invalid rows surface in `errors` keyed by `row_index`;
-              the rest of the batch still imports.
-
-        Returns:
-            { success, inserted, updated, skipped, errors, total_received }
-        """
-        if not isinstance(records, list):
-            return {'success': False, 'error': "'records' must be an array"}
-
-        normalised: Dict[int, Dict[str, Any]] = {}
-        errors: List[Dict[str, Any]] = []
-
-        for idx, rec in enumerate(records):
-            try:
-                if not isinstance(rec, dict):
-                    raise ValueError('each record must be an object')
-                upc = _validate_upc(rec.get('upc'))
-                normalised[upc] = {
-                    'upc':                upc,
-                    'description':        _opt_str(rec.get('description')),
-                    'brand':              _opt_str(rec.get('brand')),
-                    'category':           _opt_str(rec.get('category')),
-                    'color':              _opt_str(rec.get('color')),
-                    'size':               _opt_str(rec.get('size')),
-                    'season':             _opt_str(rec.get('season')),
-                    'quantity_imported':  _validate_nonneg_int(rec.get('quantity_imported'), 'quantity_imported'),
-                    'price_before_vat':   _validate_nonneg_number(rec.get('price_before_vat'), 'price_before_vat'),
-                    'price_after_vat':    _validate_nonneg_number(rec.get('price_after_vat'), 'price_after_vat'),
-                }
-            except (TypeError, ValueError) as e:
-                errors.append({'row_index': idx, 'error': str(e)})
-
-        conn = get_postgres_connection()
-        if conn is None:
-            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
-
-        inserted = updated = 0
-        try:
-            cur = conn.cursor()
-            try:
-                # One round-trip to learn which UPCs already exist
-                cur.execute('SELECT scan_upc FROM rps.carrier_item')
-                existing = {int(r[0]) for r in cur.fetchall()}
-
-                for upc, rec in normalised.items():
-                    values = (
-                        rec['description'], rec['brand'], rec['category'],
-                        rec['color'], rec['size'], rec['season'],
-                        rec['quantity_imported'],
-                        rec['price_before_vat'], rec['price_after_vat'],
-                    )
-                    if upc in existing:
-                        cur.execute("""
-                            UPDATE rps.carrier_item
-                               SET description       = %s,
-                                   brand             = %s,
-                                   category          = %s,
-                                   color             = %s,
-                                   size              = %s,
-                                   season            = %s,
-                                   quantity_imported = %s,
-                                   price_before_vat  = %s,
-                                   price_after_vat   = %s
-                             WHERE scan_upc = %s
-                        """, (*values, upc))
-                        updated += 1
-                    else:
-                        cur.execute("""
-                            INSERT INTO rps.carrier_item (
-                                scan_upc, description, brand, category, color,
-                                size, season, quantity_imported,
-                                price_before_vat, price_after_vat
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (upc, *values))
-                        existing.add(upc)
-                        inserted += 1
-
-                conn.commit()
-            finally:
-                cur.close()
-        except Exception as e:
-            conn.rollback()
-            return {'success': False, 'error': f'Import failed: {e}'}
-        finally:
-            conn.close()
-
-        return {
-            'success': True,
-            'inserted': inserted,
-            'updated': updated,
-            'skipped': 0,                          # nothing is skipped in REPLACE mode
-            'errors': errors,
-            'total_received': len(records),
-        }
-
-    # ------------------------------------------------------------------
-    # Bulk import — LEGACY UPC-only shape (kept for backward compat)
+    # Bulk import — CR #64: UPC-only (the catalog is a flag list)
     # ------------------------------------------------------------------
     def import_upcs(self, upcs: List[Any]) -> Dict[str, Any]:
         """

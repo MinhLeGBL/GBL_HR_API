@@ -1,13 +1,16 @@
 """
-Hand Carry API Routes (CR #57, CR #58).
+Hand Carry API Routes (CR #57 / CR #64).
 
-`rps.carrier_item` is the hand-carry catalog. Per CR #58 each row now
-carries product info (description / brand / category / color / size /
-season), an `quantity_imported`, and selling prices. `quantity_sold` is
-computed live from Oracle (lifetime sales for the UPC).
+`rps.carrier_item` is a UPC flag list — the set of items GBL treats as
+hand-carry. Product info (description / brand / category / color / size /
+season), prices, and lifetime imported / sold counts are all sourced
+live from Oracle on every `GET /handcarry` request (CR #64).
 
-The frontend imports rows from Excel/CSV and manages the list via these
-endpoints. The UI is read-only outside the import flow.
+`quantity_sold` has a stored override column for orphan UPCs that Oracle
+no longer recognises — when non-NULL the override wins over the live count.
+
+The frontend uploads UPCs from Excel/CSV via the import endpoint; the UI
+is read-only outside that flow.
 """
 from flask import Blueprint, jsonify, request
 
@@ -40,42 +43,29 @@ def list_handcarry():
 @manager_required
 def import_handcarry():
     """
-    Bulk upsert hand-carry catalog rows.
+    Bulk import UPCs into the hand-carry flag list (CR #64).
 
-    CR #58 full-record form (preferred):
-        { "records": [
-            { "upc", "description", "brand", "category", "color", "size",
-              "season", "quantity_imported", "price_before_vat",
-              "price_after_vat" },
-            ...
-        ] }
-    REPLACE semantics — existing UPCs have all fields overwritten with
-    the import row's values (the file is the source of truth).
-
-    Legacy UPC-only form (still accepted for callers that haven't
-    migrated):
+    Request body:
         { "upcs": [12813, 15611, ...] }
-    SKIP-on-exists semantics. New UPCs are inserted with only `scan_upc`
-    populated.
 
-    Returns `{ success, inserted, updated, skipped, errors, total_received }`.
+    SKIP-on-exists semantics — existing UPCs are left alone, new ones
+    are inserted with only `scan_upc` populated. All product info is
+    sourced live from Oracle on read, so there's nothing to update.
+
+    Returns `{ success, inserted, skipped, errors, total_received }`.
     Validation errors are reported per-row in `errors` without aborting
     the batch.
     """
     data = request.get_json(silent=True) or {}
 
-    if 'records' in data:
-        result = handcarry_service.import_records(data['records'])
-    elif 'upcs' in data:
-        result = handcarry_service.import_upcs(data['upcs'])
-    else:
+    if 'upcs' not in data:
         return jsonify({
             'success': False,
-            'error': "Missing 'records' (or legacy 'upcs') array in request body",
+            'error': "Missing 'upcs' array in request body",
         }), 400
 
+    result = handcarry_service.import_upcs(data['upcs'])
     if not result['success']:
-        # Shape validation errors → 400; backend failures → 500
         status = 400 if 'array' in result.get('error', '').lower() else 500
         return jsonify(result), status
     return jsonify(result), 200
