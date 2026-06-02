@@ -173,6 +173,161 @@ class AccountPayableService:
         return {(r[0], r[1]): float(r[2]) for r in rows}
 
     # ------------------------------------------------------------------
+    # Release accumulator (CR #66) — read by commission's calculate
+    # ------------------------------------------------------------------
+    # Constants mirror commission's classification — kept local to avoid
+    # importing from commission and creating a circular module dep.
+    _SUITCASE_VENDORS = frozenset(['TVL', 'TIT'])
+    _SUITCASE_FLAT_AMOUNT = 500_000
+    _VAT_DIVISOR = 1.1  # CR #20 flat-10% VAT convention
+
+    def compute_released_for_month(
+        self, year: int, month: int,
+    ) -> Dict[str, Dict[str, int]]:
+        """CR #66: accumulate released commission per (employee_code, category)
+        for bills paid (in part or full) during the given month.
+
+        Algorithm — mirrors the spec in
+        `docs/cr/commission.md → CR #66 — Spec`:
+
+        1. Load all bills via `_load_bills` (REF_SALE_SID → manual → FIFO
+           replay, CR #62 unified). Reuses the per-request replay output —
+           commission's calculate triggers this once per `POST /calculate`.
+        2. For each bill, find payments whose `payment_date` falls in the
+           target month. A bill is "in scope" for month M if it has any
+           such payment. Allocation factor = `sum(amount_applied_in_month)
+           / original_charge`.
+        3. Pull line items for in-scope bills via Oracle
+           `ORACLE_BILL_ITEMS_BY_SID`. Each item contributes
+              `revenue_basis × effective_rate × allocation_factor`
+           to its employee's `revenue_type[_fp_or_md]` bucket.
+        4. `effective_rate = custom_release_rate ?? auto_release_rate ?? 0`.
+           Custom rates live in `payable_item_custom_rates` (CR #60); auto
+           rates come from commission's `payable_bill_rates` snapshot (CR #61).
+        5. `revenue_basis = revenue_with_vat / 1.1` for every category
+           except `hand_carry` (with-VAT) and `suitcase` (flat amount, no
+           rate — `_SUITCASE_FLAT_AMOUNT × qty`).
+
+        Items missing both an auto-rate snapshot AND a custom override
+        contribute 0 — typically legacy bills predating CR #61. A warning
+        is logged when this happens so users can investigate; never errors.
+
+        Returns:
+            {employee_code: {category_key: int_amount}}
+            where category_key is 'fashion_fp' | 'fashion_md' | 'jewelry'
+            | 'vhernier' | 'rosa_maria' | 'hand_carry' | 'suitcase'
+            | 'home_decor' | 'other'. Zero-value entries are dropped.
+            Note: there is no `over_target` bucket here — over-target
+            bonus is baked into `payable_bill_rates` as a fashion+fp row
+            at the inflated rate, so it accumulates under `fashion_fp`.
+            This differs from `withheld_by_category` (which splits OT out)
+            and is per CR #66 spec.
+
+        Empty dict on Oracle/Postgres connection failure.
+        """
+        target_month_str = f'{year:04d}-{month:02d}'
+
+        bills = self._load_bills()
+        if not bills:
+            return {}
+
+        # 1. Find bills with payments in the target month + total applied.
+        applied_in_month_by_bill: Dict[str, int] = {}
+        for bill_sid, bill in bills.items():
+            applied_in_month = sum(
+                p['amount_applied'] for p in bill.get('payments', [])
+                if p.get('payment_date', '')[:7] == target_month_str
+            )
+            if applied_in_month > 0:
+                applied_in_month_by_bill[bill_sid] = applied_in_month
+
+        if not applied_in_month_by_bill:
+            return {}
+
+        # 2. Fetch line items + rate lookups for in-scope bills.
+        scope_sids = list(applied_in_month_by_bill.keys())
+        items = self.repository.get_bill_items(scope_sids)
+        auto_rates = self._load_auto_rates(scope_sids)
+        custom_rates = self._load_custom_rates(scope_sids)
+
+        # 3. Accumulate per (employee_code, category_key).
+        released_by_emp_by_cat: Dict[str, Dict[str, float]] = {}
+        missing_rate_count = 0
+        for item in items:
+            emp_code = item.get('employee_code')
+            if not emp_code:
+                continue
+            bill_sid = item['bill_sid']
+            original_charge = bills[bill_sid]['original_charge']
+            if original_charge <= 0:
+                continue
+            allocation_factor = (
+                applied_in_month_by_bill[bill_sid] / float(original_charge)
+            )
+            upc = item.get('upc')
+            qty = int(item.get('qty') or 0)
+            revenue_with_vat = float(item.get('revenue_with_vat') or 0)
+            vendor = item.get('vendor_code')
+
+            # Suitcase: flat per qty × allocation, no rate snapshot.
+            if vendor in self._SUITCASE_VENDORS:
+                contribution = (
+                    self._SUITCASE_FLAT_AMOUNT * qty * allocation_factor
+                )
+                category_key = 'suitcase'
+            else:
+                auto = auto_rates.get((bill_sid, upc)) if upc else None
+                custom = custom_rates.get((bill_sid, upc)) if upc else None
+                if not auto and custom is None:
+                    missing_rate_count += 1
+                    continue
+                if custom is not None:
+                    effective_rate = custom
+                else:
+                    effective_rate = auto['effective_rate'] or 0.0
+                if not auto:
+                    # Custom override without an auto row — uncommon, but
+                    # we lack a revenue_type so we cannot bucket it.
+                    missing_rate_count += 1
+                    continue
+                revenue_type = auto['revenue_type']
+                fp_or_md = auto['fp_or_md']
+
+                if revenue_type == 'hand_carry':
+                    revenue_basis = revenue_with_vat
+                else:
+                    revenue_basis = revenue_with_vat / self._VAT_DIVISOR
+
+                contribution = (
+                    revenue_basis * float(effective_rate) * allocation_factor
+                )
+                category_key = (
+                    f'{revenue_type}_{fp_or_md}' if fp_or_md else revenue_type
+                )
+
+            if contribution == 0:
+                continue
+            by_cat = released_by_emp_by_cat.setdefault(emp_code, {})
+            by_cat[category_key] = by_cat.get(category_key, 0.0) + contribution
+
+        if missing_rate_count:
+            print(
+                f'[WARN] CR #66: {missing_rate_count} line item(s) for '
+                f'{target_month_str} had no rate snapshot — contributed 0 '
+                'to released. Likely legacy bills from before CR #61.'
+            )
+
+        # 4. Round per-bucket; drop zeros after rounding.
+        return {
+            code: {
+                k: int(round(v))
+                for k, v in by_cat.items() if int(round(v)) != 0
+            }
+            for code, by_cat in released_by_emp_by_cat.items()
+            if any(int(round(v)) != 0 for v in by_cat.values())
+        }
+
+    # ------------------------------------------------------------------
     # Shape helpers
     # ------------------------------------------------------------------
     @staticmethod
