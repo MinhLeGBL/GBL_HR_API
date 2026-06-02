@@ -88,7 +88,14 @@ def get_bill_detail(bill_sid: str):
 @token_required
 def get_pending_payments():
     """Payments queue. Query param: ?status=unmatched|matched_pending"""
-    return _not_implemented('GET /account-payable/payments')
+    status = request.args.get('status')
+    if status and status not in ('unmatched', 'matched_pending'):
+        return jsonify({
+            'success': False,
+            'error': f"status must be 'unmatched' or 'matched_pending' (got {status!r})",
+        }), 400
+    result = _service.get_pending_payments(status=status)
+    return jsonify(result), 200 if result.get('success') else 500
 
 
 # ─────────────────────────────────────────────────────────────────────

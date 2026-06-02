@@ -446,9 +446,153 @@ class AccountPayableService:
         out.sort(key=lambda r: r['age_days'], reverse=True)
         return {'success': True, 'data': out}
 
+    def _load_reconciliations(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Map payment_doc_sid → list of its linkage rows from
+        `payable_reconciliations`. Empty dict on connection failure."""
+        conn = get_postgres_connection()
+        if conn is None:
+            return {}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT payment_doc_sid, bill_sid, amount_applied
+                    FROM payable_reconciliations
+                ''')
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f'[WARN] AP _load_reconciliations failed: {e}')
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            out.setdefault(r[0], []).append({
+                'bill_sid':       r[1],
+                'amount_applied': int(r[2]),
+            })
+        return out
+
     def get_pending_payments(self, status: Optional[str] = None) -> Dict[str, Any]:
-        """Payments queue. status=unmatched|matched_pending."""
-        raise NotImplementedError('CR #60 endpoint not yet implemented')
+        """Payments queue.
+
+        Source: every Charge-tender payment receipt (negative-Charge on
+        receipt_type=0 docs) in the past 24 months. Each receipt is
+        bucketed by the CR §"Payment queue filter rules":
+
+        - `unmatched`: no REF_SALE_SID matching a known bill AND no
+          Postgres `payable_reconciliations` row. `is_overdue=true` when
+          the payment's calendar month is past.
+        - `matched_pending (ref_sale_sid)`: REF_SALE_SID points at a real
+          bill AND payment_date's month == current month. (Read-only —
+          0 hits in current data, kept as future-proofing if Retail Pro
+          starts setting REF_SALE_SID on payment receipts.)
+        - `matched_pending (manual)`: has a Postgres linkage AND
+          payment_date's month == current month.
+
+        Released payments (payment month closed AND any linkage exists)
+        do NOT appear in the queue per the CR's lifecycle rule.
+
+        `status` filter optionally narrows to one bucket.
+
+        Each row carries `suggested_bills` = the customer's open + partial
+        bill list. Walk-in payments (`customer_sid=null`) get `[]`.
+
+        Returns ServiceResult<PendingPayment[]>, sorted by payment_date desc.
+        """
+        if status and status not in ('unmatched', 'matched_pending'):
+            return {
+                'success': False,
+                'error': f"status must be 'unmatched' or 'matched_pending' (got {status!r})",
+            }
+
+        payments = self.repository.get_charge_payments()
+        if not payments:
+            return {'success': True, 'data': []}
+
+        linkages = self._load_reconciliations()
+        bills = self.repository.get_all_bills()
+
+        # Suggested_bills: precompute the customer → open+partial-bill list.
+        open_bills_by_customer: Dict[str, List[Dict[str, Any]]] = {}
+        today = _today()
+        for b_sid, b in bills.items():
+            if b['status'] not in ('open', 'partial'):
+                continue
+            if not b['customer_sid']:
+                continue
+            open_bills_by_customer.setdefault(b['customer_sid'], []).append({
+                'bill_sid':         b_sid,
+                'doc_no':           b['doc_no'],
+                'created_date':     b['created_date'],
+                'age_days':         _age_days(b['created_date'], today),
+                'original_charge':  b['original_charge'],
+                'remaining_unpaid': b['remaining_unpaid'],
+            })
+        # Sort each customer's suggestions oldest-first (FIFO bias).
+        for sugg in open_bills_by_customer.values():
+            sugg.sort(key=lambda b: b['created_date'])
+
+        current_month = _current_month_str(today)
+        out: List[Dict[str, Any]] = []
+        for p in payments:
+            pay_month = p['payment_date'][:7]
+            is_past_month = pay_month < current_month
+
+            ref_sid = p.get('ref_sale_sid')
+            existing = linkages.get(p['payment_doc_sid'])
+
+            if ref_sid and ref_sid in bills:
+                match_source = 'ref_sale_sid'
+                ref_bill = bills[ref_sid]
+                allocations = [{
+                    'bill_sid':       ref_sid,
+                    'doc_no':         ref_bill['doc_no'],
+                    'amount_applied': p['amount'],
+                }]
+                payment_status = 'matched_pending'   # released ones are filtered out below
+            elif existing:
+                match_source = 'manual'
+                allocations = [{
+                    'bill_sid':       link['bill_sid'],
+                    'doc_no':         bills.get(link['bill_sid'], {}).get('doc_no'),
+                    'amount_applied': link['amount_applied'],
+                } for link in existing]
+                payment_status = 'matched_pending'
+            else:
+                match_source = None
+                allocations = []
+                payment_status = 'unmatched'
+
+            # Released = matched + payment month past → drop from queue.
+            if payment_status == 'matched_pending' and is_past_month:
+                continue
+
+            if status and status != payment_status:
+                continue
+
+            out.append({
+                'payment_doc_sid': p['payment_doc_sid'],
+                'payment_doc_no':  p['payment_doc_no'],
+                'payment_date':    p['payment_date'],
+                'doc_store_code':  p['doc_store_code'],
+                'customer_sid':    p['customer_sid'],
+                'customer_name':   p['customer_name'],
+                'amount':          p['amount'],
+                'notes_lostdoc':   p['notes_lostdoc'],
+                'status':          payment_status,
+                'match_source':    match_source,
+                'is_overdue':      payment_status == 'unmatched' and is_past_month,
+                'allocations':     allocations,
+                'suggested_bills': (
+                    open_bills_by_customer.get(p['customer_sid'], [])
+                    if p['customer_sid'] else []
+                ),
+            })
+        out.sort(key=lambda r: r['payment_date'], reverse=True)
+        return {'success': True, 'data': out}
 
     # ------------------------------------------------------------------
     # Classifier — bucket-only port of CommissionService._classify_item_rate

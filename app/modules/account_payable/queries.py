@@ -146,6 +146,51 @@ class AccountPayableQueries:
     """
 
     # ────────────────────────────────────────────────────────────────────
+    # Oracle — payment receipts for the AP reconcile queue.
+    # ────────────────────────────────────────────────────────────────────
+    # Negative-Charge tender events on receipt_type=0 (SALE) documents.
+    # In Vietnamese retail practice these are the customer-paid-cash-to-
+    # clear-debt receipts. Excludes:
+    # - Returns (receipt_type=1) — those are merchandise returns, handled
+    #   automatically via REF_SALE_SID in commission's CR #59 ledger
+    #   (not reconciliation candidates).
+    # - Deposit-on-account events — those use TENDER_NAME='Payment on
+    #   Account', so the tender filter already excludes them.
+    #
+    # `REF_SALE_SID` survey (24 months): 0 of 78 negative-Charge type-0
+    # docs have it set today. We keep the field in the result because
+    # Retail Pro may start setting it on payments in future operations
+    # — the queue's `match_source='ref_sale_sid'` branch handles that
+    # without code changes.
+    #
+    # GROUP BY collapses multi-Charge-row payment docs (a single document
+    # can have 2-3 split tender rows) into one queue row with the summed
+    # amount.
+    ORACLE_CHARGE_PAYMENTS = """
+        SELECT
+            d.SID                                       AS payment_doc_sid,
+            d.DOC_NO                                    AS payment_doc_no,
+            d.STORE_CODE                                AS doc_store_code,
+            d.BT_CUID                                   AS customer_sid,
+            TRIM(c.FIRST_NAME)                          AS customer_name,
+            d.NOTES_LOSTDOC                             AS notes_lostdoc,
+            d.REF_SALE_SID                              AS ref_sale_sid,
+            ABS(SUM(t.AMOUNT))                          AS amount,
+            TO_CHAR(d.invc_post_date, 'YYYY-MM-DD')     AS payment_date
+        FROM DOCUMENT d
+        JOIN TENDER t ON t.DOC_SID = d.SID
+                       AND t.TENDER_NAME = 'Charge'
+                       AND t.AMOUNT < 0
+        LEFT JOIN CUSTOMER c ON c.SID = d.BT_CUID
+        WHERE d.STATUS = 4
+          AND d.RECEIPT_TYPE = 0
+          AND d.invc_post_date >= ADD_MONTHS(SYSDATE, -24)
+        GROUP BY d.SID, d.DOC_NO, d.STORE_CODE, d.BT_CUID, c.FIRST_NAME,
+                 d.NOTES_LOSTDOC, d.REF_SALE_SID, d.invc_post_date
+        ORDER BY d.invc_post_date DESC
+    """
+
+    # ────────────────────────────────────────────────────────────────────
     # Oracle — fetch one Charge payment receipt's metadata.
     # ────────────────────────────────────────────────────────────────────
     # Used by `reconcile` and `unmatch` to validate the payment exists,

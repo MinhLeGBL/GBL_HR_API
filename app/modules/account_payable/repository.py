@@ -130,7 +130,7 @@ class AccountPayableRepository:
                     payments_chrono[-1]['payment_date'] if payments_chrono else None
                 )
                 result[bill_sid] = {
-                    'doc_no':            str(b['doc_no']),
+                    'doc_no':            str(b['doc_no']) if b['doc_no'] is not None else None,
                     'doc_store_code':    b['doc_store_code'],
                     'customer_sid':      b['customer_sid'],
                     'customer_name':     b['customer_name'],
@@ -210,7 +210,7 @@ class AccountPayableRepository:
             p['remaining'] -= consumed
             b['payments_chrono'].append({
                 'payment_doc_sid': str(p['doc_sid']),
-                'payment_doc_no':  p['doc_no'],
+                'payment_doc_no':  str(p['doc_no']) if p['doc_no'] is not None else None,
                 'payment_date':    p['post_date_str'],
                 'amount_applied':  int(consumed),
                 'source':          'ref_sale_sid',
@@ -230,7 +230,7 @@ class AccountPayableRepository:
                 p['remaining'] -= consumed
                 b['payments_chrono'].append({
                     'payment_doc_sid': str(p['doc_sid']),
-                    'payment_doc_no':  p['doc_no'],
+                    'payment_doc_no':  str(p['doc_no']) if p['doc_no'] is not None else None,
                     'payment_date':    p['post_date_str'],
                     'amount_applied':  int(consumed),
                     'source':          'fifo',
@@ -305,6 +305,50 @@ class AccountPayableRepository:
         return out
 
     # ------------------------------------------------------------------
+    # Payment receipts for the reconcile queue
+    # ------------------------------------------------------------------
+    def get_charge_payments(self) -> List[Dict[str, Any]]:
+        """Return all Charge-tender payment receipts in the past 24 months.
+
+        Multi-Charge docs (split tender across 2-3 rows on the same doc)
+        are aggregated to one record per `payment_doc_sid` with the summed
+        magnitude in `amount`. SIDs are stringified to preserve precision.
+        """
+        conn = get_oracle_connection()
+        if not conn:
+            return []
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(self.queries.ORACLE_CHARGE_PAYMENTS)
+                rows = cursor.fetchall()
+                columns = [d[0].lower() for d in cursor.description]
+        except Exception as e:
+            print(f"ERROR querying AP charge payments: {e}")
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            row = dict(zip(columns, r))
+            row['payment_doc_sid'] = str(row['payment_doc_sid'])
+            row['payment_doc_no'] = (
+                str(row['payment_doc_no']) if row['payment_doc_no'] is not None else None
+            )
+            row['customer_sid'] = (
+                str(row['customer_sid']) if row['customer_sid'] is not None else None
+            )
+            row['ref_sale_sid'] = (
+                str(row['ref_sale_sid']) if row['ref_sale_sid'] is not None else None
+            )
+            row['amount'] = int(row['amount'] or 0)
+            out.append(row)
+        return out
+
+    # ------------------------------------------------------------------
     # Single payment lookup (for reconcile / unmatch)
     # ------------------------------------------------------------------
     def get_payment_meta(self, payment_doc_sid: str) -> Optional[Dict[str, Any]]:
@@ -341,6 +385,9 @@ class AccountPayableRepository:
             return None
         meta = dict(zip(columns, row))
         meta['doc_sid'] = str(meta['doc_sid'])
+        meta['doc_no'] = (
+            str(meta['doc_no']) if meta['doc_no'] is not None else None
+        )
         meta['customer_sid'] = (
             str(meta['customer_sid']) if meta['customer_sid'] is not None else None
         )
