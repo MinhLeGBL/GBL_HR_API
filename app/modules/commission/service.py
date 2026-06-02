@@ -2036,6 +2036,15 @@ class CommissionService:
 
             final_df = pd.concat(all_combined_dfs, ignore_index=True)
 
+            # CR #66: pull released amounts per (employee_code, category) for
+            # bills paid during this commission month. Lazy import per CLAUDE.md
+            # cross-module rule. Best-effort — a failure returns {} and we
+            # fall through to the Phase-B zeros so calculate never breaks.
+            from app.modules.account_payable import AccountPayableService
+            released_by_employee = AccountPayableService().compute_released_for_month(
+                year, month,
+            )
+
             # 7. Build response
             stores_response = []
             for store_result in all_store_results:
@@ -2060,9 +2069,8 @@ class CommissionService:
                     withheld_by_cat = row.get('withheld_by_category') or {}
                     if not isinstance(withheld_by_cat, dict):
                         withheld_by_cat = {}
-                    released_by_cat = row.get('released_by_category') or {}
-                    if not isinstance(released_by_cat, dict):
-                        released_by_cat = {}
+                    # CR #66: override Phase B's zero with the live AP accumulator.
+                    released_by_cat = released_by_employee.get(row['employee_code'], {})
                     withheld_by_cat_int = {k: int(v) for k, v in withheld_by_cat.items()}
                     released_by_cat_int = {k: int(v) for k, v in released_by_cat.items()}
                     withheld_total_int = sum(withheld_by_cat_int.values())
@@ -2265,6 +2273,15 @@ class CommissionService:
 
             final_df = pd.concat(all_combined_dfs, ignore_index=True)
 
+            # CR #66: pull released amounts per (employee_code, category) for
+            # bills paid during this commission month. Lazy import per CLAUDE.md
+            # cross-module rule. Best-effort — a failure returns {} and we
+            # fall through to the Phase-B zeros so calculate never breaks.
+            from app.modules.account_payable import AccountPayableService
+            released_by_employee = AccountPayableService().compute_released_for_month(
+                year, month,
+            )
+
             # Build response (same shape as v1)
             stores_response = []
             for store_result in all_store_results:
@@ -2289,9 +2306,8 @@ class CommissionService:
                     withheld_by_cat = row.get('withheld_by_category') or {}
                     if not isinstance(withheld_by_cat, dict):
                         withheld_by_cat = {}
-                    released_by_cat = row.get('released_by_category') or {}
-                    if not isinstance(released_by_cat, dict):
-                        released_by_cat = {}
+                    # CR #66: override Phase B's zero with the live AP accumulator.
+                    released_by_cat = released_by_employee.get(row['employee_code'], {})
                     withheld_by_cat_int = {k: int(v) for k, v in withheld_by_cat.items()}
                     released_by_cat_int = {k: int(v) for k, v in released_by_cat.items()}
                     withheld_total_int = sum(withheld_by_cat_int.values())
