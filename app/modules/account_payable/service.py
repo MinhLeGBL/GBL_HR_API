@@ -36,7 +36,11 @@ class AccountPayableService:
     # Schema init — idempotent
     # ------------------------------------------------------------------
     def init_database(self) -> Dict[str, Any]:
-        """Create the `payable_reconciliations` table + indexes. Idempotent.
+        """Create the AP tables + indexes. Idempotent.
+
+        Tables:
+        - `payable_reconciliations` — manual payment→bill linkages.
+        - `payable_item_custom_rates` — user-set per-item release-rate overrides.
 
         Called from `scripts/database/init_db.py`. Safe to call repeatedly;
         `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` make
@@ -52,6 +56,7 @@ class AccountPayableService:
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_BILL_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_PAYMENT_INDEX)
+                cur.execute(AccountPayableQueries.CREATE_CUSTOM_RATES_TABLE)
                 conn.commit()
             return {'success': True}
         except Exception as e:

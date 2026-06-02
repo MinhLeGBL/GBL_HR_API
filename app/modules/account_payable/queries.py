@@ -40,3 +40,18 @@ class AccountPayableQueries:
         CREATE INDEX IF NOT EXISTS idx_payable_recon_payment
             ON payable_reconciliations(payment_doc_sid)
     """
+
+    # Postgres DDL — per-item user-set release-rate overrides.
+    # Effective rate per item = custom_release_rate ?? auto_release_rate ?? 0
+    # where auto_release_rate comes from commission's `payable_bill_rates`.
+    # NUMERIC(10,8) per CR spec — frontend writes decimal values like 0.01500000.
+    CREATE_CUSTOM_RATES_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_item_custom_rates (
+            bill_sid            VARCHAR(40)    NOT NULL,
+            upc                 VARCHAR(50)    NOT NULL,
+            custom_release_rate NUMERIC(10,8)  NOT NULL,
+            set_by              INT REFERENCES users(sid),
+            set_at              TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (bill_sid, upc)
+        )
+    """
