@@ -3,6 +3,54 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.3.1] — 2026-06-02
+
+### Fixed — CR #65: `quantity_imported` was missing adjustment-in inventory
+
+After CR #64 shipped, 210 of 1,313 UPCs (16%) came back with
+`quantity_imported: null`; 70 of those also had `quantity_sold > 0`,
+so Oracle had sales but the receive-source query found nothing. Cause:
+`_lifetime_received_for` only counted voucher receipts
+(`vou_class=0, vou_type=0, status=4`). Hand-carry jewelry frequently
+enters inventory via direct stock adjustment (`adjustment.adj_type=1`)
+rather than a voucher — those receipts were invisible to the query.
+
+#### Backend
+- Added `HandCarryQueries.ORACLE_LIFETIME_ADJ_IN` — per-UPC sum of
+  positive qty from `rps.adj_item` + `rps.adj_qty` where
+  `adjustment.adj_type=1, status=4, qty > 0`.
+- Added `HandCarryService._lifetime_adjusted_in_for(upcs)` helper —
+  mirrors `_lifetime_received_for` with the same 500-UPC chunking.
+- `list_items` now sums both sources into `quantity_imported`. Either
+  source contributing returns a real integer; both missing keeps it
+  `None` (the pre-fix behaviour for genuinely unknown UPCs).
+
+#### Sentinel rule
+- When `quantity_sold > 0` and the combined receive count is still
+  `None` or less than sold, floor `quantity_imported` to `quantity_sold`
+  (you can't sell what you never received) and increment an internal
+  `inferred_count`. A WARNING log fires per request summarising how
+  many rows were floored — the underlying Oracle data is incomplete
+  and the user should be aware.
+- Does NOT fire when `quantity_sold == 0`: UPCs with no recorded
+  activity legitimately stay `quantity_imported=null`.
+
+#### Tests
+- 30 unit tests pass. Three new TestListItems tests:
+  - `test_quantity_imported_unions_vouchers_and_adjustment_in` — asserts
+    voucher-only, adj-only, and both-source UPCs all sum correctly.
+  - `test_sentinel_rule_floors_imported_to_sold_when_oracle_underreports`
+    — asserts under-reported and zero-received UPCs floor to sold.
+  - `test_sentinel_does_not_fire_when_sold_is_zero` — confirms no-sales
+    UPCs are not floored to 0.
+
+#### Live impact
+- 70 problem rows (UPCs with sales but no voucher receipt) now return
+  a non-null `quantity_imported` — sourced from `adj_item` where the
+  inventory came in via a stock adjustment, or floored to
+  `quantity_sold` when neither source has it.
+- Response shape unchanged. PATCH bump — bug fix only.
+
 ## [0.3.0] — 2026-06-02
 
 ### Changed — CR #64: revert catalog to a UPC flag list, source product info live from Oracle

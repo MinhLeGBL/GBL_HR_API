@@ -22,12 +22,13 @@ class TestListItems:
     """CR #64: list_items pulls UPC flags from Postgres and joins Oracle live
     for product info / imported qty / sold qty."""
 
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
     @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
     @patch('app.modules.handcarry.service.get_postgres_connection')
     def test_returns_items_with_oracle_joined_fields(
-        self, mock_conn, mock_sold, mock_info, mock_recv,
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
     ):
         conn, cur = _mock_conn(fetchall=[
             _catalog_row(1, 12345),
@@ -36,6 +37,7 @@ class TestListItems:
         mock_conn.return_value = conn
         mock_sold.return_value = {12345: 7, 67890: 2}
         mock_recv.return_value = {12345: 10, 67890: 5}
+        mock_adj.return_value = {}
         mock_info.return_value = {
             12345: {
                 'description': 'GUC-Marmont bag', 'brand': 'GUCCI', 'category': 'BAG',
@@ -74,31 +76,40 @@ class TestListItems:
         assert 'description' not in args[0].lower()
         assert 'brand' not in args[0].lower()
 
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
     @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
     @patch('app.modules.handcarry.service.get_postgres_connection')
-    def test_quantity_sold_defaults_to_zero(self, mock_conn, mock_sold, mock_info, mock_recv):
+    def test_quantity_sold_defaults_to_zero(
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
+    ):
         conn, _cur = _mock_conn(fetchall=[_catalog_row(1, 12345)])
         mock_conn.return_value = conn
         mock_sold.return_value = {}        # Oracle: no sales for any UPC
         mock_info.return_value = {}
         mock_recv.return_value = {}
+        mock_adj.return_value = {}
 
         result = HandCarryService().list_items()
 
         assert result['items'][0]['quantity_sold'] == 0
         assert result['items'][0]['quantity_imported'] is None   # nothing received
 
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
     @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
     @patch('app.modules.handcarry.service.get_postgres_connection')
-    def test_stored_quantity_sold_override_wins_over_oracle(
-        self, mock_conn, mock_sold, mock_info, mock_recv,
+    def test_stored_quantity_sold_override_pairs_imported_and_sold(
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
     ):
-        """Orphan UPCs (Oracle no longer recognises them) keep a stored
-        quantity_sold override; the live Oracle join is ignored when set."""
+        """Orphan UPCs (Oracle no longer recognises them) carry a stored
+        `quantity_sold` override. The response must mirror it onto
+        `quantity_imported` too — the original v0.2.2 semantic was
+        'qty_imp = qty_sold = override' (= fully sold-through orphan).
+        Otherwise the response would falsely show 'sold N but never received'.
+        """
         conn, _cur = _mock_conn(fetchall=[
             _catalog_row(1, 12345, quantity_sold=5),   # orphan: override frozen
             _catalog_row(2, 67890, quantity_sold=None),  # active: use live
@@ -106,24 +117,33 @@ class TestListItems:
         mock_conn.return_value = conn
         mock_sold.return_value = {12345: 0, 67890: 4}
         mock_info.return_value = {}
-        mock_recv.return_value = {}
+        mock_recv.return_value = {67890: 7}
+        mock_adj.return_value = {}
 
         result = HandCarryService().list_items()
 
         by_upc = {it['upc']: it for it in result['items']}
-        assert by_upc[12345]['quantity_sold'] == 5  # override wins
-        assert by_upc[67890]['quantity_sold'] == 4  # live join wins
+        # Orphan: override mirrored to BOTH qty_imp and qty_sold.
+        assert by_upc[12345]['quantity_sold'] == 5
+        assert by_upc[12345]['quantity_imported'] == 5
+        # Active: live Oracle values for each independently.
+        assert by_upc[67890]['quantity_sold'] == 4
+        assert by_upc[67890]['quantity_imported'] == 7
 
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
     @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
     @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
     @patch('app.modules.handcarry.service.get_postgres_connection')
-    def test_search_filter_uses_ilike(self, mock_conn, mock_sold, mock_info, mock_recv):
+    def test_search_filter_uses_ilike(
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
+    ):
         conn, cur = _mock_conn(fetchall=[_catalog_row(3, 12399)])
         mock_conn.return_value = conn
         mock_sold.return_value = {}
         mock_info.return_value = {}
         mock_recv.return_value = {}
+        mock_adj.return_value = {}
 
         result = HandCarryService().list_items(search='123')
 
@@ -138,6 +158,90 @@ class TestListItems:
         result = HandCarryService().list_items()
         assert result['success'] is False
         assert 'connect' in result['error'].lower()
+
+    # --- CR #65: union of voucher receipts + adjustment-in + sentinel ---
+
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
+    @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
+    @patch('app.modules.handcarry.service.get_postgres_connection')
+    def test_quantity_imported_unions_vouchers_and_adjustment_in(
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
+    ):
+        """CR #65: items received via direct adjustment (ADJ_TYPE=1) must
+        count toward quantity_imported, not just voucher receipts."""
+        conn, _cur = _mock_conn(fetchall=[
+            _catalog_row(1, 12345),  # voucher only
+            _catalog_row(2, 67890),  # adjustment only (was returning null pre-fix)
+            _catalog_row(3, 11111),  # both
+        ])
+        mock_conn.return_value = conn
+        mock_sold.return_value = {}
+        mock_info.return_value = {}
+        mock_recv.return_value = {12345: 10, 11111: 3}
+        mock_adj.return_value  = {67890: 4, 11111: 2}
+
+        result = HandCarryService().list_items()
+        by_upc = {it['upc']: it for it in result['items']}
+
+        assert by_upc[12345]['quantity_imported'] == 10        # voucher only
+        assert by_upc[67890]['quantity_imported'] == 4         # adj only — bug fixed
+        assert by_upc[11111]['quantity_imported'] == 5         # 3 + 2
+
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
+    @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
+    @patch('app.modules.handcarry.service.get_postgres_connection')
+    def test_sentinel_rule_floors_imported_to_sold_when_oracle_underreports(
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
+    ):
+        """CR #65 sentinel: when sold > received-from-Oracle, floor
+        quantity_imported to quantity_sold. Sales are proof of stock."""
+        conn, _cur = _mock_conn(fetchall=[
+            _catalog_row(1, 12345),  # 0 received, 3 sold → floor to 3
+            _catalog_row(2, 67890),  # 2 received, 5 sold → floor to 5
+            _catalog_row(3, 11111),  # 10 received, 4 sold → no floor (no underreport)
+        ])
+        mock_conn.return_value = conn
+        mock_sold.return_value = {12345: 3, 67890: 5, 11111: 4}
+        mock_info.return_value = {}
+        mock_recv.return_value = {67890: 2, 11111: 10}
+        mock_adj.return_value  = {}
+
+        result = HandCarryService().list_items()
+        by_upc = {it['upc']: it for it in result['items']}
+
+        # 12345: no received, 3 sold → inferred to 3
+        assert by_upc[12345]['quantity_imported'] == 3
+        assert by_upc[12345]['quantity_sold']     == 3
+        # 67890: under-reported (2 < 5) → inferred to 5
+        assert by_upc[67890]['quantity_imported'] == 5
+        # 11111: received > sold → no floor needed
+        assert by_upc[11111]['quantity_imported'] == 10
+
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_adjusted_in_for')
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_received_for')
+    @patch('app.modules.handcarry.service.HandCarryService.fetch_oracle_product_info')
+    @patch('app.modules.handcarry.service.HandCarryService._lifetime_sold_for')
+    @patch('app.modules.handcarry.service.get_postgres_connection')
+    def test_sentinel_does_not_fire_when_sold_is_zero(
+        self, mock_conn, mock_sold, mock_info, mock_recv, mock_adj,
+    ):
+        """Items with no sales shouldn't be floored to anything — they
+        legitimately have quantity_imported=null when Oracle has no
+        record of receiving them."""
+        conn, _cur = _mock_conn(fetchall=[_catalog_row(1, 12345)])
+        mock_conn.return_value = conn
+        mock_sold.return_value = {}        # no sales
+        mock_info.return_value = {}
+        mock_recv.return_value = {}        # no receipts
+        mock_adj.return_value  = {}        # no adjustments
+
+        result = HandCarryService().list_items()
+        assert result['items'][0]['quantity_imported'] is None   # not floored to 0
+        assert result['items'][0]['quantity_sold'] == 0
 
 
 # Note: CR #58's `import_records` (full-record REPLACE) path was dropped in

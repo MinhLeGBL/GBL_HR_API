@@ -195,19 +195,44 @@ class HandCarryService:
         # 2. Live Oracle joins — single round-trip each (with internal chunking)
         product_info = self.fetch_oracle_product_info(upcs)
         received_by_upc = self._lifetime_received_for(upcs)
+        adjusted_in_by_upc = self._lifetime_adjusted_in_for(upcs)   # CR #65
         sold_by_upc = self._lifetime_sold_for(upcs)
 
         items = []
+        inferred_count = 0   # Sentinel — see below.
         for sid, scan_upc, qty_sold_stored in rows:
             upc_int = int(scan_upc)
             info = product_info.get(upc_int, {})
 
-            # quantity_sold precedence: stored override (for orphan UPCs
-            # Oracle no longer recognises) wins; otherwise live Oracle count.
+            # Orphan UPCs (Oracle no longer recognises them) carry a stored
+            # quantity_sold override per v0.2.1/v0.2.2. The original semantic
+            # was "qty_imp = qty_sold = override" — the row represents an
+            # item that was fully sold-through before going orphan, so both
+            # counts must match. Otherwise the response would falsely show
+            # "sold N but never received".
             if qty_sold_stored is not None:
                 quantity_sold = int(qty_sold_stored)
+                quantity_imported = int(qty_sold_stored)
             else:
                 quantity_sold = int(sold_by_upc.get(upc_int, 0))
+                # CR #65: union voucher receipts + adjustment-in. Either
+                # source contributing means the item was received.
+                vou_qty = received_by_upc.get(upc_int)
+                adj_qty = adjusted_in_by_upc.get(upc_int)
+                if vou_qty is not None or adj_qty is not None:
+                    quantity_imported = int(vou_qty or 0) + int(adj_qty or 0)
+                else:
+                    quantity_imported = None
+
+                # CR #65 sentinel rule: you can't sell what you never
+                # received. If Oracle's combined receive sources still
+                # under-report relative to actual sales, floor to the
+                # sold count — sales are the proof of stock having
+                # existed at some point.
+                if (quantity_sold > 0
+                        and (quantity_imported is None or quantity_imported < quantity_sold)):
+                    quantity_imported = quantity_sold
+                    inferred_count += 1
 
             items.append({
                 'id':                 int(sid),
@@ -218,11 +243,19 @@ class HandCarryService:
                 'color':              info.get('color'),
                 'size':               info.get('size'),
                 'season':             info.get('season'),
-                'quantity_imported':  int(received_by_upc.get(upc_int, 0)) if upc_int in received_by_upc else None,
+                'quantity_imported':  quantity_imported,
                 'quantity_sold':      quantity_sold,
                 'price_before_vat':   info.get('price_before_vat'),
                 'price_after_vat':    info.get('price_after_vat'),
             })
+
+        # CR #65: log when the sentinel rule fired so operators can spot
+        # the count of items whose received qty was inferred from sales.
+        if inferred_count > 0:
+            print(f'[WARN] handcarry list_items: floored quantity_imported '
+                  f'to quantity_sold on {inferred_count} item(s) — Oracle '
+                  f'voucher + adjustment-in sources under-report relative '
+                  f'to actual sales.')
 
         return {'success': True, 'items': items, 'count': len(items)}
 
@@ -290,6 +323,42 @@ class HandCarryService:
                 chunk = safe[i:i + _ORACLE_IN_CHUNK]
                 upc_list_sql = ', '.join(f"'{u}'" for u in chunk)
                 cur.execute(HandCarryQueries.ORACLE_LIFETIME_RECEIVED.format(upcs=upc_list_sql))
+                for row in cur.fetchall():
+                    upc_int = int(row[0])
+                    result[upc_int] = int(row[1] or 0)
+            cur.close()
+        except Exception:
+            return {}
+        finally:
+            conn.close()
+
+        return result
+
+    @staticmethod
+    def _lifetime_adjusted_in_for(upcs: List[int]) -> Dict[int, int]:
+        """For a list of UPCs, return {upc: lifetime_adjusted_in_qty} (CR #65).
+
+        Hand-carry jewelry often enters inventory via direct stock
+        adjustment (ADJ_TYPE=1) rather than a voucher receipt — those
+        wouldn't show up in `_lifetime_received_for`. This helper covers
+        the gap; the service sums both sources for `quantity_imported`.
+
+        Returns empty dict on Oracle connection failure.
+        """
+        if not upcs:
+            return {}
+        safe = [int(u) for u in upcs]
+        result: Dict[int, int] = {}
+
+        conn = get_oracle_connection()
+        if conn is None:
+            return {}
+        try:
+            cur = conn.cursor()
+            for i in range(0, len(safe), _ORACLE_IN_CHUNK):
+                chunk = safe[i:i + _ORACLE_IN_CHUNK]
+                upc_list_sql = ', '.join(f"'{u}'" for u in chunk)
+                cur.execute(HandCarryQueries.ORACLE_LIFETIME_ADJ_IN.format(upcs=upc_list_sql))
                 for row in cur.fetchall():
                     upc_int = int(row[0])
                     result[upc_int] = int(row[1] or 0)

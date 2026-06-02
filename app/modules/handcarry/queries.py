@@ -82,3 +82,23 @@ class HandCarryQueries:
           AND TO_CHAR(i.upc) IN ({upcs})
         GROUP BY TO_CHAR(i.upc)
     """
+
+    # Lifetime adjustment-in qty per UPC (CR #65). Hand-carry jewelry
+    # often enters inventory via direct stock adjustment (ADJ_TYPE=1)
+    # rather than a voucher receipt — these wouldn't show up in
+    # ORACLE_LIFETIME_RECEIVED above. Union both sources at the service
+    # layer to get the full "ever received" count.
+    ORACLE_LIFETIME_ADJ_IN = """
+        SELECT
+            TO_CHAR(i.upc) AS upc,
+            SUM(aq.qty)    AS quantity_adjusted_in
+        FROM rps.adj_item ai
+        JOIN rps.adjustment a    ON a.sid = ai.adj_sid
+                                 AND a.adj_type = 1
+                                 AND a.status = 4
+        JOIN rps.adj_qty aq      ON aq.adj_item_sid = ai.sid
+        JOIN rps.invn_sbs_item i ON i.sid = ai.item_sid
+        WHERE aq.qty > 0
+          AND TO_CHAR(i.upc) IN ({upcs})
+        GROUP BY TO_CHAR(i.upc)
+    """
