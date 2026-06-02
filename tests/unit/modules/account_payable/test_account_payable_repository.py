@@ -129,6 +129,78 @@ class TestReplayChronology:
         assert bills == {}
         assert payments == []
 
+    # ----------------------- CR #62: Pass 1.5 (manual) -----------------------
+
+    def test_manual_pass_displaces_fifo(self):
+        """Manual allocation routes the payment to the targeted bill
+        even when FIFO would have picked a different (older) bill."""
+        events = [
+            _evt('B1', 500_000, '2026-04-01'),
+            _evt('B2', 500_000, '2026-04-02'),
+            _evt('PAY1', -500_000, '2026-04-10'),   # no ref, FIFO default would target B1
+        ]
+        manual = {'PAY1': [{'bill_sid': 'B2', 'amount_applied': 500_000}]}
+        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # Manual sent it to B2, not B1.
+        assert bills['B1']['remaining'] == 500_000
+        assert bills['B2']['remaining'] == 0
+        assert bills['B2']['payments_chrono'][0]['source'] == 'manual'
+
+    def test_manual_pass_runs_after_ref_sale_sid(self):
+        """REF_SALE_SID is tier 1 — manual only sees the leftover of
+        the payment magnitude."""
+        events = [
+            _evt('B1', 300_000, '2026-04-01'),
+            _evt('B2', 700_000, '2026-04-02'),
+            _evt('PAY1', -500_000, '2026-04-10', ref='B1'),   # ref consumes 300k → 200k left
+        ]
+        # Manual wants 500k to B2, but only 200k of the payment remains.
+        manual = {'PAY1': [{'bill_sid': 'B2', 'amount_applied': 500_000}]}
+        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # B1: fully paid by ref (300k).
+        assert bills['B1']['remaining'] == 0
+        assert bills['B1']['payments_chrono'][0]['source'] == 'ref_sale_sid'
+        # B2: 200k consumed by manual (the leftover); 500k remaining.
+        assert bills['B2']['remaining'] == 500_000
+        manual_entry = bills['B2']['payments_chrono'][0]
+        assert manual_entry['source'] == 'manual'
+        assert manual_entry['amount_applied'] == 200_000
+
+    def test_manual_pass_skips_unknown_bill(self):
+        """A manual row referencing a bill from a different customer's
+        ledger silently falls through to FIFO instead of crashing."""
+        events = [
+            _evt('B1', 500_000, '2026-04-01'),
+            _evt('PAY1', -500_000, '2026-04-10'),
+        ]
+        manual = {'PAY1': [{'bill_sid': 'B_OTHER_CUSTOMER', 'amount_applied': 500_000}]}
+        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # B1 absorbs the payment via FIFO since manual's target wasn't found.
+        assert bills['B1']['remaining'] == 0
+        assert bills['B1']['payments_chrono'][0]['source'] == 'fifo'
+
+    def test_manual_allocation_caps_at_bill_remaining(self):
+        """Manual amount > bill.remaining only applies the bill's remaining capacity."""
+        events = [
+            _evt('B1', 200_000, '2026-04-01'),
+            _evt('PAY1', -500_000, '2026-04-10'),
+        ]
+        manual = {'PAY1': [{'bill_sid': 'B1', 'amount_applied': 500_000}]}
+        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # Only 200k applied; payment still has 300k remaining.
+        assert bills['B1']['remaining'] == 0
+        manual_entry = bills['B1']['payments_chrono'][0]
+        assert manual_entry['source'] == 'manual'
+        assert manual_entry['amount_applied'] == 200_000
+
 
 class TestGetBillItemsValidation:
     """`get_bill_items` validates bill_sid inputs before touching Oracle."""

@@ -3,6 +3,83 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.1.0] — 2026-06-02
+
+### Fixed — CR #62: payments queue must mirror the ledger-replay match state
+
+Backend v1.0.0 reported `unmatched + is_overdue` for every payment that
+the bill-view ledger replay had already FIFO-applied to an open AR
+bill. Frontend testing surfaced this on live data: **all 72** queue
+rows were false positives. After the fix the queue correctly shows 0
+rows (all 72 past-month payments are released via FIFO).
+
+#### What changed
+
+- `AccountPayableRepository._replay_charge_ledger_with_chronology` now
+  accepts a `manual_allocations_by_payment` arg and runs a Pass 1.5
+  between the REF_SALE_SID pass and the FIFO pass. Manual rows
+  displace what FIFO would otherwise infer (priority tier 2 > 3).
+  Each per-bill chronology entry carries `source ∈ {ref_sale_sid,
+  manual, fifo}`.
+- `AccountPayableRepository.get_all_bills` gained an optional
+  `manual_allocations_by_payment` parameter and threads it through to
+  the replay.
+- New `AccountPayableService._load_bills()` helper loads manual rows
+  once per request and feeds them to `get_all_bills`. Every read
+  endpoint (bills, bill-detail, employees, employee-bills, payments)
+  now goes through this helper, so the bill view and the payments
+  queue are guaranteed to use the same replay output. Single source
+  of truth.
+- `get_pending_payments` rewritten per CR §"Behaviour matrix":
+  - Status derives from `applied = sum(allocations.amount_applied)`
+    where allocations are the transpose of the bill chronology.
+  - Past-month + `applied > 0` → released → drops from queue
+    (including partial FIFO application — applied portion is
+    released; remainder is implicit deposit-on-account).
+  - Current-month + `applied > 0` → `matched_pending`; `match_source`
+    is the highest-priority source across the allocations
+    (ref_sale_sid > manual > fifo).
+  - `applied == 0` → `unmatched`; `is_overdue` only when past month.
+- `unmatch` now rejects with 404 when no manual row exists — FIFO
+  inferences are derived, not stored, so they cannot be unmatched
+  directly. Error message guides user to reconcile manually instead
+  (which displaces FIFO via the priority order on next read).
+- `match_source` enum widened: `'ref_sale_sid' | 'manual' | 'fifo' | null`.
+
+#### Tests
+
+- 76 AP unit tests pass (10 queue rewrites covering the full behaviour
+  matrix + 4 new replay tests for Pass 1.5: manual-displaces-FIFO,
+  manual-runs-after-ref, unknown-bill-falls-to-FIFO, amount-caps-at-bill).
+- Existing reconcile / unmatch / PATCH-rate tests updated to stub the
+  new `_load_manual_allocations` helper.
+
+#### Live-verified against shared DB
+
+- Queue size: 72 → 0 (all 72 false positives now correctly classified
+  as released).
+- Bill view unchanged — doc 2797 (Le Thi Van partial, 38.4M with FIFO
+  payment 2978 on 2026-05-29) still shows the same chronology.
+- 76 AP unit tests pass; smoke-verified bill view + queue against
+  live data.
+
+### Behaviour change to surface to frontend
+
+- `MatchSource` TypeScript type needs widening to include `'fifo'`.
+- Queue status badge should render a new `'fifo'` chip.
+- `ReconcileDialog` opened on a FIFO row needs the "auto inference"
+  banner the CR describes.
+- `POST /payments/:sid/unmatch` on a FIFO row now returns 404 — the
+  frontend should disable the Unmatch button for `match_source==='fifo'`
+  rows (per CR §"Edge cases #3 — option A").
+
+### Bumped MINOR — additive shape, behaviour fix for queue
+
+`PaymentsQueue` response shape stays compatible (enum widened, not
+narrowed). Bill view chronology gains a new `'manual'` source value
+when a Postgres reconciliation row exists; existing clients ignoring
+unknown sources keep working.
+
 ## [1.0.0] — 2026-06-02
 
 First real release of the Account Payable backend. All 8 endpoints

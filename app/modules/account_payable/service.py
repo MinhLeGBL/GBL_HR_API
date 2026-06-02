@@ -250,7 +250,7 @@ class AccountPayableService:
           - `status`: 'open' | 'partial' | 'fully_paid'.
         Returns ServiceResult<BillRow[]>.
         """
-        bills = self.repository.get_all_bills()
+        bills = self._load_bills()
         if not bills:
             return {'success': True, 'data': []}
 
@@ -294,7 +294,7 @@ class AccountPayableService:
 
         Returns ServiceResult<BillDetail | None>. `None` → 404 at the route layer.
         """
-        bills = self.repository.get_all_bills()
+        bills = self._load_bills()
         b = bills.get(bill_sid)
         if not b:
             return {'success': False, 'error': f'Bill {bill_sid} not found', 'not_found': True}
@@ -330,7 +330,7 @@ class AccountPayableService:
 
         Returns ServiceResult<PayableEmployee[]>.
         """
-        bills = self.repository.get_all_bills()
+        bills = self._load_bills()
         if not bills:
             return {'success': True, 'data': []}
 
@@ -391,7 +391,7 @@ class AccountPayableService:
 
         Returns ServiceResult<EmployeeBillSlice[]>.
         """
-        bills = self.repository.get_all_bills()
+        bills = self._load_bills()
         active_sids = [
             s for s, b in bills.items() if b['status'] in ('open', 'partial')
         ]
@@ -446,9 +446,27 @@ class AccountPayableService:
         out.sort(key=lambda r: r['age_days'], reverse=True)
         return {'success': True, 'data': out}
 
-    def _load_reconciliations(self) -> Dict[str, List[Dict[str, Any]]]:
+    def _load_bills(self) -> Dict[str, Dict[str, Any]]:
+        """Single-shot bill loader (CR #62).
+
+        Loads the manual `payable_reconciliations` rows once per request
+        and threads them through the Oracle ledger replay so EVERY read
+        path (bill view, queue, employees, employee-bills) sees the
+        identical replay state. Without this unifier the queue could
+        report `unmatched` for the same payment the bill view shows
+        `matched (manual)`.
+        """
+        manual = self._load_manual_allocations()
+        return self.repository.get_all_bills(manual_allocations_by_payment=manual)
+
+    def _load_manual_allocations(self) -> Dict[str, List[Dict[str, Any]]]:
         """Map payment_doc_sid → list of its linkage rows from
-        `payable_reconciliations`. Empty dict on connection failure."""
+        `payable_reconciliations`. Shape matches what the replay's Pass
+        1.5 consumes. Empty dict on connection failure.
+
+        This output is also the canonical input to `get_all_bills` so the
+        bill view and queue endpoint see identical replay state.
+        """
         conn = get_postgres_connection()
         if conn is None:
             return {}
@@ -460,7 +478,7 @@ class AccountPayableService:
                 ''')
                 rows = cur.fetchall()
         except Exception as e:
-            print(f'[WARN] AP _load_reconciliations failed: {e}')
+            print(f'[WARN] AP _load_manual_allocations failed: {e}')
             return {}
         finally:
             try:
@@ -475,30 +493,56 @@ class AccountPayableService:
             })
         return out
 
+    @staticmethod
+    def _transpose_to_payment_allocations(
+        bills: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Transpose bills' `payments_chrono` into a per-payment view.
+
+        Each output entry maps `payment_doc_sid` → list of dicts:
+            {bill_sid, doc_no, amount_applied, source, payment_date}
+        sorted by `payment_date` (stable across the input bills).
+
+        Used by `get_pending_payments` so its status logic consumes the
+        SAME replay output the bill view shows (CR #62).
+        """
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for bill_sid, b in bills.items():
+            for entry in b.get('payments', []):
+                out.setdefault(entry['payment_doc_sid'], []).append({
+                    'bill_sid':       bill_sid,
+                    'doc_no':         b['doc_no'],
+                    'amount_applied': entry['amount_applied'],
+                    'source':         entry['source'],
+                    'payment_date':   entry['payment_date'],
+                })
+        for entries in out.values():
+            entries.sort(key=lambda e: (e['payment_date'], e['bill_sid']))
+        return out
+
+    # Source-of-truth priority order for queue match_source (CR #62):
+    # if a payment's allocations span multiple sources (REF_SALE_SID
+    # for part, FIFO for the rest), the row reports the highest-priority
+    # source. ref_sale_sid > manual > fifo.
+    _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1, 'fifo': 2}
+
     def get_pending_payments(self, status: Optional[str] = None) -> Dict[str, Any]:
-        """Payments queue.
+        """Payments queue (CR #62 — queue mirrors the ledger replay).
 
-        Source: every Charge-tender payment receipt (negative-Charge on
-        receipt_type=0 docs) in the past 24 months. Each receipt is
-        bucketed by the CR §"Payment queue filter rules":
+        Uses the EXACT replay output the bill view shows (FIFO inferences
+        included). Status logic per CR §"Behaviour matrix":
 
-        - `unmatched`: no REF_SALE_SID matching a known bill AND no
-          Postgres `payable_reconciliations` row. `is_overdue=true` when
-          the payment's calendar month is past.
-        - `matched_pending (ref_sale_sid)`: REF_SALE_SID points at a real
-          bill AND payment_date's month == current month. (Read-only —
-          0 hits in current data, kept as future-proofing if Retail Pro
-          starts setting REF_SALE_SID on payment receipts.)
-        - `matched_pending (manual)`: has a Postgres linkage AND
-          payment_date's month == current month.
-
-        Released payments (payment month closed AND any linkage exists)
-        do NOT appear in the queue per the CR's lifecycle rule.
-
-        `status` filter optionally narrows to one bucket.
+        - Past-month payment with ANY application in the replay → released,
+          drops out of the queue. The applied portion is "released"; any
+          remainder is implicit deposit-on-account.
+        - Past-month payment with no application → `unmatched` + `is_overdue`.
+        - Current-month with application → `matched_pending` and
+          `match_source` is the highest-priority source in the allocations
+          (ref_sale_sid > manual > fifo).
+        - Current-month with no application → `unmatched` (not overdue).
 
         Each row carries `suggested_bills` = the customer's open + partial
-        bill list. Walk-in payments (`customer_sid=null`) get `[]`.
+        bill list (oldest-first). Walk-in payments get `[]`.
 
         Returns ServiceResult<PendingPayment[]>, sorted by payment_date desc.
         """
@@ -512,8 +556,10 @@ class AccountPayableService:
         if not payments:
             return {'success': True, 'data': []}
 
-        linkages = self._load_reconciliations()
-        bills = self.repository.get_all_bills()
+        # Single replay drives BOTH the bill view's chronology and this queue,
+        # so they cannot disagree.
+        bills = self._load_bills()
+        payment_allocations = self._transpose_to_payment_allocations(bills)
 
         # Suggested_bills: precompute the customer → open+partial-bill list.
         open_bills_by_customer: Dict[str, List[Dict[str, Any]]] = {}
@@ -531,7 +577,6 @@ class AccountPayableService:
                 'original_charge':  b['original_charge'],
                 'remaining_unpaid': b['remaining_unpaid'],
             })
-        # Sort each customer's suggestions oldest-first (FIFO bias).
         for sugg in open_bills_by_customer.values():
             sugg.sort(key=lambda b: b['created_date'])
 
@@ -541,34 +586,31 @@ class AccountPayableService:
             pay_month = p['payment_date'][:7]
             is_past_month = pay_month < current_month
 
-            ref_sid = p.get('ref_sale_sid')
-            existing = linkages.get(p['payment_doc_sid'])
+            allocs = payment_allocations.get(p['payment_doc_sid'], [])
+            applied = sum(a['amount_applied'] for a in allocs)
 
-            if ref_sid and ref_sid in bills:
-                match_source = 'ref_sale_sid'
-                ref_bill = bills[ref_sid]
-                allocations = [{
-                    'bill_sid':       ref_sid,
-                    'doc_no':         ref_bill['doc_no'],
-                    'amount_applied': p['amount'],
-                }]
-                payment_status = 'matched_pending'   # released ones are filtered out below
-            elif existing:
-                match_source = 'manual'
-                allocations = [{
-                    'bill_sid':       link['bill_sid'],
-                    'doc_no':         bills.get(link['bill_sid'], {}).get('doc_no'),
-                    'amount_applied': link['amount_applied'],
-                } for link in existing]
-                payment_status = 'matched_pending'
-            else:
-                match_source = None
-                allocations = []
-                payment_status = 'unmatched'
-
-            # Released = matched + payment month past → drop from queue.
-            if payment_status == 'matched_pending' and is_past_month:
+            # Past-month + ANY application = released → drop from queue.
+            # The applied portion has been auto-released; any unapplied
+            # remainder is implicit deposit-on-account.
+            if is_past_month and applied > 0:
                 continue
+
+            if applied > 0:
+                payment_status = 'matched_pending'
+                # Highest-priority source across the allocations wins.
+                match_source = min(
+                    (a['source'] for a in allocs),
+                    key=lambda s: self._MATCH_SOURCE_PRIORITY.get(s, 99),
+                )
+                allocations_out = [{
+                    'bill_sid':       a['bill_sid'],
+                    'doc_no':         a['doc_no'],
+                    'amount_applied': a['amount_applied'],
+                } for a in allocs]
+            else:
+                payment_status = 'unmatched'
+                match_source = None
+                allocations_out = []
 
             if status and status != payment_status:
                 continue
@@ -585,7 +627,7 @@ class AccountPayableService:
                 'status':          payment_status,
                 'match_source':    match_source,
                 'is_overdue':      payment_status == 'unmatched' and is_past_month,
-                'allocations':     allocations,
+                'allocations':     allocations_out,
                 'suggested_bills': (
                     open_bills_by_customer.get(p['customer_sid'], [])
                     if p['customer_sid'] else []
@@ -717,7 +759,7 @@ class AccountPayableService:
             }
 
         # ── 3. Bill lookups (single ledger replay) ────────────────────
-        bills = self.repository.get_all_bills()
+        bills = self._load_bills()
         for b_sid, amt in validated:
             if b_sid not in bills:
                 return {
@@ -867,11 +909,16 @@ class AccountPayableService:
         return {'success': True, 'data': result}
 
     def unmatch(self, payment_doc_sid: str) -> Dict[str, Any]:
-        """Remove every linkage for `payment_doc_sid`.
+        """Remove every Postgres `payable_reconciliations` row for the payment.
 
-        Returns `{success, data: {payment_doc_sid, deleted_count}}`. The full
-        PendingPayment shape comes back via Phase C-5; the frontend refetches
-        the queue after a successful unmatch.
+        CR #62: FIFO-sourced matches cannot be unmatched directly — they
+        are derived from the ledger replay, not stored. If no manual row
+        exists for this payment, return 400 with guidance to manually
+        reconcile against the desired bill(s) instead (which displaces
+        FIFO on the next read via the priority order). Frontend chose
+        option A — reject — over option B (insert a suppression flag).
+
+        Returns `{success, data: {payment_doc_sid, deleted_count}}` on success.
         """
         if not str(payment_doc_sid).isdigit():
             return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
@@ -885,6 +932,18 @@ class AccountPayableService:
                     (str(payment_doc_sid),),
                 )
                 deleted = cur.rowcount
+                if deleted == 0:
+                    conn.rollback()
+                    return {
+                        'success': False,
+                        'error': (
+                            'Payment has no manual linkage to remove. '
+                            'If it was matched via FIFO or REF_SALE_SID, '
+                            'reconcile manually against the desired bill(s) '
+                            'to override the inference.'
+                        ),
+                        'not_found': True,
+                    }
                 conn.commit()
         except Exception as e:
             try:
@@ -938,7 +997,7 @@ class AccountPayableService:
                 return {'success': False, 'error': 'custom_release_rate exceeds maximum (9.99999)'}
 
         # Targeted bill must exist (we'll need it for the response payload).
-        bills = self.repository.get_all_bills()
+        bills = self._load_bills()
         targeted_bill = bills.get(bill_sid)
         if not targeted_bill:
             return {

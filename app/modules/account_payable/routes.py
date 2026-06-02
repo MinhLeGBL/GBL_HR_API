@@ -137,10 +137,16 @@ def reconcile():
 @account_payable_bp.route('/payments/<payment_doc_sid>/unmatch', methods=['POST'])
 @manager_required
 def unmatch_payment(payment_doc_sid: str):
-    """Remove an existing manual linkage for the given payment."""
+    """Remove an existing manual linkage for the given payment.
+
+    Returns 404 when no manual linkage exists (CR #62 — FIFO/REF cases
+    cannot be unmatched directly; reconcile manually to override instead).
+    """
     result = _service.unmatch(str(payment_doc_sid))
     if result.get('success'):
         return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
     return jsonify(result), 400
 
 

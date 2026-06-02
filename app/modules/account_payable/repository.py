@@ -31,17 +31,30 @@ class AccountPayableRepository:
     # ------------------------------------------------------------------
     # Ledger — every active customer's running balance
     # ------------------------------------------------------------------
-    def get_all_bills(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_bills(
+        self,
+        manual_allocations_by_payment: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """Return per-bill state for every Charge bill in the active window.
 
-        Algorithm (REF_SALE_SID → FIFO replay, run per customer):
+        Algorithm (REF_SALE_SID → manual → FIFO replay, run per customer):
           1. Pull every Charge tender event for customers active in the
              past 24 months (see ORACLE_ALL_CHARGE_LEDGER).
           2. Pass 1: payments with REF_SALE_SID apply to that exact bill.
-          3. Pass 2: leftover payments apply FIFO to the customer's oldest
-             open bills (insertion order = chronological).
-          4. Emit one record per bill (open / partial / fully_paid) with
+          3. Pass 1.5 (CR #62): apply `payable_reconciliations` manual
+             rows (when provided) — displaces FIFO inference for the
+             same payment.
+          4. Pass 2: leftover payment magnitude applies FIFO to the
+             customer's oldest open bills (insertion order = chronological).
+          5. Emit one record per bill (open / partial / fully_paid) with
              `payments[]` chronology.
+
+        Args:
+            manual_allocations_by_payment: optional dict mapping
+                payment_doc_sid → list of {bill_sid, amount_applied}
+                from Postgres `payable_reconciliations`. Loaded by the
+                service layer once per request so the bill view and queue
+                use a single replay output.
 
         Returns:
             {
@@ -64,7 +77,7 @@ class AccountPayableRepository:
                             'payment_doc_no':   str | None,
                             'payment_date':     'YYYY-MM-DD',
                             'amount_applied':   int,
-                            'source':           'ref_sale_sid' | 'fifo',
+                            'source':           'ref_sale_sid' | 'manual' | 'fifo',
                         },
                         ...
                     ],
@@ -114,7 +127,9 @@ class AccountPayableRepository:
 
         result: Dict[str, Dict[str, Any]] = {}
         for events in events_by_customer.values():
-            bills, _payments = self._replay_charge_ledger_with_chronology(events)
+            bills, _payments = self._replay_charge_ledger_with_chronology(
+                events, manual_allocations_by_payment=manual_allocations_by_payment,
+            )
             for bill_sid, b in bills.items():
                 original = int(b['original'])
                 remaining = max(0, int(b['remaining']))
@@ -153,24 +168,30 @@ class AccountPayableRepository:
     @staticmethod
     def _replay_charge_ledger_with_chronology(
         events: List[Dict[str, Any]],
+        manual_allocations_by_payment: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-        """REF_SALE_SID → FIFO replay that also records per-bill payment chronology.
+        """REF_SALE_SID → manual → FIFO replay (CR #62).
 
-        Same matching rules as `CommissionRepository._replay_charge_ledger`
-        but each bill keeps a list of which payment events touched it (in
-        chronological order, with the source — 'ref_sale_sid' or 'fifo').
+        Each bill records which payments touched it via `payments_chrono`
+        (chronological order, with `source` ∈ {ref_sale_sid, manual, fifo}).
 
         Args:
-            events: chronologically-sorted list of per-customer ledger
-                rows. Must contain at least: doc_sid, doc_no, doc_store_code,
+            events: chronologically-sorted per-customer ledger rows. Must
+                contain at least: doc_sid, doc_no, doc_store_code,
                 customer_sid, customer_name, charge_amount, post_date_str,
                 post_month, ref_sale_sid, sale_total_amt.
+            manual_allocations_by_payment: optional dict mapping
+                payment_doc_sid → list of {bill_sid, amount_applied} rows
+                from `payable_reconciliations`. Applied as Pass 1.5 (after
+                REF_SALE_SID, before FIFO) so manual reconciles displace
+                whatever FIFO would otherwise have inferred.
 
         Returns:
             (bills, payments) where `bills` is dict[doc_sid → bill record
             with `payments_chrono` list] and `payments` is the (now-exhausted)
             payment event list.
         """
+        manual_allocations_by_payment = manual_allocations_by_payment or {}
         bills: Dict[str, Dict[str, Any]] = {}
         payments: List[Dict[str, Any]] = []
         for e in events:
@@ -215,6 +236,38 @@ class AccountPayableRepository:
                 'amount_applied':  int(consumed),
                 'source':          'ref_sale_sid',
             })
+
+        # Pass 1.5 (CR #62): manual `payable_reconciliations` rows.
+        # Apply BEFORE FIFO so manual reconciles displace what FIFO would
+        # otherwise infer. Bill cross-customer mismatches (manual row's
+        # bill_sid not in this customer's bills) are silently skipped —
+        # the row will fire in that customer's replay instead.
+        for p in payments:
+            if p['remaining'] <= 0:
+                continue
+            rows = manual_allocations_by_payment.get(str(p['doc_sid'])) or []
+            for row in rows:
+                if p['remaining'] <= 0:
+                    break
+                b_sid = row['bill_sid']
+                b = bills.get(b_sid)
+                if b is None or b['remaining'] <= 0:
+                    continue
+                row_amount = int(row.get('amount_applied') or 0)
+                if row_amount <= 0:
+                    continue
+                consumed = min(b['remaining'], p['remaining'], row_amount)
+                if consumed <= 0:
+                    continue
+                b['remaining'] -= consumed
+                p['remaining'] -= consumed
+                b['payments_chrono'].append({
+                    'payment_doc_sid': str(p['doc_sid']),
+                    'payment_doc_no':  str(p['doc_no']) if p['doc_no'] is not None else None,
+                    'payment_date':    p['post_date_str'],
+                    'amount_applied':  int(consumed),
+                    'source':          'manual',
+                })
 
         # Pass 2: FIFO over remaining open bills, in customer insertion order.
         for p in payments:

@@ -91,7 +91,8 @@ def freeze_today():
 @pytest.fixture
 def mock_pg():
     """Patch get_postgres_connection in the service module + stub out the
-    rate-lookup helpers so the cursor isn't asked to multiplex shapes.
+    rate-lookup + manual-allocations helpers so the cursor isn't asked to
+    multiplex shapes across SQL queries.
 
     Each test customizes:
       - cur.fetchall.return_value → existing reconciliations [(bill_sid, amount)]
@@ -106,8 +107,9 @@ def mock_pg():
         cur.rowcount = 0
         conn.cursor.return_value.__enter__.return_value = cur
         m.return_value = conn
-        # Patch the rate lookups so the same cursor is never re-used for
-        # SELECT-from-payable_bill_rates with mismatched column shapes.
+        # Patch the auxiliary loaders so the same cursor isn't asked to
+        # multiplex row shapes. `_load_manual_allocations` runs first
+        # inside `_load_bills` (CR #62) so we have to stub it too.
         with patch(
             'app.modules.account_payable.service.AccountPayableService._load_auto_rates',
             return_value={},
@@ -116,7 +118,11 @@ def mock_pg():
                 'app.modules.account_payable.service.AccountPayableService._load_custom_rates',
                 return_value={},
             ):
-                yield m, conn, cur
+                with patch(
+                    'app.modules.account_payable.service.AccountPayableService._load_manual_allocations',
+                    return_value={},
+                ):
+                    yield m, conn, cur
 
 
 # ----------------------------------------------------------------------
