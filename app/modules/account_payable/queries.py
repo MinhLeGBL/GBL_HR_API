@@ -114,7 +114,10 @@ class AccountPayableQueries:
             d.SID                                                                AS bill_sid,
             di.SID                                                               AS sale_id,
             di.SCAN_UPC                                                          AS upc,
-            i.DESCRIPTION1                                                       AS description,
+            -- CR #63: i.TEXT1 is the vendor-prefixed human-readable name
+            -- (e.g. 'THE ROW-AGNES 15'); i.DESCRIPTION1 is an internal SKU
+            -- code (e.g. '25HACU00670AD00042') which is useless on the UI.
+            i.TEXT1                                                              AS description,
             (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END)        AS qty,
             di.VEND_CODE                                                         AS vendor_code,
             CASE

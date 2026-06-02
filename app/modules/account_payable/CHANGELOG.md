@@ -3,6 +3,35 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.1.1] — 2026-06-02
+
+### Fixed — CR #63: item description sourced from wrong Oracle column
+
+`GET /account-payable/bills/:bill_sid` returned `items[i].description`
+as an internal SKU code (e.g. `25HACU00670AD00042`) because the Phase B
+SELECT used `INVN_SBS_ITEM.DESCRIPTION1`. Switched to `INVN_SBS_ITEM.TEXT1`
+which holds the vendor-prefixed human-readable name
+(e.g. `JQM-LA CASQUETTE GADJO SIZE58`).
+
+Affects every endpoint that surfaces `description` (the bill-detail
+items table + `EmployeeBillSlice.items[*]` in the employee drilldown)
+since they share the same Oracle JOIN.
+
+Oracle column survey (4 candidates inspected against live data):
+- `DESCRIPTION1` → SKU/style code (the buggy source)
+- `DESCRIPTION2` → vendor-dept-category triple (used by commission)
+- `TEXT1`        → vendor-prefixed product name ✓ (the fix)
+
+Live-verified the CR's sample: UPC `218103` now returns
+`'JQM-LA CASQUETTE GADJO SIZE58'` instead of `'25HACU00670AD00042'`.
+Hand-carry items spot-checked (CGC, ARP, AQU vendors) all surface
+human-readable TEXT1 names of the same shape.
+
+### Bumped PATCH — backend bug fix, no shape change
+
+`PayableBillItem.description: string | null` shape unchanged. Frontend
+sees strictly better data with no code or type change.
+
 ## [1.1.0] — 2026-06-02
 
 ### Fixed — CR #62: payments queue must mirror the ledger-replay match state
