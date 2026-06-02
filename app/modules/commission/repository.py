@@ -10,9 +10,10 @@ from app.modules.commission.queries import CommissionQueries
 
 # Expected columns from ALL_SALES_DATA query
 ALL_SALES_COLUMNS = [
-    'sale_id', 'upc', 'bill_number', 'doc_store_code', 'sale_date', 'sale_time',
-    'customer_sid', 'employee_sid', 'employee_username', 'store_code',
-    'vendor_code', 'is_jewelry', 'category', 'department', 'discount_rate',
+    'sale_id', 'upc', 'bill_number', 'bill_sid', 'doc_store_code',
+    'sale_date', 'sale_time', 'customer_sid', 'employee_sid',
+    'employee_username', 'store_code', 'vendor_code', 'is_jewelry',
+    'category', 'department', 'discount_rate',
     'revenue_with_vat', 'revenue_before_vat'
 ]
 
@@ -134,6 +135,20 @@ class CommissionRepository:
 
         results = self.execute_query(self.queries.ALL_SALES_DATA, parameters)
 
+        # Oracle SIDs are 18-digit integers — past float64's ~15-digit
+        # mantissa. The moment a single LEFT JOIN walk-in produces a NULL
+        # in a SID column, pandas promotes the whole column to float64 and
+        # every SID in it gets silently rounded (off by up to ~100). That
+        # breaks exact-value lookups against hardcoded SIDs (notably
+        # `EMPLOYEE_COMMISSION_EXCEPTIONS`) and against the AR payable
+        # bill_sid map (CR #59). Stringify SIDs before pandas ever sees them
+        # so the column lands as object dtype with intact values; downstream
+        # code compares string-to-string.
+        for row in results:
+            for field in ('SALE_ID', 'EMPLOYEE_SID', 'CUSTOMER_SID', 'BILL_SID'):
+                if row.get(field) is not None:
+                    row[field] = str(row[field])
+
         df = pd.DataFrame(results)
 
         if df.empty:
@@ -143,16 +158,17 @@ class CommissionRepository:
         if 'upc_clean' not in df.columns and 'upc' in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
 
-        # Only COSM department items with HEA vendor are not eligible for commission.
-        # Re-attribute to SYSADMIN so they count toward store revenue total
-        # but not toward any employee's personal total or commission.
-        # Non-HEA COSM items (e.g. NOTES DE BAS DE PAJE, ANN QUEEN) stay with
-        # the original employee and are classified as fashion (FP/MD).
-        cosm_hea_mask = (df['department'] == 'COSM') & (df['vendor_code'] == 'HEA')
-        if cosm_hea_mask.any():
-            df.loc[cosm_hea_mask, 'employee_sid'] = None
-            df.loc[cosm_hea_mask, 'employee_username'] = 'SYSADMIN'
-            df.loc[cosm_hea_mask, 'store_code'] = None
+        # COSM+HEA items historically went to SYSADMIN (no commission). CR #61
+        # (effective from `HEA_AS_FASHION_FROM_MONTH`) reclassifies them as
+        # fashion. For pre-cutoff periods we keep the old rewrite so historical
+        # commission output stays stable.
+        from app.modules.commission.service import hea_is_fashion
+        if not hea_is_fashion(year, month):
+            cosm_hea_mask = (df['department'] == 'COSM') & (df['vendor_code'] == 'HEA')
+            if cosm_hea_mask.any():
+                df.loc[cosm_hea_mask, 'employee_sid'] = None
+                df.loc[cosm_hea_mask, 'employee_username'] = 'SYSADMIN'
+                df.loc[cosm_hea_mask, 'store_code'] = None
 
         return df
 
@@ -262,3 +278,168 @@ class CommissionRepository:
                     conn.close()
                 except:
                     pass
+
+    # ──────────────────────────────────────────────────────────────────
+    # CR #59: Account-payable detection
+    # ──────────────────────────────────────────────────────────────────
+    def get_unpaid_bill_amounts(
+        self, year: int, month: int,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Return per-bill unpaid balances for AR (Charge tender) bills
+        created in (year, month) and still unpaid at end of month.
+
+        Algorithm (see CR #59 Phase A research, two-tier matching):
+          1. Pull every Charge tender event up to end-of-month for every
+             customer who has at least one Charge bill in the target month.
+          2. Initialise per-bill `remaining = original` from positive Charge
+             events.
+          3. Pass 1: apply payments with `REF_SALE_SID` to that exact bill.
+          4. Pass 2: apply leftover payments FIFO to oldest open bills.
+          5. Filter to bills created in the target month with `remaining > 0`.
+
+        Returns:
+            {
+                bill_sid_str: {
+                    'doc_no': str,
+                    'customer_sid': str,
+                    'original_charge': int,       # positive Charge tender amount
+                    'remaining_unpaid': int,      # after ledger replay
+                    'sale_total_amt': int,        # full bill total (with VAT)
+                    'unpaid_ratio': float,        # remaining_unpaid / sale_total_amt
+                                                  # — used by service for per-item
+                                                  # withholding (uniform-distribution
+                                                  # assumption when bill mixes Charge
+                                                  # with other tenders).
+                },
+                ...
+            }
+            Empty dict on connection failure or no in-period bills.
+        """
+        target_month_str = f'{year:04d}-{month:02d}'
+        # Exclusive upper bound: first day of NEXT month
+        if month == 12:
+            next_year, next_month = year + 1, 1
+        else:
+            next_year, next_month = year, month + 1
+        period_end_exclusive = f'{next_year:04d}-{next_month:02d}-01 00:00:00'
+
+        conn = get_oracle_connection()
+        if not conn:
+            return {}
+
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    self.queries.ORACLE_UNPAID_BILLS_BY_MONTH,
+                    {
+                        'target_month': target_month_str,
+                        'period_end_exclusive': period_end_exclusive,
+                    },
+                )
+                rows = cursor.fetchall()
+                columns = [d[0].lower() for d in cursor.description]
+        except Exception as e:
+            print(f"ERROR querying unpaid bills: {e}")
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        if not rows:
+            return {}
+
+        # Group events by customer for per-customer ledger replay
+        events_by_customer: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            row = dict(zip(columns, r))
+            # Stringify SIDs to match elsewhere (see comments in
+            # get_all_sales_data — Oracle SIDs exceed float64 precision).
+            customer_sid = str(row['customer_sid'])
+            row['customer_sid'] = customer_sid
+            row['doc_sid'] = str(row['doc_sid'])
+            row['ref_sale_sid'] = str(row['ref_sale_sid']) if row['ref_sale_sid'] is not None else None
+            events_by_customer.setdefault(customer_sid, []).append(row)
+
+        # Per-customer ledger replay
+        result: Dict[str, Dict[str, Any]] = {}
+        for customer_sid, events in events_by_customer.items():
+            bills, payments = self._replay_charge_ledger(events)
+            # Keep only target-month bills with remaining > 0
+            for bill_sid, b in bills.items():
+                if b['post_month'] != target_month_str:
+                    continue
+                if b['remaining'] <= 0:
+                    continue
+                sale_total = int(b['sale_total_amt'] or 0)
+                # Bill total can theoretically be 0 in malformed data; guard
+                # against div-by-zero and default to no withholding.
+                ratio = (b['remaining'] / sale_total) if sale_total > 0 else 0.0
+                result[bill_sid] = {
+                    'doc_no':           str(b['doc_no']),
+                    'customer_sid':     customer_sid,
+                    'original_charge':  int(b['original']),
+                    'remaining_unpaid': int(b['remaining']),
+                    'sale_total_amt':   sale_total,
+                    'unpaid_ratio':     ratio,
+                }
+        return result
+
+    @staticmethod
+    def _replay_charge_ledger(events: List[Dict[str, Any]]):
+        """Two-tier (REF_SALE_SID → FIFO) replay of a single customer's
+        Charge tender events. See get_unpaid_bill_amounts for algorithm.
+
+        Args:
+            events: list of dicts with keys doc_sid, doc_no, charge_amount,
+                    post_date, ref_sale_sid, sale_total_amt, post_month.
+                    Must be sorted by post_date.
+        Returns:
+            (bills, payments) where bills is dict[doc_sid -> bill record]
+            and payments is the (now-exhausted) list of payment records.
+        """
+        bills: Dict[str, Dict[str, Any]] = {}
+        payments: List[Dict[str, Any]] = []
+        for e in events:
+            amount = int(e['charge_amount'])
+            if amount > 0:
+                bills[e['doc_sid']] = {
+                    'doc_no':         e['doc_no'],
+                    'original':       amount,
+                    'remaining':      amount,
+                    'sale_total_amt': e['sale_total_amt'],
+                    'post_month':     e['post_month'],
+                }
+            else:
+                payments.append({
+                    'amount':    -amount,    # positive magnitude
+                    'remaining': -amount,
+                    'ref':       e['ref_sale_sid'],
+                })
+
+        # Pass 1: REF_SALE_SID
+        for p in payments:
+            if not p['ref'] or p['ref'] not in bills:
+                continue
+            b = bills[p['ref']]
+            consumed = min(b['remaining'], p['remaining'])
+            b['remaining'] -= consumed
+            p['remaining'] -= consumed
+
+        # Pass 2: FIFO across remaining open bills (bills dict insertion
+        # order matches event order, which is chronological).
+        for p in payments:
+            if p['remaining'] <= 0:
+                continue
+            for b in bills.values():
+                if p['remaining'] <= 0:
+                    break
+                if b['remaining'] <= 0:
+                    continue
+                consumed = min(b['remaining'], p['remaining'])
+                b['remaining'] -= consumed
+                p['remaining'] -= consumed
+
+        return bills, payments

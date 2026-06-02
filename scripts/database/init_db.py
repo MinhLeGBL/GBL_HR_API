@@ -32,6 +32,7 @@ from app.modules.commission.service import CommissionSettingsService, Commission
 from app.modules.bathroom.service import BathroomService
 from app.modules.crm.service import CRMService
 from app.modules.handcarry.service import HandCarryService
+from app.modules.account_payable.service import AccountPayableService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -58,6 +59,8 @@ INIT_STEPS = [
      CRMService().init_database),
     ('Hand-carry catalog (rps.carrier_item extended schema)',
      HandCarryService().init_database),
+    ('Account Payable (payable_reconciliations, payable_item_custom_rates)',
+     AccountPayableService().init_database),
 ]
 
 

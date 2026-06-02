@@ -46,6 +46,7 @@ tests/                     # Mirrors module structure
 | `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
 | `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
 | `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
+| `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
 
 ## Import Rules
 
@@ -200,6 +201,7 @@ CR files are feature-scoped. Only read/update the CR file matching the current b
 | `feature/bathroom*` | `cr/bathroom-price-check.md` |
 | `feature/crm*` | `cr/crm.md` |
 | `feature/handcarry*` | `cr/handcarry.md` |
+| `feature/account-payable*` | `cr/account-payable.md` |
 
 ### Status markers
 

@@ -18,7 +18,10 @@ from app.modules.commission.service import CommissionService
 @pytest.fixture
 def mock_repo():
     """Create a mock repository for dependency injection."""
-    return MagicMock()
+    repo = MagicMock()
+    # CR #59: default — no AR payable bills. Individual tests can override.
+    repo.get_unpaid_bill_amounts.return_value = {}
+    return repo
 
 
 @pytest.fixture
@@ -690,6 +693,10 @@ class TestCalculateCombinedCommission:
             'personal_commission_home_decor',
             'personal_commission_total',
             'total_handout_commission',
+            # CR #59 Phase B: AR payable / withholding
+            'withheld', 'withheld_by_category',
+            'released', 'released_by_category',
+            'payout',
         ]
         assert list(result.columns) == expected_columns
 
@@ -735,6 +742,10 @@ class TestCalculatePersonalCommissions:
         ]
         df = pd.DataFrame(rows, columns=columns)
         df['upc_clean'] = df['upc'].astype(str).str.strip()
+        # CR #59: synth bill_sid per bill_number so tests can reference it
+        # if they want; default unpaid_bills_map (empty) makes all rows have
+        # unpaid_ratio=0, so withholding is zero.
+        df['bill_sid'] = df['bill_number'].astype(str).map(lambda b: f'BILL_SID_{b}')
         return df
 
     def test_missing_month_returns_error_df(self, service, mock_repo):
@@ -1135,6 +1146,10 @@ class TestCalculatePersonalCommissions:
             'commission_vhernier', 'commission_rosa_maria',
             'commission_suitcase', 'commission_hand_carry',
             'commission_home_decor', 'total',
+            # CR #59: AR payable / withholding (Phase B)
+            'withheld', 'withheld_by_category',
+            'released', 'released_by_category',
+            'payout',
         ]
         assert list(result.columns) == expected_columns
 
@@ -1173,18 +1188,385 @@ class TestCalculatePersonalCommissions:
         emp2 = result[result['employee_code'] == 'EMP002'].iloc[0]
         assert emp2['total'] == 0
 
+    def test_withholding_proportional_to_unpaid_ratio(self, service, mock_repo):
+        """CR #59 Phase B: a bill that's 70% unpaid causes 70% of that bill's
+        item commission to be withheld; the remaining 30% is paid normally.
+
+        Setup: one fashion-FP item on bill BILL1 with revenue 1,000,000 (before
+        VAT). Personal target is 2M → achievement = 55% → tier 1 → fashion FP
+        rate = 0.25%. The mocked unpaid_bills_map says BILL1 has 70% unpaid.
+        Target is in tier 1 so we don't tangle with the over-target bonus.
+        """
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_100_000, 1_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        # CR #59: BILL1 → 70% unpaid. The synth bill_sid format from
+        # _make_sales_df is f'BILL_SID_{bill_number}'.
+        mock_repo.get_unpaid_bill_amounts.return_value = {
+            'BILL_SID_BILL1': {
+                'doc_no': 'BILL1',
+                'customer_sid': '999',
+                'original_charge': 1_100_000,
+                'remaining_unpaid': 770_000,
+                'sale_total_amt': 1_100_000,
+                'unpaid_ratio': 0.7,
+            },
+        }
+        employees = [
+            {'employee_code': 'EMP001', 'employee_username': 'user1',
+             'personal_target': 2_000_000, 'full_name': 'Test',
+             'store_code': 'HBT'},
+        ]
+        result = service.calculate_personal_commissions(
+            month=1, year=2025, employees=employees,
+        )
+        row = result.iloc[0]
+
+        # Achievement = 1.1M / 2M = 55% → tier 1 fashion_fp rate 0.25%.
+        assert row['commission_fashion_fp'] == 1_000_000 * 0.0025
+        # Withheld FP = 70% of that.
+        assert row['withheld'] == 1_000_000 * 0.0025 * 0.7
+        assert row['withheld_by_category'] == {'fashion_fp': 1_000_000 * 0.0025 * 0.7}
+        # payout = total - withheld + released; released is 0 in Phase B.
+        assert row['payout'] == row['total'] - row['withheld']
+        assert row['released'] == 0
+        assert row['released_by_category'] == {}
+
+    def test_no_withholding_when_no_unpaid_bills(self, service, mock_repo):
+        """When all bills are paid (empty unpaid_bills_map), withholding is
+        zero across all categories and payout equals total."""
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 1_100_000, 1_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        mock_repo.get_unpaid_bill_amounts.return_value = {}     # nothing unpaid
+
+        employees = [
+            {'employee_code': 'EMP001', 'employee_username': 'user1',
+             'personal_target': 1_000_000, 'full_name': 'Test',
+             'store_code': 'HBT'},
+        ]
+        result = service.calculate_personal_commissions(
+            month=1, year=2025, employees=employees,
+        )
+        row = result.iloc[0]
+
+        assert row['withheld'] == 0
+        assert row['withheld_by_category'] == {}
+        assert row['payout'] == row['total']
+
+    def test_cr61_classify_item_rate_fashion_below_target(self):
+        """CR #61 classifier: tier-1 FP fashion item gets tier1 fp rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        assert result == ('fashion', 'fp', 0.0025)
+
+    def test_cr61_classify_item_rate_fashion_over_target(self):
+        """CR #61 classifier: a fully-over-target FP item gets tier3 + over_100."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_OT',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=120,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids={'S_OT'}, ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        # tier3 fp (0.01) + over_100 (0.01) = 0.02
+        assert result == ('fashion', 'fp', 0.02)
+
+    def test_cr61_classify_item_rate_hea_below_cutoff_is_other(self):
+        """CR #61: pre-cutoff (hea_as_fashion_period=False), COSM+HEA items
+        classify as 'other' with rate 0."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'HEA', 'upc_clean': 'X', 'department': 'COSM',
+            'is_jewelry': 0, 'category': 'CREAM', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('other', None, 0.0)
+
+    def test_cr61_classify_item_rate_hea_post_cutoff_is_fashion(self):
+        """CR #61: post-cutoff (hea_as_fashion_period=True), COSM+HEA items
+        flow into fashion classification with the corresponding tier rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES,
+        )
+        row = {
+            'vendor_code': 'HEA', 'upc_clean': 'X', 'department': 'COSM',
+            'is_jewelry': 0, 'category': 'CREAM', 'sale_id': 'S1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=True,
+        )
+        # tier 2 fp rate at 80% achievement
+        assert result == ('fashion', 'fp', 0.005)
+
+    def test_cr61_hea_is_fashion_helper(self):
+        """CR #61: cutoff helper returns True from April 2026 onward."""
+        from app.modules.commission.service import hea_is_fashion
+        assert hea_is_fashion(2026, 3) is False   # March — pre-cutoff
+        assert hea_is_fashion(2026, 4) is True    # April — cutoff month, inclusive
+        assert hea_is_fashion(2026, 12) is True
+        assert hea_is_fashion(2025, 12) is False  # any 2025 month — pre-cutoff
+
+    def test_cr61_classify_hand_carry_rom_earrings(self):
+        """CR #61: ROM + EARRINGS hand-carry items get the 3% rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, HC_RATE_ROM_EARRINGS,
+        )
+        row = {
+            'vendor_code': 'ROM', 'upc_clean': 'HC1', 'department': 'JWLY',
+            'is_jewelry': 1, 'category': 'EARRINGS', 'sale_id': 'S_HC',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs={'HC1'},
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('hand_carry', None, HC_RATE_ROM_EARRINGS)
+
+    def test_cr61_classify_hand_carry_2pct_vendor(self):
+        """CR #61: HC_VENDORS_2PCT (e.g. CGI) hand-carry items get the 2% rate."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, HC_RATE_2PCT,
+        )
+        row = {
+            'vendor_code': 'CGI', 'upc_clean': 'HC2', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_HC2',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=60,
+            hand_carry_upcs={'HC2'},
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('hand_carry', None, HC_RATE_2PCT)
+
+    def test_cr61_classify_suitcase_returns_none(self):
+        """CR #61: suitcase vendors (TVL/TIT) are skipped — flat per-item amount."""
+        from app.modules.commission.service import CommissionService, STANDARD_RATES
+        row = {
+            'vendor_code': 'TVL', 'upc_clean': 'SC1', 'department': 'BAGS',
+            'is_jewelry': 0, 'category': 'TRAVEL', 'sale_id': 'S_SC',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result is None
+
+    def test_cr61_classify_home_decor(self):
+        """CR #61: HOME department → home_decor at 1% flat."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, HOME_DECOR_RATE,
+        )
+        row = {
+            'vendor_code': 'IKE', 'upc_clean': 'HD1', 'department': 'HOME',
+            'is_jewelry': 0, 'category': 'DECOR', 'sale_id': 'S_HD',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=120,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('home_decor', None, HOME_DECOR_RATE)
+
+    def test_cr61_classify_jewelry_vhn(self):
+        """CR #61: VHN jewelry → vhernier at 1%."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, JEWELRY_RATE_VHN,
+        )
+        row = {
+            'vendor_code': 'VHN', 'upc_clean': 'J1', 'department': 'JWLY',
+            'is_jewelry': 1, 'category': 'NECKLACE', 'sale_id': 'S_VHN',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('vhernier', None, JEWELRY_RATE_VHN)
+
+    def test_cr61_classify_jewelry_other(self):
+        """CR #61: generic jewelry → jewelry at 2%."""
+        from app.modules.commission.service import (
+            CommissionService, STANDARD_RATES, JEWELRY_RATE_OTHER,
+        )
+        row = {
+            'vendor_code': 'OTH', 'upc_clean': 'J2', 'department': 'JWLY',
+            'is_jewelry': 1, 'category': 'RING', 'sale_id': 'S_OJ',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=80,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('jewelry', None, JEWELRY_RATE_OTHER)
+
+    def test_cr61_classify_fashion_below_50_achievement_zero_rate(self):
+        """CR #61: fashion items at <50% achievement get rate 0 (no commission earned)."""
+        from app.modules.commission.service import CommissionService, STANDARD_RATES
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'F1', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'SHIRT', 'sale_id': 'S_F1',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=40,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(), ot_blended_rates_by_sale_id={},
+            hea_as_fashion_period=False,
+        )
+        assert result == ('fashion', 'fp', 0.0)
+
+    def test_cr61_classify_blended_over_target_rate(self):
+        """CR #61: a crossing item's blended rate comes from ot_blended_rates_by_sale_id."""
+        from app.modules.commission.service import CommissionService, STANDARD_RATES
+        # Simulate the main pipeline having pre-computed a blended rate of
+        # tier3_fp + 0.4 × over_100 for the crossing item.
+        blended = STANDARD_RATES['tier3']['fp'] + 0.4 * STANDARD_RATES['over_100']
+        row = {
+            'vendor_code': 'GUC', 'upc_clean': 'X', 'department': 'WRTW',
+            'is_jewelry': 0, 'category': 'BAG', 'sale_id': 'S_BLEND',
+            'discount_rate': 0.0,
+        }
+        result = CommissionService._classify_item_rate(
+            row=row, rates=STANDARD_RATES, achievement_rate=110,
+            hand_carry_upcs=set(),
+            ot_qualifying_sale_ids=set(),
+            ot_blended_rates_by_sale_id={'S_BLEND': blended},
+            hea_as_fashion_period=True,
+        )
+        assert result == ('fashion', 'fp', blended)
+
+    def test_cr61_snapshot_integration_writes_expected_entries(self, service, mock_repo):
+        """CR #61: end-to-end check that calculate_personal_commissions writes
+        the expected snapshot entries via _upsert_payable_bill_rates.
+
+        Scenario: one employee, two items in one bill — one fashion FP, one HC —
+        below target so no over-target maps populated. Verifies revenue_type +
+        fp_or_md + rate match what the classifier would produce."""
+        sales_df = self._make_sales_df([
+            # Fashion FP item — below 50% target → rate 0.
+            [1, 'UPCFP', 'BILL_A', 'HBT', '2026-04-15', '10:00:00',
+             None, 'SIDX', 'userx', 'HBT',
+             'GUC', 0, 'SHIRT', 'WRTW', 0.0, 1_100_000, 1_000_000],
+            # Hand-carry item — 2pct vendor.
+            [2, 'UPCHC', 'BILL_A', 'HBT', '2026-04-15', '10:00:00',
+             None, 'SIDX', 'userx', 'HBT',
+             'CGI', 0, 'BAG', 'WRTW', 0.0, 2_200_000, 2_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = ['UPCHC']
+
+        employees = [{
+            'employee_code':     'EMPX',
+            'employee_username': 'userx',
+            'full_name':         'Test User',
+            'personal_target':   1_000_000_000,   # so achievement << 50%
+            'store_code':        'HBT',
+        }]
+
+        captured = []
+        original = CommissionService._upsert_payable_bill_rates
+
+        def capture(entries):
+            captured.extend(entries)
+        # Patch the static helper for this test only.
+        with patch.object(CommissionService, '_upsert_payable_bill_rates',
+                          side_effect=capture):
+            service.calculate_personal_commissions(
+                month=4, year=2026, employees=employees,
+            )
+
+        # Two items → two snapshot entries.
+        assert len(captured) == 2
+        by_upc = {e[1]: e for e in captured}
+
+        # Fashion FP, achievement < 50% → rate 0, fp_or_md='fp'.
+        fp_entry = by_upc['UPCFP']
+        assert fp_entry[2] == 'fashion'
+        assert fp_entry[3] == 'fp'
+        assert fp_entry[4] == 0.0
+        assert fp_entry[5] == '2026-04'
+
+        # Hand carry CGI vendor → HC_RATE_2PCT, fp_or_md=None.
+        hc_entry = by_upc['UPCHC']
+        assert hc_entry[2] == 'hand_carry'
+        assert hc_entry[3] is None
+        assert hc_entry[4] == 0.02
+
+        # Both entries should reference the same bill_sid (synth from bill_number).
+        assert fp_entry[0] == 'BILL_SID_BILL_A'
+        assert hc_entry[0] == 'BILL_SID_BILL_A'
+
 
 class TestEmployeeCommissionException:
     """Tests for EMPLOYEE_COMMISSION_EXCEPTIONS — flat rate on non-jewelry
     sold to a qualifying customer only."""
 
-    EXCEPTION_EMP_SID = 690036963000170943
-    QUALIFYING_CUSTOMER = 690837303000121462
-    OTHER_CUSTOMER = 999999999999999999
+    # SIDs are stringified at the repository layer to dodge float64
+    # precision loss; the exception dict + the test fixtures use the
+    # same string form so the lookup works.
+    EXCEPTION_EMP_SID = '690036963000170943'
+    QUALIFYING_CUSTOMER = '690837303000121462'
+    OTHER_CUSTOMER = '999999999999999999'
 
     @pytest.fixture
     def mock_repo(self):
-        return MagicMock()
+        repo = MagicMock()
+        # CR #59: default — no AR payable bills
+        repo.get_unpaid_bill_amounts.return_value = {}
+        return repo
 
     @pytest.fixture
     def service(self, mock_repo):
@@ -1200,6 +1582,8 @@ class TestEmployeeCommissionException:
         ]
         df = pd.DataFrame(rows, columns=columns)
         df['upc_clean'] = df['upc'].astype(str).str.strip()
+        # CR #59: synth bill_sid (see TestCalculatePersonalCommissions._make_sales_df)
+        df['bill_sid'] = df['bill_number'].astype(str).map(lambda b: f'BILL_SID_{b}')
         return df
 
     def test_flat_rate_qualifying_customer(self, service, mock_repo):
@@ -1227,6 +1611,47 @@ class TestEmployeeCommissionException:
         assert row['commission_fashion_md'] == 0
         assert row['commission_over_100'] == 0
         assert row['total'] == 10_000_000 * 0.007
+
+    def test_exception_path_withholds_proportionally(self, service, mock_repo):
+        """CR #59: exception employee's fashion_fp (flat 0.7%) is also subject
+        to withholding when the bill is unpaid. A bill that's 40% unpaid causes
+        40% of the exception flat-rate commission to be withheld; jewelry /
+        hand_carry / etc on the same bill withhold via the shared non-fashion
+        helper. Covers the exception-path withholding code that was previously
+        a kwargs-disable hack on _calculate_withheld_by_category."""
+        sales_df = self._make_sales_df([
+            # Non-jewelry to qualifying customer → exception flat 0.7%
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             self.QUALIFYING_CUSTOMER, self.EXCEPTION_EMP_SID, 'user1', 'HBT',
+             'ABC', 0, 'SHIRTS', 'RTW', 0.0, 11_000_000, 10_000_000],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        # BILL1 is 40% unpaid at end of month.
+        mock_repo.get_unpaid_bill_amounts.return_value = {
+            'BILL_SID_BILL1': {
+                'doc_no': 'BILL1', 'customer_sid': self.QUALIFYING_CUSTOMER,
+                'original_charge': 11_000_000, 'remaining_unpaid': 4_400_000,
+                'sale_total_amt': 11_000_000, 'unpaid_ratio': 0.4,
+            },
+        }
+        employees = [{
+            'employee_code': 'EMP001',
+            'employee_username': 'user1',
+            'personal_target': 0,
+            'full_name': 'Exception Employee',
+            'store_code': 'HBT',
+        }]
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        row = result.iloc[0]
+
+        # Gross commission stays at 70,000 (0.7% of 10M).
+        assert row['commission_fashion_fp'] == 10_000_000 * 0.007
+        # Withheld = 40% of the gross commission.
+        assert row['withheld'] == 10_000_000 * 0.007 * 0.4    # 28,000
+        assert row['withheld_by_category'] == {'fashion_fp': 10_000_000 * 0.007 * 0.4}
+        # payout = total − withheld + released; released is 0 in Phase B.
+        assert row['payout'] == row['total'] - row['withheld']
 
     def test_non_qualifying_customer_no_commission(self, service, mock_repo):
         """Non-jewelry sales to other customers earn zero FP/discount commission."""

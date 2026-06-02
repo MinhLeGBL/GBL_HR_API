@@ -37,9 +37,11 @@ STANDARD_RATES = {
 # ============================================================================
 # Employee who receives a flat rate on non-jewelry sales only when
 # selling to a specific customer. No personal target, no achievement tiers.
+# SIDs are stored as strings (v1.0.2) to dodge float64 precision loss on
+# the 18-digit Oracle SIDs — see CommissionRepository.get_all_sales_data.
 EMPLOYEE_COMMISSION_EXCEPTIONS = {
-    690036963000170943: {                               # employee SID
-        'qualifying_customer_sid': 690837303000121462,
+    '690036963000170943': {                             # employee SID
+        'qualifying_customer_sid': '690837303000121462',
         'flat_rate': 0.007,                             # 0.7% on all non-jewelry
     }
 }
@@ -53,6 +55,21 @@ HC_VENDORS_2PCT = frozenset(['CGI', 'ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'ROM', 'S
 JEWELRY_OTHER_VENDORS = frozenset(['ATS', 'VIS', 'LUI', 'NAN', 'NAK', 'SPK', 'TED', 'BRT'])
 SUITCASE_VENDORS = frozenset(['TVL', 'TIT'])
 COSM_EXCLUDED_VENDOR = 'HEA'  # Only HEA vendor in COSM dept → SYSADMIN (no commission)
+
+# CR #61 (2026-06-01): from April 2026 onward, HEA products are reclassified as
+# fashion (same tier rate + over-target bonus as the fashion category).
+# Pre-cutoff months keep the original SYSADMIN routing so historical
+# calculations remain stable. The cutoff key is the calculation's target month,
+# not the bill's creation month — calculate for April 2026 uses the new rule
+# regardless of when individual bills were created within that period.
+HEA_AS_FASHION_FROM_MONTH = '2026-04'
+
+
+def hea_is_fashion(year: int, month: int) -> bool:
+    """Whether the (year, month) calculation period treats COSM+HEA items as
+    fashion (True) or excludes them via SYSADMIN routing (False).
+    See HEA_AS_FASHION_FROM_MONTH for the cutoff."""
+    return f'{year:04d}-{month:02d}' >= HEA_AS_FASHION_FROM_MONTH
 
 # ============================================================================
 # COMMISSION RATES
@@ -189,14 +206,23 @@ class CommissionService:
     # _allocate_revenue_to_tiers, _distribute_store_pool) and
     # calculate_batch_store_commissions removed — superseded by v2.
 
-    def _compute_revenue_by_type(self, sales_df, hand_carry_upcs) -> Dict[str, Dict[str, int]]:
+    def _compute_revenue_by_type(
+        self, sales_df, hand_carry_upcs,
+        year: Optional[int] = None, month: Optional[int] = None,
+    ) -> Dict[str, Dict[str, int]]:
         """
         Compute 8-category revenue totals with FP/MD split from a sales DataFrame.
-        Priority chain: hand_carry → suitcase → other (COSM) → home_decor → jewelry → fashion.
+        Priority chain: hand_carry → suitcase → other (COSM, pre-cutoff only) →
+        home_decor → jewelry → fashion.
 
         Args:
             sales_df: DataFrame with Oracle sale columns (lowercase). May be empty.
             hand_carry_upcs: List/set of UPCs that classify as hand carry.
+            year, month: optional calculation period. When provided and
+                `hea_is_fashion(year, month)` is True, COSM+HEA items flow into
+                the fashion bucket instead of the legacy 'other' bucket
+                (CR #61, effective `HEA_AS_FASHION_FROM_MONTH`). When None,
+                defaults to pre-cutoff behavior for backward compatibility.
 
         Returns:
             Dict with keys matching REVENUE_TYPE_ORDER, each value is
@@ -211,7 +237,13 @@ class CommissionService:
         if 'upc_clean' not in df.columns:
             df['upc_clean'] = df['upc'].astype(str).str.strip()
 
-        # Priority chain: hand_carry → suitcase → other (COSM+HEA) → home_decor → jewelry → fashion
+        period_treats_hea_as_fashion = (
+            year is not None and month is not None
+            and hea_is_fashion(year, month)
+        )
+
+        # Priority chain: hand_carry → suitcase → other (COSM+HEA, pre-cutoff only)
+        #                  → home_decor → jewelry → fashion
         hc_mask = df['upc_clean'].isin(hand_carry_upcs)
         hand_carry_df = df[hc_mask]
         remainder = df[~hc_mask]
@@ -220,11 +252,15 @@ class CommissionService:
         suitcase_df = remainder[sc_mask]
         remainder2 = remainder[~sc_mask]
 
-        # Only COSM dept + HEA vendor → 'other' (no commission).
-        # Non-HEA COSM items fall through to normal fashion classification.
-        cosm_mask = (remainder2['department'] == 'COSM') & (remainder2['vendor_code'] == COSM_EXCLUDED_VENDOR)
-        other_df = remainder2[cosm_mask]
-        remainder3 = remainder2[~cosm_mask]
+        # COSM dept + HEA vendor: pre-cutoff route to 'other' (no commission);
+        # post-cutoff fall through to fashion (CR #61).
+        if period_treats_hea_as_fashion:
+            other_df = remainder2.iloc[0:0]   # empty — HEA flows to fashion
+            remainder3 = remainder2
+        else:
+            cosm_mask = (remainder2['department'] == 'COSM') & (remainder2['vendor_code'] == COSM_EXCLUDED_VENDOR)
+            other_df = remainder2[cosm_mask]
+            remainder3 = remainder2[~cosm_mask]
 
         home_mask = remainder3['department'] == 'HOME'
         home_decor_df = remainder3[home_mask]
@@ -506,6 +542,127 @@ class CommissionService:
             'rosa_maria': commission_rosa_maria,
         }
 
+    @staticmethod
+    def _upsert_payable_bill_rates(entries):
+        """CR #61: batch UPSERT into `payable_bill_rates`. Idempotent — re-runs
+        for the same month overwrite. `entries` is a list of tuples:
+        (bill_sid, upc, revenue_type, fp_or_md, effective_rate, source_month).
+        Swallows errors so a snapshot failure never aborts the commission calc."""
+        if not entries:
+            return
+        conn = get_postgres_connection()
+        if not conn:
+            print('[WARN] CR #61 snapshot skipped — could not connect to PostgreSQL')
+            return
+        try:
+            with conn.cursor() as cur:
+                cur.executemany('''
+                    INSERT INTO payable_bill_rates
+                        (bill_sid, upc, revenue_type, fp_or_md, effective_rate, source_month)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (bill_sid, upc) DO UPDATE SET
+                        revenue_type   = EXCLUDED.revenue_type,
+                        fp_or_md       = EXCLUDED.fp_or_md,
+                        effective_rate = EXCLUDED.effective_rate,
+                        source_month   = EXCLUDED.source_month,
+                        updated_at     = NOW()
+                ''', entries)
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f'[WARN] CR #61 snapshot UPSERT failed: {e}')
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _classify_item_rate(
+        row, rates, achievement_rate, hand_carry_upcs,
+        ot_qualifying_sale_ids: set, ot_blended_rates_by_sale_id: dict,
+        hea_as_fashion_period: bool,
+    ):
+        """CR #61: classify a single line item and compute its `effective_rate`
+        for the payable_bill_rates snapshot.
+
+        Returns `(revenue_type, fp_or_md, rate)` or `None` if the item should
+        not be snapshotted (e.g. suitcase items where the commission is a flat
+        per-item amount and the "rate" formulation doesn't apply).
+
+        `fp_or_md` is `'fp'` / `'md'` only for fashion; `None` otherwise.
+        """
+        vendor = row.get('vendor_code')
+        upc_clean = row.get('upc_clean')
+        department = row.get('department')
+        is_jewelry = row.get('is_jewelry', 0)
+        category = row.get('category', '')
+        sale_id = row.get('sale_id')
+
+        # Priority chain matches _separate_sales_by_type:
+        # hand_carry → suitcase → home_decor → jewelry → fashion.
+        # Pre-cutoff COSM+HEA → 'other' (rate 0); post-cutoff falls through to fashion.
+
+        if upc_clean in hand_carry_upcs:
+            # Hand carry rate by vendor + category.
+            if vendor == 'ROM' and category == 'EARRINGS':
+                return ('hand_carry', None, HC_RATE_ROM_EARRINGS)
+            if vendor in HC_VENDORS_1PCT:
+                return ('hand_carry', None, HC_RATE_1PCT)
+            if vendor in HC_VENDORS_2PCT:
+                return ('hand_carry', None, HC_RATE_2PCT)
+            return ('hand_carry', None, HC_RATE_1PCT)
+
+        if vendor in SUITCASE_VENDORS:
+            # Suitcase is a flat 500K per item — the rate formulation doesn't
+            # apply. Skip the snapshot row; Account Payable special-cases
+            # revenue_type='suitcase' on its end.
+            return None
+
+        if department == 'HOME':
+            return ('home_decor', None, HOME_DECOR_RATE)
+
+        # COSM+HEA: pre-cutoff → 'other' with rate 0; post-cutoff → fashion.
+        if department == 'COSM' and vendor == COSM_EXCLUDED_VENDOR and not hea_as_fashion_period:
+            return ('other', None, 0.0)
+
+        if is_jewelry == 1:
+            if vendor == 'VHN':
+                return ('vhernier', None, JEWELRY_RATE_VHN)
+            if vendor == 'ROM' and category == 'EARRINGS':
+                return ('rosa_maria', None, JEWELRY_RATE_ROM_EARRINGS)
+            return ('jewelry', None, JEWELRY_RATE_OTHER)
+
+        # Fashion (non-jewelry, non-HC, non-suitcase, non-HOME, possibly HEA post-cutoff).
+        discount_rate = row.get('discount_rate', 0)
+        is_fp = discount_rate <= DISCOUNT_THRESHOLD
+        fp_or_md = 'fp' if is_fp else 'md'
+        rate_kind = 'fp' if is_fp else 'discount'
+
+        # Below-50% achievement → no fashion commission earned, rate = 0.
+        if achievement_rate < 50:
+            return ('fashion', fp_or_md, 0.0)
+        if achievement_rate < 70:
+            tier_rate = rates['tier1'][rate_kind]
+        elif achievement_rate < 100:
+            tier_rate = rates['tier2'][rate_kind]
+        else:
+            tier_rate = rates['tier3'][rate_kind]
+
+        # Over-target bonus only applies to FP items at tier 3 (>100%).
+        if is_fp and achievement_rate > 100:
+            if sale_id in ot_blended_rates_by_sale_id:
+                # The single bill-crossing item gets a proportional blended rate.
+                return ('fashion', 'fp', ot_blended_rates_by_sale_id[sale_id])
+            if sale_id in ot_qualifying_sale_ids:
+                # Fully-over-target FP qualifying item: tier3 + over_100.
+                return ('fashion', 'fp', tier_rate + rates['over_100'])
+
+        return ('fashion', fp_or_md, tier_rate)
+
     def _build_empty_personal_result(self, employee_code, employee_name, store_code):
         """Return a zero-commission result dict for an employee with no qualifying sales."""
         return {
@@ -522,7 +679,177 @@ class CommissionService:
             'commission_hand_carry': 0,
             'commission_home_decor': 0,
             'total': 0,
+            # CR #59: AR payable / withholding — zero for empty result
+            'withheld': 0,
+            'withheld_by_category': {},
+            'released': 0,
+            'released_by_category': {},
+            'payout': 0,
         }
+
+    def _calculate_withheld_by_category(
+        self,
+        employee_sales_df,
+        non_jewelry_fp_df,
+        non_jewelry_disc_df,
+        hand_carry_df,
+        suitcase_df,
+        home_decor_df,
+        jewelry_df,
+        rates,
+        achievement_rate,
+        fp_non_jewelry_after_target,
+        target_bill_items_local,
+        bills_after_target_local,
+        hand_carry_upcs,
+    ) -> Dict[str, float]:
+        """Compute the withheld commission per category for one employee.
+
+        Withheld = the portion of each category's commission that's tied to
+        line items on AR bills still unpaid at end of month. Computed by
+        multiplying each item's revenue by its `unpaid_ratio` (set upstream
+        from `get_unpaid_bill_amounts`), then applying the same rate the
+        category uses for the normal commission calculation.
+
+        Returns dict keyed by the same names used in the response's
+        `withheld_by_category` field. Keys with value 0 may be returned; the
+        caller filters out zeros before serializing.
+        """
+        out = {
+            'fashion_fp':   0.0,
+            'fashion_md':   0.0,
+            'over_target':  0.0,
+            'jewelry':      0.0,
+            'vhernier':     0.0,
+            'rosa_maria':   0.0,
+            'suitcase':     0.0,
+            'hand_carry':   0.0,
+            'home_decor':   0.0,
+        }
+
+        # Pick the tier rate the way the main path does — withholding uses
+        # the same rate as the corresponding commission line so the ratio
+        # holds exactly: withheld = commission × unpaid_ratio (per item).
+        if achievement_rate >= 100:
+            tier_key = 'tier3'
+        elif achievement_rate >= 70:
+            tier_key = 'tier2'
+        elif achievement_rate >= 50:
+            tier_key = 'tier1'
+        else:
+            tier_key = None  # No fashion commission, hence no fashion withholding
+
+        # ── Fashion FP / MD ─────────────────────────────────────────────
+        if tier_key is not None:
+            fp_unpaid_rev = (
+                non_jewelry_fp_df['revenue_before_vat'] * non_jewelry_fp_df['unpaid_ratio']
+            ).sum()
+            md_unpaid_rev = (
+                non_jewelry_disc_df['revenue_before_vat'] * non_jewelry_disc_df['unpaid_ratio']
+            ).sum()
+            out['fashion_fp'] = float(fp_unpaid_rev) * rates[tier_key]['fp']
+            out['fashion_md'] = float(md_unpaid_rev) * rates[tier_key]['discount']
+
+        # ── Over-target bonus ──────────────────────────────────────────
+        # Same items that contributed to fp_non_jewelry_after_target, weighted
+        # by unpaid_ratio. We reconstruct from locals captured at call time:
+        # `target_bill_items_local` and `bills_after_target_local`.
+        if achievement_rate > 100 and fp_non_jewelry_after_target > 0:
+            ot_unpaid_rev = 0.0
+            # Items from the target-crossing bill (FP qualifying portion).
+            if target_bill_items_local is not None and len(target_bill_items_local) > 0:
+                ot_qual = target_bill_items_local[target_bill_items_local.get('is_ot_qualifying', False)]
+                ot_unpaid_rev += float(
+                    (ot_qual['revenue_before_vat'] * ot_qual['unpaid_ratio']).sum()
+                )
+            # Items from bills after target.
+            if bills_after_target_local is not None and len(bills_after_target_local) > 0:
+                ot_unpaid_rev += float(
+                    (bills_after_target_local['revenue_before_vat']
+                     * bills_after_target_local['unpaid_ratio']).sum()
+                )
+            out['over_target'] = ot_unpaid_rev * rates['over_100']
+
+        # ── Non-fashion categories share their compute with the exception
+        #     path. See _withheld_for_non_fashion for jewelry / vhernier /
+        #     rosa_maria / hand_carry / suitcase / home_decor breakdown.
+        out.update(self._withheld_for_non_fashion(
+            hand_carry_df=hand_carry_df,
+            suitcase_df=suitcase_df,
+            home_decor_df=home_decor_df,
+            jewelry_df=jewelry_df,
+        ))
+        return out
+
+    @staticmethod
+    def _withheld_for_non_fashion(
+        hand_carry_df, suitcase_df, home_decor_df, jewelry_df,
+    ) -> Dict[str, float]:
+        """Compute withholding for the categories whose rate logic is
+        identical between the main path and the exception path.
+
+        Returns dict with keys: jewelry (total), vhernier, rosa_maria,
+        hand_carry, suitcase, home_decor.
+        """
+        result: Dict[str, float] = {
+            'jewelry':    0.0,
+            'vhernier':   0.0,
+            'rosa_maria': 0.0,
+            'hand_carry': 0.0,
+            'suitcase':   0.0,
+            'home_decor': 0.0,
+        }
+
+        # ── Jewelry (VHN 1% / ROM-EAR 3% / other 2%) ────────────────────
+        if len(jewelry_df) > 0:
+            vhn = jewelry_df[jewelry_df['vendor_code'] == 'VHN']
+            rom_ear = jewelry_df[
+                (jewelry_df['vendor_code'] == 'ROM')
+                & (jewelry_df['category'] == 'EARRINGS')
+            ]
+            other_mask = ~jewelry_df.index.isin(vhn.index) & ~jewelry_df.index.isin(rom_ear.index)
+            other = jewelry_df[other_mask]
+            result['vhernier'] = float(
+                (vhn['revenue_before_vat'] * vhn['unpaid_ratio']).sum()
+            ) * JEWELRY_RATE_VHN
+            result['rosa_maria'] = float(
+                (rom_ear['revenue_before_vat'] * rom_ear['unpaid_ratio']).sum()
+            ) * JEWELRY_RATE_ROM_EARRINGS
+            jw_other_withheld = float(
+                (other['revenue_before_vat'] * other['unpaid_ratio']).sum()
+            ) * JEWELRY_RATE_OTHER
+            result['jewelry'] = result['vhernier'] + result['rosa_maria'] + jw_other_withheld
+
+        # ── Hand carry (per-vendor rates on with-VAT revenue) ───────────
+        if len(hand_carry_df) > 0:
+            hc_total = 0.0
+            for _, row in hand_carry_df.iterrows():
+                vendor = row['vendor_code']
+                category = row.get('category', '')
+                weighted_rev = row['revenue_with_vat'] * row['unpaid_ratio']
+                if vendor == 'ROM' and category == 'EARRINGS':
+                    hc_total += weighted_rev * HC_RATE_ROM_EARRINGS
+                elif vendor in HC_VENDORS_1PCT:
+                    hc_total += weighted_rev * HC_RATE_1PCT
+                elif vendor in HC_VENDORS_2PCT:
+                    hc_total += weighted_rev * HC_RATE_2PCT
+                else:
+                    hc_total += weighted_rev * HC_RATE_1PCT
+            result['hand_carry'] = hc_total
+
+        # ── Suitcase (flat per item × unpaid_ratio) ─────────────────────
+        if len(suitcase_df) > 0:
+            result['suitcase'] = float(
+                (suitcase_df['unpaid_ratio'] * SUITCASE_FLAT_AMOUNT).sum()
+            )
+
+        # ── Home decor (flat 1% on revenue_before_vat) ──────────────────
+        if len(home_decor_df) > 0:
+            result['home_decor'] = float(
+                (home_decor_df['revenue_before_vat'] * home_decor_df['unpaid_ratio']).sum()
+            ) * HOME_DECOR_RATE
+
+        return result
 
     def calculate_personal_commissions(
         self,
@@ -587,6 +914,24 @@ class CommissionService:
         else:
             hand_carry_upcs = self.repository.get_hand_carry_upcs()
 
+        # CR #59: pull unpaid AR bills for the target month and annotate each
+        # sales row with its bill's unpaid_ratio. Items on bills that are paid
+        # by end-of-month (or were never on AR) get unpaid_ratio=0. The ratio
+        # is used to compute per-category withholding alongside the normal
+        # commission calculation — withheld_category = unpaid_ratio-weighted
+        # revenue × the same rate the category uses.
+        unpaid_bills_map = self.repository.get_unpaid_bill_amounts(year, month)
+        if 'bill_sid' in all_sales_df.columns:
+            all_sales_df = all_sales_df.copy()
+            all_sales_df['unpaid_ratio'] = all_sales_df['bill_sid'].map(
+                lambda sid: unpaid_bills_map.get(sid, {}).get('unpaid_ratio', 0.0)
+                            if sid is not None else 0.0
+            )
+        else:
+            # Old preloaded data without bill_sid: cannot detect payable.
+            all_sales_df = all_sales_df.copy()
+            all_sales_df['unpaid_ratio'] = 0.0
+
         # Create mapping from employee_username to employee_sid for internal processing
         # Use employee_sid (unique, stable identifier) for filtering sales data
         # Use employee_code (human-readable) only for output
@@ -597,6 +942,11 @@ class CommissionService:
 
         # 4. PREPARE RESULTS LIST
         results = []
+        # CR #61: rate snapshot entries accumulated per employee, batch-UPSERTed
+        # at the end so a snapshot failure never blocks the response.
+        rate_snapshot_entries: List[tuple] = []
+        _hea_as_fashion_period = hea_is_fashion(year, month)
+        _source_month_str = f'{year:04d}-{month:02d}'
 
         # 5. PROCESS EACH EMPLOYEE
         for employee_data in employees:
@@ -644,9 +994,15 @@ class CommissionService:
                 qualifying_customer = exception['qualifying_customer_sid']
                 flat_rate = exception['flat_rate']
 
-                exc_sales_df = employee_sales_df[
-                    ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
-                ].copy()
+                # CR #61: HEA-as-fashion post-cutoff means we don't exclude
+                # COSM+HEA items from per-employee processing. Pre-cutoff
+                # behavior preserved for historical commission stability.
+                if _hea_as_fashion_period:
+                    exc_sales_df = employee_sales_df.copy()
+                else:
+                    exc_sales_df = employee_sales_df[
+                        ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
+                    ].copy()
                 exc_sales_df['upc_clean'] = exc_sales_df['upc'].astype(str).str.strip()
 
                 # Separate sales by type (same priority chain as main path)
@@ -666,6 +1022,29 @@ class CommissionService:
 
                 exc_total = exc_flat_commission + hc['total'] + sc + hd + jw['total']
 
+                # CR #59: withholding for the exception employee.
+                # The exception path uses a flat 0.7% on qualifying-customer
+                # non-jewelry sales (not the standard tier-based fashion path),
+                # so we compute fashion_fp withholding directly. The other
+                # categories (jewelry / hand_carry / suitcase / home_decor)
+                # use the same rules as the main path, so we delegate those
+                # to the focused per-category helpers.
+                exc_withheld = {
+                    'fashion_fp':  float(
+                        (qualifying_sales['revenue_before_vat'] * qualifying_sales['unpaid_ratio']).sum()
+                    ) * flat_rate,
+                    'fashion_md':  0.0,
+                    'over_target': 0.0,
+                    **self._withheld_for_non_fashion(
+                        hand_carry_df=separated['hand_carry'],
+                        suitcase_df=separated['suitcase'],
+                        home_decor_df=separated['home_decor'],
+                        jewelry_df=separated['jewelry'],
+                    ),
+                }
+                exc_withheld_total = sum(exc_withheld.values())
+                exc_payout = exc_total - exc_withheld_total
+
                 results.append({
                     'employee_code': employee_code,
                     'fullname': employee_name,
@@ -679,7 +1058,13 @@ class CommissionService:
                     'commission_suitcase': sc,
                     'commission_hand_carry': hc['total'],
                     'commission_home_decor': hd,
-                    'total': exc_total
+                    'total': exc_total,
+                    # CR #59: AR payable / withholding
+                    'withheld': exc_withheld_total,
+                    'withheld_by_category': {k: v for k, v in exc_withheld.items() if v != 0},
+                    'released': 0,
+                    'released_by_category': {},
+                    'payout': exc_payout,
                 })
                 continue
             # ================================================================
@@ -736,14 +1121,17 @@ class CommissionService:
             # Calculate running total by BILL (WITH VAT) to find when 100% target was reached
             bill_totals_df['running_total'] = bill_totals_df['revenue_with_vat'].cumsum()
 
-            # Exclude COSM+HEA items from commission calculations.
-            # HEA items are also re-attributed to SYSADMIN at the repository level,
-            # but this filter handles preloaded data that bypasses the repository.
-            # Non-HEA COSM items earn commission as fashion (FP/MD).
-            # HOME items are NOT excluded here — they earn commission via home_decor bucket.
-            employee_sales_df = employee_sales_df[
-                ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
-            ].copy()
+            # Exclude COSM+HEA items from commission calculations (pre-cutoff only).
+            # CR #61: from `HEA_AS_FASHION_FROM_MONTH`, HEA items are reclassified
+            # as fashion and earn commission — skip this filter for those periods.
+            # Non-HEA COSM items always pass through (earn commission as fashion).
+            # HOME items are NEVER excluded here — they earn commission via home_decor.
+            if not _hea_as_fashion_period:
+                employee_sales_df = employee_sales_df[
+                    ~((employee_sales_df['department'] == 'COSM') & (employee_sales_df['vendor_code'] == COSM_EXCLUDED_VENDOR))
+                ].copy()
+            else:
+                employee_sales_df = employee_sales_df.copy()
 
             # SEPARATE SALES BY TYPE for commission calculation
             # Clean UPC for matching (required by _separate_sales_by_type)
@@ -777,6 +1165,27 @@ class CommissionService:
 
             # Find full-price NON-JEWELRY sales after reaching 100% target (for >100% tier bonus)
             fp_non_jewelry_after_target = 0
+            # CR #59: explicitly initialise the OT-related DataFrames so the
+            # withholding helper below can always reference them — they get
+            # populated only inside `if achievement_rate > 100`, but we always
+            # pass them down (previously fetched via `locals().get(...)`,
+            # which silently returned None and broke if the names ever
+            # changed). Now the contract is explicit.
+            target_bill_items = None
+            fp_non_jewelry_after_df = None
+            # CR #61: snapshot maps — populated INLINE by the over-target
+            # block below as it iterates items_over_target and
+            # fp_non_jewelry_after_df. Single source of truth: the snapshot
+            # consumes whatever the main pipeline qualified, so the two can
+            # never drift apart.
+            ot_qualifying_sale_ids: set = set()
+            ot_blended_rates_by_sale_id: dict = {}
+            # CR #61: `rates` is referenced inside the over-target block when
+            # computing the crossing item's blended rate. The original assignment
+            # at line ~1320 came AFTER this block; pull it forward so the OT
+            # block can compute the blended rate in the same pass.
+            use_special_rates = ENABLE_RWD_SPECIAL_RATES and emp_store_code == 'RWD'
+            rates = RWD_SPECIAL_RATES if use_special_rates else STANDARD_RATES
 
             if achievement_rate > 100:
                 # Find the BILL where target was first reached or exceeded
@@ -794,13 +1203,21 @@ class CommissionService:
                     # ALL items contribute to the running total since target is based on total revenue
                     target_bill_items = employee_sales_df[employee_sales_df['bill_number'] == target_bill_number].copy()
 
-                    # Mark which items are FP qualifying for over-target bonus
+                    # Mark which items are FP qualifying for over-target bonus.
+                    # CR #61: post-cutoff months don't exclude COSM+HEA — they
+                    # qualify as fashion. Pre-cutoff keeps them out.
+                    _ot_cosm_hea_exclude = (
+                        pd.Series(True, index=target_bill_items.index)
+                        if _hea_as_fashion_period
+                        else (~((target_bill_items['department'] == 'COSM')
+                                & (target_bill_items['vendor_code'] == COSM_EXCLUDED_VENDOR)))
+                    )
                     target_bill_items['is_ot_qualifying'] = (
                         (target_bill_items['discount_rate'] <= DISCOUNT_THRESHOLD) &
                         (target_bill_items['is_jewelry'] == 0) &
                         (~target_bill_items['vendor_code'].isin(SUITCASE_VENDORS)) &
                         (target_bill_items['department'] != OVER_TARGET_EXCLUDED_DEPT) &
-                        (~((target_bill_items['department'] == 'COSM') & (target_bill_items['vendor_code'] == COSM_EXCLUDED_VENDOR))) &
+                        _ot_cosm_hea_exclude &
                         (~target_bill_items['upc_clean'].isin(local_hand_carry_upcs))
                     )
 
@@ -826,16 +1243,22 @@ class CommissionService:
 
                             # First crossing item: proportional share if FP qualifying
                             if first_crossing['is_ot_qualifying'] and first_crossing['revenue_with_vat'] != 0:
-                                proportional_before_vat = first_crossing['revenue_before_vat'] * (
-                                    amount_over_vat / first_crossing['revenue_with_vat']
-                                )
+                                over_ratio = amount_over_vat / first_crossing['revenue_with_vat']
+                                proportional_before_vat = first_crossing['revenue_before_vat'] * over_ratio
                                 fp_non_jewelry_after_target = proportional_before_vat
+                                # CR #61: snapshot — blended rate for the crossing item.
+                                # over_ratio ∈ [0, 1] by construction (this item straddles target).
+                                ot_blended_rates_by_sale_id[first_crossing['sale_id']] = (
+                                    rates['tier3']['fp'] + over_ratio * rates['over_100']
+                                )
                             # else: first crossing is non-qualifying (MD/jewelry/etc), no OT from it
 
                             # Remaining items: only count FP qualifying ones
                             if len(items_over_target) > 1:
                                 remaining_qualifying = items_over_target.iloc[1:][items_over_target.iloc[1:]['is_ot_qualifying']]
                                 fp_non_jewelry_after_target += remaining_qualifying['revenue_before_vat'].sum()
+                                # CR #61: snapshot — fully-over items get tier3_fp + over_100.
+                                ot_qualifying_sale_ids.update(remaining_qualifying['sale_id'])
 
                     # Get all bills AFTER the target-reaching bill
                     target_bill_index = bill_totals_df[bill_totals_df['bill_number'] == target_bill_number].index[0]
@@ -850,18 +1273,28 @@ class CommissionService:
                             employee_sales_df['bill_number'].isin(bills_after_target_numbers)
                         ]
 
-                        # Filter for: full-price, non-jewelry, NOT TIT/TVL, NOT hand carry, NOT HOME, NOT COSM+HEA
+                        # Filter for: full-price, non-jewelry, NOT TIT/TVL, NOT hand carry, NOT HOME.
+                        # CR #61: HEA qualifies post-cutoff (fashion); pre-cutoff excluded.
+                        _after_target_cosm_hea_exclude = (
+                            pd.Series(True, index=items_after_target.index)
+                            if _hea_as_fashion_period
+                            else (~((items_after_target['department'] == 'COSM')
+                                    & (items_after_target['vendor_code'] == COSM_EXCLUDED_VENDOR)))
+                        )
                         fp_non_jewelry_after_df = items_after_target[
                             (items_after_target['discount_rate'] <= DISCOUNT_THRESHOLD) &
                             (items_after_target['is_jewelry'] == 0) &
                             (~items_after_target['vendor_code'].isin(SUITCASE_VENDORS)) &
                             (items_after_target['department'] != OVER_TARGET_EXCLUDED_DEPT) &
-                            (~((items_after_target['department'] == 'COSM') & (items_after_target['vendor_code'] == COSM_EXCLUDED_VENDOR))) &
+                            _after_target_cosm_hea_exclude &
                             (~items_after_target['upc_clean'].isin(local_hand_carry_upcs))
                         ]
 
                         # Add to fp_non_jewelry_after_target (use revenue_before_vat)
                         fp_non_jewelry_after_target = fp_non_jewelry_after_target + fp_non_jewelry_after_df['revenue_before_vat'].sum()
+                        # CR #61: snapshot — items in bills AFTER the target bill that
+                        # passed the qualifying filter get tier3_fp + over_100.
+                        ot_qualifying_sale_ids.update(fp_non_jewelry_after_df['sale_id'])
 
             # HAND CARRY, SUITCASE, HOME DECOR, JEWELRY COMMISSIONS
             # All paid REGARDLESS of achievement rate
@@ -886,11 +1319,9 @@ class CommissionService:
             commission_over_100 = 0  # Track over 100% bonus separately
 
             # ============================================================================
-            # DETERMINE WHICH COMMISSION RATES TO USE
-            # ============================================================================
-            # Check if this store should use special rates (TEMPORARY - easy to revert)
-            use_special_rates = ENABLE_RWD_SPECIAL_RATES and emp_store_code == 'RWD'
-            rates = RWD_SPECIAL_RATES if use_special_rates else STANDARD_RATES
+            # COMMISSION RATES — `use_special_rates` / `rates` are now set ABOVE
+            # the over-target block (CR #61 needs `rates` to compute the
+            # crossing item's blended rate during the OT pass).
             # ============================================================================
 
             # TIER 1: 50% - 70% of target
@@ -929,6 +1360,56 @@ class CommissionService:
             commission_100_and_below = personal_commission + jewelry_commission + suitcase_commission + hand_carry_commission + home_decor_commission
             total_commission = commission_100_and_below + commission_over_100
 
+            # ─────────────────────────────────────────────────────────────
+            # CR #59: per-category WITHHELD commission (AR payable)
+            # ─────────────────────────────────────────────────────────────
+            # Withheld = sum(item_commission × item.unpaid_ratio) per category.
+            # Computed by re-running each category's commission formula with
+            # revenue replaced by revenue × unpaid_ratio.
+            withheld = self._calculate_withheld_by_category(
+                employee_sales_df=employee_sales_df,
+                non_jewelry_fp_df=non_jewelry_fp_df,
+                non_jewelry_disc_df=non_jewelry_disc_df,
+                hand_carry_df=hand_carry_df,
+                suitcase_df=suitcase_df,
+                home_decor_df=home_decor_df,
+                jewelry_df=jewelry_df,
+                rates=rates,
+                achievement_rate=achievement_rate,
+                fp_non_jewelry_after_target=fp_non_jewelry_after_target,
+                target_bill_items_local=target_bill_items,
+                bills_after_target_local=fp_non_jewelry_after_df,
+                hand_carry_upcs=local_hand_carry_upcs,
+            )
+            withheld_total = sum(withheld.values())
+            payout = total_commission - withheld_total  # released=0 in Phase B
+
+            # ─────────────────────────────────────────────────────────────
+            # CR #61: per-item rate snapshot
+            # ─────────────────────────────────────────────────────────────
+            # `ot_qualifying_sale_ids` and `ot_blended_rates_by_sale_id` were
+            # populated inline by the over-target block above. The snapshot
+            # reads from those maps directly — no qualification logic is
+            # duplicated here, so the snapshot rates always match what the
+            # main pipeline paid.
+            for _, item_row in employee_sales_df.iterrows():
+                bill_sid = item_row.get('bill_sid')
+                upc = item_row.get('upc_clean')
+                if not bill_sid or not upc:
+                    continue
+                classified = self._classify_item_rate(
+                    item_row, rates, achievement_rate, local_hand_carry_upcs,
+                    ot_qualifying_sale_ids, ot_blended_rates_by_sale_id,
+                    _hea_as_fashion_period,
+                )
+                if classified is None:
+                    continue
+                rev_type, fp_or_md, rate = classified
+                rate_snapshot_entries.append((
+                    str(bill_sid), str(upc), rev_type, fp_or_md,
+                    float(rate), _source_month_str,
+                ))
+
             # Add result for this employee (for DataFrame row)
             results.append({
                 'employee_code': employee_code,
@@ -943,8 +1424,18 @@ class CommissionService:
                 'commission_suitcase': suitcase_commission,
                 'commission_hand_carry': hand_carry_commission,
                 'commission_home_decor': home_decor_commission,
-                'total': total_commission
+                'total': total_commission,
+                # CR #59: AR payable / withholding
+                'withheld': withheld_total,
+                'withheld_by_category': {k: v for k, v in withheld.items() if v != 0},
+                'released': 0,                          # Phase C populates
+                'released_by_category': {},             # Phase C populates
+                'payout': payout,
             })
+
+        # CR #61: batch-UPSERT the per-item rate snapshot for Account Payable.
+        # Best-effort: failures here log a warning but don't block the response.
+        self._upsert_payable_bill_rates(rate_snapshot_entries)
 
         # 6. CONVERT RESULTS TO DATAFRAME
         # Create pandas DataFrame with specified columns
@@ -961,7 +1452,13 @@ class CommissionService:
             'commission_suitcase',
             'commission_hand_carry',
             'commission_home_decor',
-            'total'
+            'total',
+            # CR #59: AR payable / withholding (Phase B)
+            'withheld',
+            'withheld_by_category',
+            'released',
+            'released_by_category',
+            'payout',
         ])
 
         # 7. RETURN DATAFRAME
@@ -1024,7 +1521,12 @@ class CommissionService:
             store_df = all_sales_df[all_sales_df['doc_store_code'] == store_code]
         else:
             store_df = pd.DataFrame()
-        store_revenue = self._compute_revenue_by_type(store_df, hc_upcs)
+        # CR #61: derive year/month from query_date for HEA-as-fashion cutoff
+        _year_from_qd = int(query_date['from_date'][:4])
+        _month_from_qd = int(query_date['from_date'][5:7])
+        store_revenue = self._compute_revenue_by_type(
+            store_df, hc_upcs, year=_year_from_qd, month=_month_from_qd,
+        )
 
         # CR #27: store_revenue values are now {fp, md, total} dicts
         actual_full_price_revenue = sum(v.get('fp', 0) for v in store_revenue.values())
@@ -1339,6 +1841,12 @@ class CommissionService:
             # Calculate total handout commission
             total_handout = store_comm['total_store_commission'] + row['total']
 
+            # CR #59: pass withholding fields through (Phase B).
+            # Personal withholding only — store-pool (individual / equal /
+            # manager) is not withheld per CR #59.
+            personal_withheld = row.get('withheld', 0) or 0
+            payout_total = total_handout - personal_withheld     # released=0 in Phase B
+
             combined_results.append({
                 'employee_code': employee_code,
                 'employee_name': row['fullname'],
@@ -1358,7 +1866,13 @@ class CommissionService:
                 'personal_commission_hand_carry': row['commission_hand_carry'],
                 'personal_commission_home_decor': row['commission_home_decor'],
                 'personal_commission_total': row['total'],
-                'total_handout_commission': total_handout
+                'total_handout_commission': total_handout,
+                # CR #59
+                'withheld': personal_withheld,
+                'withheld_by_category': row.get('withheld_by_category', {}) or {},
+                'released': row.get('released', 0) or 0,
+                'released_by_category': row.get('released_by_category', {}) or {},
+                'payout': payout_total,
             })
 
         # Convert to DataFrame
@@ -1381,7 +1895,13 @@ class CommissionService:
             'personal_commission_hand_carry',
             'personal_commission_home_decor',
             'personal_commission_total',
-            'total_handout_commission'
+            'total_handout_commission',
+            # CR #59: AR payable / withholding (Phase B)
+            'withheld',
+            'withheld_by_category',
+            'released',
+            'released_by_category',
+            'payout',
         ])
 
         return result_df
@@ -1529,6 +2049,26 @@ class CommissionService:
                         - float(row.get('personal_commission_vhernier', 0) or 0)
                         - float(row.get('personal_commission_rosa_maria', 0) or 0)
                     )
+                    # CR #59 Phase B: AR payable / withholding fields.
+                    # withheld_by_category / released_by_category come through as
+                    # dicts from the combined DataFrame; serialise per-category
+                    # values as ints. We compute `withheld` total as the sum of
+                    # the int-cast category values so the invariant
+                    # `withheld == sum(withheld_by_category.values())` always
+                    # holds — avoids ±1 rounding drift between a separately-cast
+                    # total and the sum of independently-cast categories.
+                    withheld_by_cat = row.get('withheld_by_category') or {}
+                    if not isinstance(withheld_by_cat, dict):
+                        withheld_by_cat = {}
+                    released_by_cat = row.get('released_by_category') or {}
+                    if not isinstance(released_by_cat, dict):
+                        released_by_cat = {}
+                    withheld_by_cat_int = {k: int(v) for k, v in withheld_by_cat.items()}
+                    released_by_cat_int = {k: int(v) for k, v in released_by_cat.items()}
+                    withheld_total_int = sum(withheld_by_cat_int.values())
+                    released_total_int = sum(released_by_cat_int.values())
+                    employee_total_int = int(row.get('total_handout_commission', 0) or 0)
+
                     employees_response.append({
                         'employee_code': row['employee_code'],
                         'full_name':     row['employee_name'],
@@ -1547,7 +2087,13 @@ class CommissionService:
                             'home_decor':            int(row.get('personal_commission_home_decor', 0) or 0),
                             'store_total':           int(row.get('total_store_commission', 0) or 0),
                             'personal_total':        int(row.get('personal_commission_total', 0) or 0),
-                            'employee_total':        int(row.get('total_handout_commission', 0) or 0),
+                            'employee_total':        employee_total_int,
+                            # CR #59 Phase B
+                            'withheld':              withheld_total_int,
+                            'withheld_by_category':  withheld_by_cat_int,
+                            'released':              released_total_int,
+                            'released_by_category':  released_by_cat_int,
+                            'payout':                employee_total_int - withheld_total_int + released_total_int,
                         }
                     })
 
@@ -1732,6 +2278,26 @@ class CommissionService:
                         - float(row.get('personal_commission_vhernier', 0) or 0)
                         - float(row.get('personal_commission_rosa_maria', 0) or 0)
                     )
+                    # CR #59 Phase B: AR payable / withholding fields.
+                    # withheld_by_category / released_by_category come through as
+                    # dicts from the combined DataFrame; serialise per-category
+                    # values as ints. We compute `withheld` total as the sum of
+                    # the int-cast category values so the invariant
+                    # `withheld == sum(withheld_by_category.values())` always
+                    # holds — avoids ±1 rounding drift between a separately-cast
+                    # total and the sum of independently-cast categories.
+                    withheld_by_cat = row.get('withheld_by_category') or {}
+                    if not isinstance(withheld_by_cat, dict):
+                        withheld_by_cat = {}
+                    released_by_cat = row.get('released_by_category') or {}
+                    if not isinstance(released_by_cat, dict):
+                        released_by_cat = {}
+                    withheld_by_cat_int = {k: int(v) for k, v in withheld_by_cat.items()}
+                    released_by_cat_int = {k: int(v) for k, v in released_by_cat.items()}
+                    withheld_total_int = sum(withheld_by_cat_int.values())
+                    released_total_int = sum(released_by_cat_int.values())
+                    employee_total_int = int(row.get('total_handout_commission', 0) or 0)
+
                     employees_response.append({
                         'employee_code': row['employee_code'],
                         'full_name':     row['employee_name'],
@@ -1750,7 +2316,13 @@ class CommissionService:
                             'home_decor':            int(row.get('personal_commission_home_decor', 0) or 0),
                             'store_total':           int(row.get('total_store_commission', 0) or 0),
                             'personal_total':        int(row.get('personal_commission_total', 0) or 0),
-                            'employee_total':        int(row.get('total_handout_commission', 0) or 0),
+                            'employee_total':        employee_total_int,
+                            # CR #59 Phase B
+                            'withheld':              withheld_total_int,
+                            'withheld_by_category':  withheld_by_cat_int,
+                            'released':              released_total_int,
+                            'released_by_category':  released_by_cat_int,
+                            'payout':                employee_total_int - withheld_total_int + released_total_int,
                         }
                     })
 
@@ -2370,6 +2942,46 @@ class CommissionRevenueService:
             cursor.execute('''
                 DELETE FROM commission_revenue_adjustments WHERE store_code = ''
             ''')
+
+            # CR #61: per-item rate snapshot written by POST /commission/calculate
+            # so Account Payable (CR #60) can compute release commission at the
+            # exact rate the original commission used. Shared read by the
+            # account_payable module.
+            #
+            # NUMERIC(6,5) caps at 9.99999 — realistic max rate is ~0.02
+            # (tier3_fp 1% + over_100 1%). Older deploys may have created the
+            # column as NUMERIC(10,8); the ALTER below narrows them idempotently.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS payable_bill_rates (
+                    bill_sid       VARCHAR(40)    NOT NULL,
+                    upc            VARCHAR(50)    NOT NULL,
+                    revenue_type   VARCHAR(20)    NOT NULL,
+                    fp_or_md       CHAR(2),
+                    effective_rate NUMERIC(6,5)   NOT NULL,
+                    source_month   CHAR(7)        NOT NULL,
+                    updated_at     TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (bill_sid, upc)
+                )
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'payable_bill_rates'
+                          AND column_name = 'effective_rate'
+                          AND numeric_precision > 6
+                    ) THEN
+                        ALTER TABLE payable_bill_rates
+                            ALTER COLUMN effective_rate TYPE NUMERIC(6,5);
+                    END IF;
+                END $$;
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_payable_bill_rates_period
+                    ON payable_bill_rates (source_month)
+            ''')
+
             conn.commit()
             cursor.close()
             return {'success': True}
@@ -2566,6 +3178,21 @@ class CommissionRevenueService:
             oracle_warning = f'Could not fetch live Oracle sales data: {e}'
             print(f"[WARN] {oracle_warning}")
 
+        # CR #59: annotate sales_df with per-row unpaid_ratio for AR payable
+        # detection. payable_amount is later computed per category by re-running
+        # _compute_revenue_by_type on a revenue-weighted copy of the DataFrame.
+        try:
+            unpaid_bills_map = commission_service.repository.get_unpaid_bill_amounts(year, month)
+        except Exception as e:
+            unpaid_bills_map = {}
+            print(f"[WARN] Could not fetch unpaid AR bills: {e}")
+        if len(sales_df) > 0 and 'bill_sid' in sales_df.columns:
+            sales_df = sales_df.copy()
+            sales_df['unpaid_ratio'] = sales_df['bill_sid'].map(
+                lambda sid: unpaid_bills_map.get(sid, {}).get('unpaid_ratio', 0.0)
+                            if sid is not None else 0.0
+            )
+
         # 4. Load saved adjustments
         adjustments = self._load_adjustments(month, year)
 
@@ -2584,7 +3211,28 @@ class CommissionRevenueService:
                 emp_sales = pd.DataFrame()
 
             # 7-type base revenue totals from Oracle
-            base = commission_service._compute_revenue_by_type(emp_sales, hand_carry_upcs)
+            base = commission_service._compute_revenue_by_type(
+                emp_sales, hand_carry_upcs, year=year, month=month,
+            )
+
+            # CR #59: per-category payable revenue (before-VAT). Computed by
+            # re-running the same categorisation logic on a revenue-weighted
+            # copy of the DataFrame: payable_revenue_per_item =
+            # item_revenue × unpaid_ratio. Bills paid by end of month or not
+            # on AR have unpaid_ratio = 0, contributing nothing.
+            if len(emp_sales) > 0 and 'unpaid_ratio' in emp_sales.columns:
+                emp_payable_df = emp_sales.copy()
+                emp_payable_df['revenue_before_vat'] = (
+                    emp_payable_df['revenue_before_vat'] * emp_payable_df['unpaid_ratio']
+                )
+                emp_payable_df['revenue_with_vat'] = (
+                    emp_payable_df['revenue_with_vat'] * emp_payable_df['unpaid_ratio']
+                )
+                payable_by_type = commission_service._compute_revenue_by_type(
+                    emp_payable_df, hand_carry_upcs, year=year, month=month,
+                )
+            else:
+                payable_by_type = {}
 
             # CR #12: personal_total_vat = sum(revenue_with_vat) directly from Oracle,
             # independent of the per-type base_amount breakdown (which uses before-VAT for most types).
@@ -2600,6 +3248,7 @@ class CommissionRevenueService:
             emp_adj = adjustments.get(employee_code, {})
             revenue = []
             personal_total_adjusted = 0
+            personal_payable_amount = 0
             for rev_type in REVENUE_TYPE_ORDER:
                 type_base = base.get(rev_type, {'fp': 0, 'md': 0, 'total': 0})
                 fp_base = type_base.get('fp', 0)
@@ -2609,11 +3258,19 @@ class CommissionRevenueService:
                 fp_adjusted = fp_base + fp_delta
                 md_adjusted = md_base + md_delta
                 total_adjusted = fp_adjusted + md_adjusted
+                # CR #59: per-category payable_amount (revenue, not commission).
+                # Single number per category — sum of FP+MD payable. Same VAT
+                # treatment as the category's revenue numbers (most are
+                # before-VAT; hand_carry uses with-VAT — see _compute_revenue_by_type).
+                payable_type = payable_by_type.get(rev_type, {'fp': 0, 'md': 0, 'total': 0})
+                payable_amount = int(payable_type.get('total', 0))
+                personal_payable_amount += payable_amount
                 revenue.append({
                     'revenue_type': rev_type,
                     'fp':  {'base_amount': fp_base, 'adjustment': fp_delta, 'adjusted_amount': fp_adjusted},
                     'md':  {'base_amount': md_base, 'adjustment': md_delta, 'adjusted_amount': md_adjusted},
                     'total': total_adjusted,
+                    'payable_amount': payable_amount,
                 })
                 personal_total_adjusted += total_adjusted
 
@@ -2640,6 +3297,7 @@ class CommissionRevenueService:
                 'personal_target':       emp.get('personal_target'),
                 'personal_total_vat':    personal_total_vat,
                 'personal_total_adjusted': personal_total_adjusted,
+                'payable_amount':        personal_payable_amount,  # CR #59
                 'revenue':               revenue,
             })
 
@@ -2650,7 +3308,7 @@ class CommissionRevenueService:
                 store_df = sales_df[sales_df['doc_store_code'] == store_code]
                 if len(store_df) > 0:
                     store_revenue = commission_service._compute_revenue_by_type(
-                        store_df, hand_carry_upcs
+                        store_df, hand_carry_upcs, year=year, month=month,
                     )
                     store_data['store_total_vat'] = sum(v.get('total', 0) for v in store_revenue.values())
                     store_data['store_fp_total_vat'] = sum(v.get('fp', 0) for v in store_revenue.values())
@@ -2727,6 +3385,19 @@ class CommissionRevenueService:
             oracle_warning = f'Could not fetch live Oracle sales data: {e}'
             print(f"[WARN] {oracle_warning}")
 
+        # CR #59: annotate sales_df with per-row unpaid_ratio for AR payable
+        try:
+            unpaid_bills_map = commission_service.repository.get_unpaid_bill_amounts(year, month)
+        except Exception as e:
+            unpaid_bills_map = {}
+            print(f"[WARN] Could not fetch unpaid AR bills: {e}")
+        if len(sales_df) > 0 and 'bill_sid' in sales_df.columns:
+            sales_df = sales_df.copy()
+            sales_df['unpaid_ratio'] = sales_df['bill_sid'].map(
+                lambda sid: unpaid_bills_map.get(sid, {}).get('unpaid_ratio', 0.0)
+                            if sid is not None else 0.0
+            )
+
         # 5. Load saved adjustments — CR #28: per-store for store-view
         adjustments = self._load_adjustments(month, year, per_store=True)
 
@@ -2743,7 +3414,7 @@ class CommissionRevenueService:
 
                 # Store-level totals
                 store_revenue = commission_service._compute_revenue_by_type(
-                    store_group, hand_carry_upcs
+                    store_group, hand_carry_upcs, year=year, month=month,
                 )
                 store_total_vat = sum(v.get('total', 0) for v in store_revenue.values())
                 store_fp_total_vat = sum(v.get('fp', 0) for v in store_revenue.values())
@@ -2766,7 +3437,24 @@ class CommissionRevenueService:
                     )
 
                     # Per-contributor revenue by type with FP/MD split
-                    base = commission_service._compute_revenue_by_type(emp_group, hand_carry_upcs)
+                    base = commission_service._compute_revenue_by_type(
+                        emp_group, hand_carry_upcs, year=year, month=month,
+                    )
+
+                    # CR #59: per-contributor per-category payable revenue
+                    if len(emp_group) > 0 and 'unpaid_ratio' in emp_group.columns:
+                        emp_payable_df = emp_group.copy()
+                        emp_payable_df['revenue_before_vat'] = (
+                            emp_payable_df['revenue_before_vat'] * emp_payable_df['unpaid_ratio']
+                        )
+                        emp_payable_df['revenue_with_vat'] = (
+                            emp_payable_df['revenue_with_vat'] * emp_payable_df['unpaid_ratio']
+                        )
+                        payable_by_type = commission_service._compute_revenue_by_type(
+                            emp_payable_df, hand_carry_upcs, year=year, month=month,
+                        )
+                    else:
+                        payable_by_type = {}
 
                     # Raw Oracle with-VAT total for this contributor at this store
                     if 'revenue_with_vat' in emp_group.columns:
@@ -2778,6 +3466,7 @@ class CommissionRevenueService:
                     emp_adj = adjustments.get(employee_code, {}).get(doc_store_code, {})
                     revenue = []
                     personal_total_adjusted = 0
+                    contributor_payable_amount = 0
                     for rev_type in REVENUE_TYPE_ORDER:
                         type_base = base.get(rev_type, {'fp': 0, 'md': 0, 'total': 0})
                         fp_base = type_base.get('fp', 0)
@@ -2787,11 +3476,16 @@ class CommissionRevenueService:
                         fp_adjusted = fp_base + fp_delta
                         md_adjusted = md_base + md_delta
                         total_adjusted = fp_adjusted + md_adjusted
+                        # CR #59: per-category payable_amount
+                        payable_type = payable_by_type.get(rev_type, {'fp': 0, 'md': 0, 'total': 0})
+                        payable_amount = int(payable_type.get('total', 0))
+                        contributor_payable_amount += payable_amount
                         revenue.append({
                             'revenue_type': rev_type,
                             'fp':  {'base_amount': fp_base, 'adjustment': fp_delta, 'adjusted_amount': fp_adjusted},
                             'md':  {'base_amount': md_base, 'adjustment': md_delta, 'adjusted_amount': md_adjusted},
                             'total': total_adjusted,
+                            'payable_amount': payable_amount,
                         })
                         personal_total_adjusted += total_adjusted
 
@@ -2803,6 +3497,7 @@ class CommissionRevenueService:
                         'revenue':               revenue,
                         'personal_total_adjusted': personal_total_adjusted,
                         'contributor_total_vat':  contributor_total_vat,
+                        'payable_amount':        contributor_payable_amount,   # CR #59
                     })
 
                 stores_map[doc_store_code] = {
