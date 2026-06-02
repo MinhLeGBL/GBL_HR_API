@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.changes.outputs.core }}
+      account_payable: ${{ steps.changes.outputs.account_payable }}
       auth: ${{ steps.changes.outputs.auth }}
       bathroom: ${{ steps.changes.outputs.bathroom }}
       commission: ${{ steps.changes.outputs.commission }}
@@ -35,6 +36,9 @@ jobs:
               - 'app/main.py'
               - 'config/**'
               - '.github/workflows/feature.yml'
+            account_payable:
+              - 'app/modules/account_payable/**'
+              - 'tests/unit/modules/account_payable/**'
             auth:
               - 'app/modules/auth/**'
               - 'tests/unit/modules/auth/**'
@@ -90,6 +94,7 @@ jobs:
         if: needs.detect.outputs.core != 'true'
         run: |
           PATHS=""
+          [ "${{ needs.detect.outputs.account_payable }}" = "true" ] && PATHS="$PATHS tests/unit/modules/account_payable"
           [ "${{ needs.detect.outputs.auth }}" = "true" ]        && PATHS="$PATHS tests/unit/modules/auth"
           [ "${{ needs.detect.outputs.bathroom }}" = "true" ]    && PATHS="$PATHS tests/unit/modules/bathroom"
           [ "${{ needs.detect.outputs.commission }}" = "true" ]  && PATHS="$PATHS tests/unit/modules/commission"
