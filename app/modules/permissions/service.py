@@ -126,7 +126,8 @@ class PermissionService:
                 ('EMPLOYEE_DATA', 'Employee Data', 'Employee information'),
                 ('ACCESS_MANAGEMENT', 'Access Management', 'Permission and access control'),
                 ('BATHROOM_PRICE_CHECK', 'Bathroom Price Check', 'Bathroom product catalog and pricing'),
-                ('CRM', 'CRM', 'Customer relationship management and RFM analytics')
+                ('CRM', 'CRM', 'Customer relationship management and RFM analytics'),
+                ('ACCOUNT_PAYABLE', 'Account Payable', 'AR payable reconciliation tool (CR #60)')
                 ON CONFLICT (code) DO NOTHING
             ''')
 
@@ -156,6 +157,7 @@ class PermissionService:
             'ACCESS_MANAGEMENT': ['IT'],
             'BATHROOM_PRICE_CHECK': [],
             'CRM': [],
+            'ACCOUNT_PAYABLE': ['HR', 'ACC'],
         }
         for section_code, depts in section_depts.items():
             for dept in depts:
@@ -172,6 +174,7 @@ class PermissionService:
             'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER'],
             'BATHROOM_PRICE_CHECK': [],
             'CRM': [],
+            'ACCOUNT_PAYABLE': ['ADMIN', 'MANAGER'],
         }
         for section_code, roles in section_roles.items():
             for role in roles:
