@@ -1,12 +1,10 @@
 """
-Account Payable HTTP routes (CR #60 — Phase 1 scaffold).
+Account Payable HTTP routes (CR #60).
 
-Endpoints under `/api/v1/account-payable/*` (the URL prefix uses a hyphen
+Endpoints under `/api/v1/account-payable/*` (URL prefix uses a hyphen
 to match the frontend feature path; Python module name uses underscore
 for import compat).
 
-All routes return 501 Not Implemented in Phase 1 — the frontend ships
-with mocks (`VITE_PAYABLE_MOCK=true`) until each endpoint is filled in.
 The full contract is in `GBL_HR_Frontend/src/features/account-payable/types.ts`
 and `docs/cr/account-payable.md`.
 
@@ -22,13 +20,15 @@ account_payable_bp = Blueprint(
     'account_payable', __name__, url_prefix='/api/v1/account-payable',
 )
 
+_service = AccountPayableService()
+
 
 def _not_implemented(endpoint: str):
-    """Phase 1 stub response. Returns 501 with a clear pointer to the spec."""
+    """Stub response for endpoints not yet implemented in this branch."""
     return jsonify({
         'success': False,
         'error': (
-            f'{endpoint} not yet implemented — CR #60 backend scaffold. '
+            f'{endpoint} not yet implemented — CR #60 backend in progress. '
             'Frontend should use VITE_PAYABLE_MOCK=true until implementation lands.'
         ),
     }), 501
@@ -42,28 +42,46 @@ def _not_implemented(endpoint: str):
 @token_required
 def get_employees():
     """List employees with non-zero open payable. No period filter — running."""
-    return _not_implemented('GET /account-payable/employees')
+    result = _service.get_employees()
+    return jsonify(result), 200 if result.get('success') else 500
 
 
 @account_payable_bp.route('/employees/<employee_code>/bills', methods=['GET'])
 @token_required
 def get_employee_bills(employee_code: str):
     """List one employee's open bills, scoped to their item share."""
-    return _not_implemented(f'GET /account-payable/employees/{employee_code}/bills')
+    result = _service.get_employee_bills(employee_code)
+    return jsonify(result), 200 if result.get('success') else 500
 
 
 @account_payable_bp.route('/bills', methods=['GET'])
 @token_required
 def get_bills():
     """List all bills. Query params: ?search=&status=open|partial|fully_paid"""
-    return _not_implemented('GET /account-payable/bills')
+    search = request.args.get('search')
+    status = request.args.get('status')
+    if status and status not in ('open', 'partial', 'fully_paid'):
+        return jsonify({
+            'success': False,
+            'error': f"status must be one of: open, partial, fully_paid (got {status!r})",
+        }), 400
+    result = _service.get_bills(search=search, status=status)
+    return jsonify(result), 200 if result.get('success') else 500
 
 
 @account_payable_bp.route('/bills/<bill_sid>', methods=['GET'])
 @token_required
 def get_bill_detail(bill_sid: str):
     """Full bill detail: items table with multi-employee fan-out."""
-    return _not_implemented(f'GET /account-payable/bills/{bill_sid}')
+    if not bill_sid.isdigit():
+        return jsonify({
+            'success': False,
+            'error': 'bill_sid must be a numeric string',
+        }), 400
+    result = _service.get_bill_detail(bill_sid)
+    if not result.get('success') and result.get('not_found'):
+        return jsonify(result), 404
+    return jsonify(result), 200 if result.get('success') else 500
 
 
 @account_payable_bp.route('/payments', methods=['GET'])
@@ -74,7 +92,7 @@ def get_pending_payments():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Write endpoints
+# Write endpoints — Phase D
 # ─────────────────────────────────────────────────────────────────────
 
 @account_payable_bp.route('/reconcile', methods=['POST'])

@@ -130,13 +130,15 @@ class AccountPayableQueries:
                   di.price, 0)                                                   AS revenue_with_vat,
             di.EMPLOYEE1_SID                                                     AS employee_sid,
             emp_cust.UDF4_STRING                                                 AS employee_code,
-            emp_cust.FIRST_NAME                                                  AS employee_name
+            emp_cust.FIRST_NAME                                                  AS employee_name,
+            emp_store.STORE_CODE                                                 AS employee_store_code
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
         LEFT JOIN INVN_SBS_ITEM i ON i.SID = di.INVN_SBS_ITEM_SID
         LEFT JOIN DCS dep ON dep.SID = i.DCS_SID
         LEFT JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID
         LEFT JOIN CUSTOMER emp_cust ON emp_cust.SID = emp.CUST_SID
+        LEFT JOIN STORE emp_store ON emp_store.SID = emp.BASE_STORE_SID
         WHERE d.STATUS = 4
           AND di.ITEM_TYPE = 1
           AND d.SID IN ({bind_list})
