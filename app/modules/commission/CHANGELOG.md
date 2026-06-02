@@ -3,6 +3,82 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.2.0] — 2026-06-02
+
+### Added — CR #66: populate `released_by_category` from Account Payable linkages
+
+CR #59 Phase B declared `released`, `released_by_category`, and `payout`
+on the calculate response but hardcoded them to `0` / `{}` / `employee_total
+- withheld` because release tracking was deferred to Phase C. CR #60
+(account_payable v1.0.0) + CR #62 (v1.1.0) shipped the linkage tables
+this CR closes the loop on.
+
+#### How it works
+
+When `POST /commission/calculate` runs for month M, the response builder
+now calls `AccountPayableService.compute_released_for_month(year, month)`
+once per request and threads its return value into the per-employee
+result builder.
+
+`compute_released_for_month` reuses the same ledger-replay output the
+bill view and queue endpoints consume (`AccountPayableService._load_bills`,
+CR #62 unifier — no duplicate replay). For every bill with at least one
+payment in month M:
+
+1. `allocation_factor = sum(amount_applied in M) / original_charge`.
+2. For each line item on the bill, look up
+   `effective_rate = custom_release_rate ?? auto_release_rate ?? 0`
+   where the auto rate comes from the CR #61 `payable_bill_rates`
+   snapshot and the custom rate from the CR #60 `payable_item_custom_rates`
+   override.
+3. `revenue_basis = revenue_with_vat / 1.1` for every category except
+   `hand_carry` (with-VAT, per the existing commission rate convention)
+   and `suitcase` (flat 500K × qty — deliberately absent from the rate
+   snapshot per CR #61).
+4. Bucket: `released[employee_code][f'{revenue_type}_{fp_or_md}'] +=
+   revenue_basis × effective_rate × allocation_factor`.
+
+The result key shape mirrors `withheld_by_category` so the response's
+existing serialization round-trips through unchanged. One semantic
+difference vs withheld: over-target bonus is *not* split into its own
+`over_target` bucket here — `payable_bill_rates` stores the OT-blended
+rate as a fashion+fp row, so OT released contribution accumulates under
+`fashion_fp`. This matches the CR §66 spec and what the frontend
+already renders.
+
+#### Sanity warnings, not errors
+
+Bills paid in M whose source months never ran `POST /commission/calculate`
+have no rate snapshot — these items contribute 0 to released and log a
+single-line WARNING (one count per request). Frontend continues to
+render zeros for those employees, same as Phase B.
+
+#### Response shape — unchanged
+
+The `released`, `released_by_category`, and `payout` keys have been
+declared since Phase B; they just stop returning 0. No frontend update
+required (Step 3 already renders these columns).
+
+#### Tests
+- 11 new unit tests (`test_released_accumulator.py`) covering: empty
+  bills, payment-in-month filter, fashion FP with auto rate, custom rate
+  override, partial-payment proration, hand-carry with-VAT basis,
+  suitcase flat-per-qty, multi-category aggregation, missing-rate
+  fallback, cross-month payment isolation, missing-employee skip.
+- All 637 unit tests pass.
+
+#### Live verify (2026-04)
+- 2 employees have non-zero release on April commission.
+- GL005: `fashion_fp = 80,116`. The other 17 items in scope lack a
+  source-month rate snapshot — flagged via the WARN line so finance
+  knows to run calculate on the bills' creation months to backfill.
+
+#### Bumped MINOR — backward-compatible behaviour change
+The response shape is identical to v2.1.0; previously-zero fields now
+return real numbers when the data permits. Per Keep-a-Changelog: a
+documented behaviour change that adds value without breaking callers is
+MINOR.
+
 ## [2.1.0] — 2026-06-01
 
 ### Added — CR #61: per-item release rate snapshot + HEA-as-fashion cutoff
