@@ -3,6 +3,9 @@ One-off Excel report: per-customer recency + discount-frequency for store RHN
 since 2024-01-01.
 
 For each customer with at least one sale line at RHN in the window:
+  - customer_phone             — most recent non-null BT_PRIMARY_PHONE_NO
+                                 observation across all of DOCUMENT (same
+                                 source the CRM module uses).
   - last_purchase_date and days_since_last_purchase (vs today)
   - total_items                — count of sale lines (item_type = 1)
   - discount_item_count        — sale lines where combined line+bill discount
@@ -24,10 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.core.database import get_oracle_connection
 
 
+# Phone subquery: latest non-null BT_PRIMARY_PHONE_NO per customer across
+# all of DOCUMENT (no date filter — maximises coverage). Same most-recent
+# pattern the CRM module uses; ~99.9% coverage observed there.
 QUERY = """
     SELECT
-        d.BT_CUID                                          AS customer_sid,
         TRIM(c.FIRST_NAME)                                 AS customer_name,
+        ph.phone                                           AS customer_phone,
         TRUNC(MAX(d.invc_post_date))                       AS last_purchase_date,
         COUNT(*)                                           AS total_items,
         SUM(
@@ -42,6 +48,19 @@ QUERY = """
     FROM DOCUMENT d
     JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
     LEFT JOIN CUSTOMER c  ON c.SID = d.BT_CUID
+    LEFT JOIN (
+        SELECT customer_sid, phone FROM (
+            SELECT
+                d2.BT_CUID                                                AS customer_sid,
+                d2.BT_PRIMARY_PHONE_NO                                    AS phone,
+                ROW_NUMBER() OVER (PARTITION BY d2.BT_CUID
+                                   ORDER BY d2.invc_post_date DESC,
+                                            d2.SID DESC)                  AS rn
+            FROM DOCUMENT d2
+            WHERE d2.BT_CUID IS NOT NULL
+              AND d2.BT_PRIMARY_PHONE_NO IS NOT NULL
+        ) WHERE rn = 1
+    ) ph ON ph.customer_sid = d.BT_CUID
     WHERE d.STORE_CODE = :store_code
       AND d.invc_post_date >= TO_DATE(:start_date, 'YYYY-MM-DD')
       AND d.STATUS = 4
@@ -52,7 +71,7 @@ QUERY = """
           SELECT SID FROM CUSTOMER
           WHERE UPPER(TRIM(FIRST_NAME)) IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
       )
-    GROUP BY d.BT_CUID, TRIM(c.FIRST_NAME)
+    GROUP BY d.BT_CUID, TRIM(c.FIRST_NAME), ph.phone
     ORDER BY MAX(d.invc_post_date) DESC
 """
 
@@ -84,8 +103,8 @@ def shape_rows(cols, raw_rows, as_of: date):
         total = int(rec.get('total_items') or 0)
         disc = int(rec.get('discount_item_count') or 0)
         out.append({
-            'customer_sid': int(rec['customer_sid']),
             'customer_name': rec.get('customer_name') or '',
+            'customer_phone': rec.get('customer_phone') or '',
             'last_purchase_date': last,
             'days_since_last_purchase': (as_of - last).days if last else None,
             'total_items': total,
@@ -107,7 +126,7 @@ def write_xlsx(rows, out_path: Path, store_code: str, start_date: str, as_of: da
     ws.title = 'Customer Recency'
 
     headers = [
-        'customer_sid', 'customer_name',
+        'customer_name', 'customer_phone',
         'last_purchase_date', 'days_since_last_purchase',
         'total_items', 'discount_item_count', 'discount_item_pct',
     ]
