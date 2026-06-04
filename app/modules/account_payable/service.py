@@ -683,33 +683,54 @@ class AccountPayableService:
     # so only these two sources exist.
     _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1}
 
+    # CR #67 state model — uniform across queue + reconcile responses.
+    # `is_overdue` continues to gate ONLY on (unmatched AND past_month).
+    _ALLOWED_PAYMENT_STATUSES = (
+        'unmatched', 'matched_partially', 'matched_pending', 'released',
+    )
+
+    @staticmethod
+    def _payment_status_for(
+        amount: int, applied: int, pay_month: str, current_month: str,
+    ) -> Tuple[str, bool]:
+        """CR #67 transition rule. Returns (status, is_overdue).
+
+            sum == 0                              → unmatched
+            0 < sum < payment.amount              → matched_partially
+            sum == payment.amount   AND   past    → released
+            sum == payment.amount   AND   current → matched_pending
+        """
+        is_past = pay_month < current_month
+        if applied <= 0:
+            return ('unmatched', is_past)
+        if applied < amount:
+            return ('matched_partially', False)
+        # applied >= amount; defensively the reconcile validator caps at amount.
+        if is_past:
+            return ('released', False)
+        return ('matched_pending', False)
+
     def get_pending_payments(self, status: Optional[str] = None) -> Dict[str, Any]:
-        """Payments queue (CR #62 — queue mirrors the ledger replay).
+        """Payments queue — surfaces every Charge payment with its CR #67
+        state. Released past-month payments stay in the queue so finance
+        can edit allocations after release.
 
-        Uses the EXACT replay output the bill view shows. Status logic per
-        CR §"Behaviour matrix" (updated for v2.0.0 — FIFO removed):
-
-        - Past-month payment with ANY application in the replay → released,
-          drops out of the queue. The applied portion is "released"; any
-          remainder is implicit deposit-on-account.
-        - Past-month payment with no application → `unmatched` + `is_overdue`.
-          (Note: post-v2.0.0 this includes EVERY past-month payment without
-          an explicit REF_SALE_SID or manual reconciliation — significantly
-          more rows than under the FIFO regime.)
-        - Current-month with application → `matched_pending` and
-          `match_source` is the highest-priority source in the allocations
-          (ref_sale_sid > manual).
-        - Current-month with no application → `unmatched` (not overdue).
+        Status logic — uniform rule, see `_payment_status_for`:
+        - applied = 0                          → `unmatched` (overdue if past)
+        - 0 < applied < amount                 → `matched_partially`
+        - applied = amount AND past month      → `released`
+        - applied = amount AND current month   → `matched_pending`
 
         Each row carries `suggested_bills` = the customer's open + partial
         bill list (oldest-first). Walk-in payments get `[]`.
 
         Returns ServiceResult<PendingPayment[]>, sorted by payment_date desc.
         """
-        if status and status not in ('unmatched', 'matched_pending'):
+        if status and status not in self._ALLOWED_PAYMENT_STATUSES:
+            allowed = ', '.join(repr(s) for s in self._ALLOWED_PAYMENT_STATUSES)
             return {
                 'success': False,
-                'error': f"status must be 'unmatched' or 'matched_pending' (got {status!r})",
+                'error': f"status must be one of {allowed} (got {status!r})",
             }
 
         payments = self.repository.get_charge_payments()
@@ -721,7 +742,30 @@ class AccountPayableService:
         bills = self._load_bills()
         payment_allocations = self._transpose_to_payment_allocations(bills)
 
-        # Suggested_bills: precompute the customer → open+partial-bill list.
+        return {
+            'success': True,
+            'data': self._build_pending_payment_rows(
+                payments_meta=payments,
+                bills=bills,
+                payment_allocations=payment_allocations,
+                status_filter=status,
+            ),
+        }
+
+    def _build_pending_payment_rows(
+        self,
+        payments_meta: List[Dict[str, Any]],
+        bills: Dict[str, Dict[str, Any]],
+        payment_allocations: Dict[str, List[Dict[str, Any]]],
+        status_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Project `(payments, bills, allocations)` into PendingPayment rows.
+
+        Factored out of `get_pending_payments` so `reconcile` can build
+        the same shape for its embedded `ReconcileResult.payment` (CR #67).
+        Always sorted by payment_date descending.
+        """
+        # Suggested_bills: precompute customer → open+partial-bill list.
         open_bills_by_customer: Dict[str, List[Dict[str, Any]]] = {}
         today = _today()
         for b_sid, b in bills.items():
@@ -742,21 +786,20 @@ class AccountPayableService:
 
         current_month = _current_month_str(today)
         out: List[Dict[str, Any]] = []
-        for p in payments:
+        for p in payments_meta:
             pay_month = p['payment_date'][:7]
-            is_past_month = pay_month < current_month
-
             allocs = payment_allocations.get(p['payment_doc_sid'], [])
             applied = sum(a['amount_applied'] for a in allocs)
 
-            # Past-month + ANY application = released → drop from queue.
-            # The applied portion has been auto-released; any unapplied
-            # remainder is implicit deposit-on-account.
-            if is_past_month and applied > 0:
+            payment_status, is_overdue = self._payment_status_for(
+                amount=p['amount'], applied=applied,
+                pay_month=pay_month, current_month=current_month,
+            )
+
+            if status_filter and status_filter != payment_status:
                 continue
 
-            if applied > 0:
-                payment_status = 'matched_pending'
+            if allocs:
                 # Highest-priority source across the allocations wins.
                 match_source = min(
                     (a['source'] for a in allocs),
@@ -768,12 +811,8 @@ class AccountPayableService:
                     'amount_applied': a['amount_applied'],
                 } for a in allocs]
             else:
-                payment_status = 'unmatched'
                 match_source = None
                 allocations_out = []
-
-            if status and status != payment_status:
-                continue
 
             out.append({
                 'payment_doc_sid': p['payment_doc_sid'],
@@ -786,7 +825,7 @@ class AccountPayableService:
                 'notes_lostdoc':   p['notes_lostdoc'],
                 'status':          payment_status,
                 'match_source':    match_source,
-                'is_overdue':      payment_status == 'unmatched' and is_past_month,
+                'is_overdue':      is_overdue,
                 'allocations':     allocations_out,
                 'suggested_bills': (
                     open_bills_by_customer.get(p['customer_sid'], [])
@@ -794,7 +833,7 @@ class AccountPayableService:
                 ),
             })
         out.sort(key=lambda r: r['payment_date'], reverse=True)
-        return {'success': True, 'data': out}
+        return out
 
     # ------------------------------------------------------------------
     # Classifier — bucket-only port of CommissionService._classify_item_rate
@@ -865,8 +904,10 @@ class AccountPayableService:
 
         Validations:
         - payment_doc_sid is a digit string; the payment exists in Oracle.
-        - allocations is non-empty; each has bill_sid (digit) + amount (positive int).
-        - `SUM(allocations.amount) == payment.amount` (no partial confirms in v1).
+        - allocations is a list (may be empty — CR #67: clears all linkages).
+        - Each allocation: bill_sid (digit) + amount (positive int).
+        - `SUM(allocations.amount) <= payment.amount` (CR #67: partial
+          and empty allocations supported; only overflow rejected).
         - For each allocation: existing reconciliations' sum + new amount
           ≤ bill.original_charge (cumulative cap).
 
@@ -874,22 +915,26 @@ class AccountPayableService:
         - First reconcile for the payment → INSERT rows.
         - Existing rows with identical shape → no-op (200, idempotent).
         - Existing rows with different shape → edit (DELETE + INSERT in one tx).
+        - Empty allocations + existing rows → clear all linkages (DELETE).
         - Concurrent edit (row count changed mid-tx) → 409.
 
         Returns ServiceResult<ReconcileResult>:
-        - outcome: 'released' when the payment's calendar month is past,
-          'matched_pending' when it's the current month.
+        - outcome: one of `unmatched | matched_partially | matched_pending |
+          released` (CR #67) — computed per the same uniform rule the
+          queue endpoint uses.
         - affected_months: the distinct YYYY-MM of all touched payments
           (just one in v1 — single payment per request).
-        - For released outcome, also computes affected_employee_count +
-          total_release_amount so the frontend toast can summarize.
-        - payment: null in v1 (full PendingPayment shape lands with Phase C-5).
+        - For `released` and past-month `matched_partially` outcomes,
+          computes affected_employee_count + total_release_amount so the
+          frontend toast can summarize.
+        - payment: full PendingPayment shape post-write (CR #67 — was
+          `None` pre-CR-#67).
         """
         # ── 1. Validate inputs ────────────────────────────────────────
         if not str(payment_doc_sid).isdigit():
             return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
-        if not allocations:
-            return {'success': False, 'error': 'allocations must be non-empty'}
+        if not isinstance(allocations, list):
+            return {'success': False, 'error': 'allocations must be a list'}
         validated: List[tuple] = []  # (bill_sid_str, amount_int)
         for a in allocations:
             b_sid = str(a.get('bill_sid') or '')
@@ -909,12 +954,13 @@ class AccountPayableService:
                 'error': f'Payment {payment_doc_sid} not found or not a Charge receipt',
                 'not_found': True,
             }
-        if total_alloc != payment['amount']:
+        # CR #67: only overflow is rejected; partial / empty sums are valid.
+        if total_alloc > payment['amount']:
             return {
                 'success': False,
                 'error': (
-                    f'allocations sum ({total_alloc:,}) must equal '
-                    f'payment amount ({payment["amount"]:,}) — partial confirms unsupported'
+                    f'allocations sum ({total_alloc:,}) must not exceed '
+                    f'payment amount ({payment["amount"]:,})'
                 ),
             }
 
@@ -1022,23 +1068,36 @@ class AccountPayableService:
         self, *, payment: Dict[str, Any], allocations: List[tuple],
         bills: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Build the ReconcileResult: outcome + affected_months + (for released)
-        the employee/release totals."""
+        """Build the ReconcileResult (CR #67):
+        - `outcome` ∈ {unmatched, matched_partially, matched_pending, released}
+          computed via the uniform `_payment_status_for` rule.
+        - `affected_months`: distinct YYYY-MM of touched payments (one in v1).
+        - `affected_employee_count` + `total_release_amount`: computed for
+          past-month outcomes (`released` and past `matched_partially`)
+          based on the new allocation set, so the frontend toast shows
+          the NEW absolute released total. Frontend handles delta display.
+        - `payment`: full PendingPayment shape post-write (CR #67).
+        """
         today = _today()
         pay_month = payment['payment_date'][:7]
         cur_month = _current_month_str(today)
-        outcome = 'released' if pay_month < cur_month else 'matched_pending'
+        total_alloc = sum(a for _, a in allocations)
+        outcome, _is_overdue = self._payment_status_for(
+            amount=payment['amount'], applied=total_alloc,
+            pay_month=pay_month, current_month=cur_month,
+        )
 
         result: Dict[str, Any] = {
             'outcome':         outcome,
-            # `payment` shape is the queue PendingPayment (Phase C-5).
-            # Until that lands, return null and let the frontend refetch.
-            'payment':         None,
             'affected_months': [pay_month],
         }
-        if outcome == 'released':
-            # Compute release totals: revenue × effective_rate × (amount / original_charge)
-            # per item on each allocated bill, then aggregate by employee.
+
+        # CR #67: release totals are computed when ANY past-month money is
+        # allocated — covers both `released` (full) and past-month
+        # `matched_partially`. Current-month outcomes don't have any
+        # released contribution yet (release fires at month-close).
+        is_past = pay_month < cur_month
+        if is_past and total_alloc > 0:
             alloc_bill_sids = [b_sid for b_sid, _ in allocations]
             items = self.repository.get_bill_items(alloc_bill_sids)
             auto = self._load_auto_rates(alloc_bill_sids)
@@ -1066,7 +1125,41 @@ class AccountPayableService:
                     total_release += released
             result['affected_employee_count'] = len(by_emp)
             result['total_release_amount'] = total_release
+        else:
+            result['affected_employee_count'] = 0
+            result['total_release_amount'] = 0
+
+        # CR #67: embed the post-write PendingPayment. Re-run the replay
+        # so the response reflects the just-committed state. Cost is one
+        # extra Oracle round-trip per reconcile; commission's own queue
+        # uses the same path on every read.
+        result['payment'] = self._pending_payment_for(payment_doc_sid=str(payment['doc_sid']))
         return {'success': True, 'data': result}
+
+    def _pending_payment_for(
+        self, payment_doc_sid: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Reload + project a single payment as a PendingPayment row.
+
+        Used by `reconcile` to embed the post-write payment in its
+        response (CR #67). Returns `None` if the payment isn't in the
+        active Charge window.
+        """
+        all_meta = self.repository.get_charge_payments()
+        match = next(
+            (p for p in all_meta if p['payment_doc_sid'] == payment_doc_sid),
+            None,
+        )
+        if match is None:
+            return None
+        bills = self._load_bills()
+        payment_allocations = self._transpose_to_payment_allocations(bills)
+        rows = self._build_pending_payment_rows(
+            payments_meta=[match],
+            bills=bills,
+            payment_allocations=payment_allocations,
+        )
+        return rows[0] if rows else None
 
     def unmatch(self, payment_doc_sid: str) -> Dict[str, Any]:
         """Remove every Postgres `payable_reconciliations` row for the payment.

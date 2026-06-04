@@ -3,6 +3,94 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.1.0] — 2026-06-04
+
+### Added — CR #67: released payments stay editable; `matched_partially` state
+
+#### State model
+
+Uniform rule across queue + reconcile, computed from `(amount, applied,
+month, current_month)`:
+
+```
+sum == 0                           → unmatched (overdue if past)
+0 < sum < payment.amount           → matched_partially  (NEW)
+sum == payment.amount AND past     → released           (now in queue)
+sum == payment.amount AND current  → matched_pending
+```
+
+`is_overdue` continues to fire ONLY on `unmatched AND past`. Partial
+payments are never overdue regardless of their month.
+
+#### `GET /account-payable/payments`
+
+- `?status=` now accepts `unmatched | matched_partially | matched_pending
+  | released` (was `unmatched | matched_pending`). Omitting returns all
+  four.
+- **Released past-month payments stay in queue** (was: dropped). Lets
+  finance edit allocations after release — see CR §"Released-state
+  mutation semantics".
+- Response shape unchanged. `match_source` continues to report the
+  highest-priority source across the allocations.
+
+#### `POST /account-payable/reconcile`
+
+- Allocation sum may now be `0`, `< payment.amount`, or `==
+  payment.amount`. Only `sum > payment.amount` (overflow) is rejected.
+- `outcome` enum widens to all four states. Computed via the same
+  uniform rule the queue uses.
+- `total_release_amount` and `affected_employee_count` are now computed
+  for **any past-month outcome with non-zero allocations** — covers both
+  `released` (full payment) and past-month `matched_partially` (the
+  partial portion). Current-month outcomes return 0 (release fires at
+  month-close).
+- `payment` field is now always populated when the payment is in the
+  active 24-month Charge window — full PendingPayment shape. Returns
+  `null` only when the payment falls outside the window (rare).
+- Empty `allocations` with existing rows fires DELETE — the "clear
+  linkage" path. Frontend's confirm-before-clear dialog covers UX.
+
+#### Released-state mutation — falls out for free
+
+CR #66's `compute_released_for_month` already re-reads `payable_bill_rates`
+and `payable_item_custom_rates` on every call. When a released linkage
+is amended (downward or empty), the next `POST /commission/calculate`
+for the affected month picks up the new allocation set and adjusts
+`released_by_category` accordingly. No cache invalidation needed.
+
+Bills similarly reopen on the next `_load_bills` call — the replay
+re-runs from scratch including the manual reconciliation pass.
+
+#### `POST /account-payable/payments/:sid/unmatch`
+
+Already works for released-with-manual payments — the existing DELETE
+doesn't gate on status. The CR #67 spec language ("was 400 in v1.0.0")
+referenced the fact that released payments didn't appear in the queue
+pre-CR #67 so users couldn't reach the unmatch button; now they can.
+
+#### Tests
+- 110 AP unit tests pass (was 100). 8 new tests:
+  - `test_status_filter_released`, `test_status_filter_matched_partially`
+    (queue, CR #67 filter values).
+  - `test_partial_application_in_current_month_is_matched_partially`,
+    `test_partial_application_in_past_month_is_matched_partially`
+    (queue, new state classifications).
+  - `test_empty_allocations_succeeds_as_unmatched`,
+    `test_empty_allocations_with_existing_runs_delete`,
+    `test_partial_allocation_in_past_month_is_matched_partially_with_release`,
+    `test_partial_allocation_in_current_month_no_release`
+    (reconcile, the new partial / empty paths).
+  - `test_embedded_payment_returned_when_in_active_window`,
+    `test_embedded_payment_is_none_when_not_in_active_window`
+    (reconcile, PendingPayment embedding contract).
+- 677 across the whole codebase.
+
+#### Bumped MINOR
+Additive — new state values, new filter values, additional fields
+populated. Existing callers handling only the 2-state model continue to
+work. `payment` field's type was already `PendingPayment | null` so
+callers tolerating null are safe; callers can now also see real values.
+
 ## [2.0.0] — 2026-06-04
 
 ### BREAKING — FIFO auto-matching removed from the ledger replay

@@ -74,6 +74,10 @@ def mock_repo(sample_bills):
     repo = MagicMock()
     repo.get_all_bills.return_value = sample_bills
     repo.get_bill_items.return_value = []
+    # CR #67: reconcile's _pending_payment_for re-runs get_charge_payments.
+    # Default to empty so the embedded payment is None when tests don't set
+    # it up explicitly. Tests asserting on the embedded payment override.
+    repo.get_charge_payments.return_value = []
     return repo
 
 
@@ -136,9 +140,12 @@ class TestReconcileValidation:
         assert r['success'] is False
         assert 'payment_doc_sid' in r['error']
 
-    def test_empty_allocations(self, service):
-        r = service.reconcile('123', [])
+    def test_non_list_allocations_rejected(self, service):
+        """allocations must be a list (CR #67 — empty list now valid,
+        but a None/dict/str input should still fail validation)."""
+        r = service.reconcile('123', None)  # type: ignore[arg-type]
         assert r['success'] is False
+        assert 'list' in r['error']
 
     def test_allocation_with_zero_amount(self, service):
         r = service.reconcile('123', [{'bill_sid': '1', 'amount': 0}])
@@ -202,7 +209,13 @@ class TestReconcileHappyPath:
         ])
         assert r['data']['outcome'] == 'matched_pending'
         assert r['data']['affected_months'] == ['2026-06']
-        assert r['data']['payment'] is None   # full PendingPayment deferred to C-5
+        # CR #67: payment is now always populated (returns None only when
+        # the payment isn't in the active Charge window — which we mock
+        # via empty get_charge_payments here, so we get None).
+        assert r['data']['payment'] is None
+        # Current-month outcomes have zero release.
+        assert r['data']['total_release_amount'] == 0
+        assert r['data']['affected_employee_count'] == 0
 
     def test_idempotent_same_shape_is_noop(self, service, mock_repo, mock_pg):
         mock_repo.get_payment_meta.return_value = {
@@ -236,16 +249,19 @@ class TestReconcileEdgeCases:
         assert r['success'] is False
         assert r.get('not_found') is True
 
-    def test_allocation_sum_mismatch_rejected(self, service, mock_repo, mock_pg):
+    def test_allocation_sum_above_amount_rejected(self, service, mock_repo, mock_pg):
+        """CR #67: sum > payment.amount is the ONLY sum-based rejection
+        (previously: any sum != amount was rejected)."""
         mock_repo.get_payment_meta.return_value = {
             'doc_sid': '9001', 'doc_no': 'P-1', 'customer_sid': '1001',
             'customer_name': 'Alice', 'doc_store_code': 'HBT',
             'amount': 600_000, 'payment_date': '2026-04-30',
             'notes_lostdoc': None, 'ref_sale_sid': None,
         }
-        r = service.reconcile('9001', [{'bill_sid': '1001', 'amount': 500_000}])
+        r = service.reconcile('9001', [{'bill_sid': '1001', 'amount': 700_000}])
         assert r['success'] is False
         assert '600,000' in r['error']
+        assert 'must not exceed' in r['error']
 
     def test_unknown_bill_rejected(self, service, mock_repo, mock_pg):
         mock_repo.get_payment_meta.return_value = {
@@ -321,6 +337,196 @@ class TestReconcileEdgeCases:
         r = service.reconcile('9001', [{'bill_sid': '1001', 'amount': 600_000}])
         assert r['success'] is False
         assert r.get('conflict') is True
+
+
+# ----------------------------------------------------------------------
+# reconcile — CR #67 partial / empty / released-edit
+# ----------------------------------------------------------------------
+
+class TestReconcileCr67:
+    """The new partial-and-empty allocation paths added in CR #67."""
+
+    def test_empty_allocations_succeeds_as_unmatched(
+        self, service, mock_repo, mock_pg,
+    ):
+        """CR #67: allocations=[] is valid — clears all existing linkages
+        for the payment. Outcome is `unmatched`."""
+        mock_repo.get_payment_meta.return_value = {
+            'doc_sid': '9001', 'doc_no': 'P-1', 'customer_sid': '1001',
+            'customer_name': 'Alice', 'doc_store_code': 'HBT',
+            'amount': 600_000, 'payment_date': '2026-04-30',
+            'notes_lostdoc': None, 'ref_sale_sid': None,
+        }
+        _, _, cur = mock_pg
+        cur.fetchall.return_value = []
+        cur.fetchone.return_value = (0,)
+
+        r = service.reconcile('9001', [])
+
+        assert r['success'] is True
+        assert r['data']['outcome'] == 'unmatched'
+        # No releases (no allocations).
+        assert r['data']['total_release_amount'] == 0
+        assert r['data']['affected_employee_count'] == 0
+        # No INSERT (empty allocations).
+        cur.executemany.assert_not_called()
+
+    def test_empty_allocations_with_existing_runs_delete(
+        self, service, mock_repo, mock_pg,
+    ):
+        """CR #67: emptying the allocations on a payment with existing
+        rows fires DELETE. Used by frontend's 'clear linkage' button."""
+        mock_repo.get_payment_meta.return_value = {
+            'doc_sid': '9001', 'doc_no': 'P-1', 'customer_sid': '1001',
+            'customer_name': 'Alice', 'doc_store_code': 'HBT',
+            'amount': 600_000, 'payment_date': '2026-04-30',
+            'notes_lostdoc': None, 'ref_sale_sid': None,
+        }
+        _, _, cur = mock_pg
+        cur.fetchall.return_value = [('1001', 400_000), ('1002', 200_000)]
+        cur.fetchone.return_value = (0,)
+        cur.rowcount = 2
+
+        r = service.reconcile('9001', [])
+
+        assert r['success'] is True
+        assert r['data']['outcome'] == 'unmatched'
+        delete_calls = [
+            c for c in cur.execute.call_args_list
+            if c.args and 'DELETE' in c.args[0].upper()
+        ]
+        assert len(delete_calls) == 1
+        # executemany is invoked with an empty list (no-op at the SQL level);
+        # this is fine — what matters is that no rows are inserted.
+        executemany_calls = cur.executemany.call_args_list
+        assert all(c.args[1] == [] for c in executemany_calls)
+
+    def test_partial_allocation_in_past_month_is_matched_partially_with_release(
+        self, service, mock_repo, mock_pg,
+    ):
+        """CR #67: 0 < sum < amount → matched_partially. For a past-month
+        payment, release math still runs on the partial allocation."""
+        mock_repo.get_payment_meta.return_value = {
+            'doc_sid': '9001', 'doc_no': 'P-1', 'customer_sid': '1001',
+            'customer_name': 'Alice', 'doc_store_code': 'HBT',
+            'amount': 600_000, 'payment_date': '2026-04-30',  # past month
+            'notes_lostdoc': None, 'ref_sale_sid': None,
+        }
+        _, _, cur = mock_pg
+        cur.fetchall.return_value = []
+        cur.fetchone.return_value = (0,)
+
+        # Bill 1001 has one item; release math at 50% of bill ratio.
+        mock_repo.get_bill_items.return_value = [{
+            'bill_sid': '1001', 'upc': '12345',
+            'revenue_with_vat': 1_000_000, 'employee_code': 'GL005',
+        }]
+        with patch.object(
+            AccountPayableService, '_load_auto_rates',
+            return_value={('1001', '12345'): {
+                'revenue_type': 'fashion', 'fp_or_md': 'fp',
+                'effective_rate': 0.01,
+            }},
+        ):
+            r = service.reconcile('9001', [
+                {'bill_sid': '1001', 'amount': 200_000},   # 200k of 600k payment, on a 1M bill
+            ])
+
+        assert r['success'] is True
+        assert r['data']['outcome'] == 'matched_partially'
+        # Release = 1M × 0.01 × (200k / 1M) = 2000.
+        assert r['data']['total_release_amount'] == 2_000
+        assert r['data']['affected_employee_count'] == 1
+
+    def test_partial_allocation_in_current_month_no_release(
+        self, service, mock_repo, mock_pg,
+    ):
+        """CR #67: current-month + partial → matched_partially, but
+        no release computed (release fires at month-close)."""
+        mock_repo.get_payment_meta.return_value = {
+            'doc_sid': '9002', 'doc_no': 'P-2', 'customer_sid': '1001',
+            'customer_name': 'Alice', 'doc_store_code': 'HBT',
+            'amount': 600_000, 'payment_date': '2026-06-01',  # current month
+            'notes_lostdoc': None, 'ref_sale_sid': None,
+        }
+        _, _, cur = mock_pg
+        cur.fetchall.return_value = []
+        cur.fetchone.return_value = (0,)
+
+        r = service.reconcile('9002', [
+            {'bill_sid': '1001', 'amount': 200_000},
+        ])
+        assert r['data']['outcome'] == 'matched_partially'
+        assert r['data']['total_release_amount'] == 0
+        assert r['data']['affected_employee_count'] == 0
+
+    def test_embedded_payment_returned_when_in_active_window(
+        self, service, mock_repo, mock_pg,
+    ):
+        """CR #67: when the payment is in the active 24-month Charge
+        window, the response embeds the PendingPayment shape (the helper
+        re-runs the replay so the embedded row reflects post-write state).
+
+        Asserted as: reconcile DELEGATES to _pending_payment_for and
+        embeds whatever it returns. The helper's own status-classification
+        is exercised in TestGetPendingPayments.
+        """
+        mock_repo.get_payment_meta.return_value = {
+            'doc_sid': '9001', 'doc_no': 'P-1', 'customer_sid': '1001',
+            'customer_name': 'Alice', 'doc_store_code': 'HBT',
+            'amount': 600_000, 'payment_date': '2026-04-30',
+            'notes_lostdoc': None, 'ref_sale_sid': None,
+        }
+        _, _, cur = mock_pg
+        cur.fetchall.return_value = []
+        cur.fetchone.return_value = (0,)
+
+        # Patch the helper directly — the test focuses on whether reconcile
+        # routes its return value into the response, not on the helper's
+        # internal re-replay behavior.
+        sentinel_payment = {
+            'payment_doc_sid': '9001', 'payment_doc_no': 'P-1',
+            'status': 'released', 'amount': 600_000,
+            'allocations': [{'bill_sid': '1001', 'doc_no': 'D-1',
+                             'amount_applied': 600_000}],
+            'match_source': 'manual', 'is_overdue': False,
+            'suggested_bills': [],
+        }
+        with patch.object(
+            AccountPayableService, '_pending_payment_for',
+            return_value=sentinel_payment,
+        ):
+            r = service.reconcile('9001', [
+                {'bill_sid': '1001', 'amount': 600_000},
+            ])
+        assert r['success'] is True
+        assert r['data']['payment'] is sentinel_payment
+
+    def test_embedded_payment_is_none_when_not_in_active_window(
+        self, service, mock_repo, mock_pg,
+    ):
+        """CR #67: if the payment isn't in the active Charge window
+        (e.g. older than 24 months), `payment` falls back to None. The
+        outcome / release fields are still computed."""
+        mock_repo.get_payment_meta.return_value = {
+            'doc_sid': '9001', 'doc_no': 'P-1', 'customer_sid': '1001',
+            'customer_name': 'Alice', 'doc_store_code': 'HBT',
+            'amount': 600_000, 'payment_date': '2026-04-30',
+            'notes_lostdoc': None, 'ref_sale_sid': None,
+        }
+        _, _, cur = mock_pg
+        cur.fetchall.return_value = []
+        cur.fetchone.return_value = (0,)
+
+        # Default mock_repo.get_charge_payments = [] → helper returns None.
+        r = service.reconcile('9001', [
+            {'bill_sid': '1001', 'amount': 600_000},
+        ])
+        assert r['success'] is True
+        assert r['data']['payment'] is None
+        # Other fields still populated.
+        assert r['data']['outcome'] == 'released'
+        assert r['data']['affected_months'] == ['2026-04']
 
 
 # ----------------------------------------------------------------------
