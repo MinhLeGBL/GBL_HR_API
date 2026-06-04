@@ -3,6 +3,147 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.2.0] — 2026-06-04
+
+### Added — CR #68: manual void of remaining outstanding (gift / discount)
+
+#### Motivation
+
+Real-world AR cleanup: customer paid 80M of a 100M bill, company writes
+off the remaining 20M as a goodwill gesture / VIP discount. Without a
+void path the bill sits as `partial` forever, distorting the open-payables
+view and inviting future payments to silently clear stale debt.
+
+#### Schema
+
+New Postgres table — history-preserving, terminal in v1 (no UPDATE / DELETE):
+
+```sql
+CREATE TABLE payable_bill_voids (
+    void_id     BIGSERIAL    PRIMARY KEY,
+    bill_sid    VARCHAR(40)  NOT NULL,
+    amount      BIGINT       NOT NULL CHECK (amount > 0),
+    reason      TEXT,
+    voided_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    voided_by   VARCHAR(255) NOT NULL
+);
+CREATE INDEX idx_payable_bill_voids_bill_sid ON payable_bill_voids(bill_sid);
+```
+
+`voided_by` stores the user's email (resolved at write time from
+`g.email`); reads don't need to join `users`. Migration runs idempotently
+via `init_database()`.
+
+#### Endpoint — new
+
+**`POST /api/v1/account-payable/bills/:bill_sid/void`** — manager-required
+
+Request: `{ amount: int, reason?: string|null }`
+- `amount` required, > 0, `<= bill.remaining_unpaid` (post-prior-voids)
+- `reason` optional
+
+Response 200: `{ bill: BillDetail, void_id: string }`
+- 400 on invalid amount / non-string reason / amount > remaining
+- 404 if bill not in active AP ledger
+
+#### Endpoint — shape updates
+
+- **`GET /bills`**: each `BillRow` gains `total_voided: int` (always
+  present; 0 when no voids on file).
+- **`GET /bills/:bill_sid`**: `BillDetail` adds `total_voided` AND
+  `voids: BillVoidRef[]` (newest-first; `{void_id, amount, reason,
+  voided_at, voided_by}`).
+- **`GET /employees`** + **`GET /employees/:code/bills`**: no shape
+  change — outstanding totals automatically exclude voided portions
+  via the new `remaining_unpaid` formula.
+
+#### Derived state — the new invariant
+
+`_apply_voids_to_bills` runs at the end of `_load_bills` and mutates
+every bill in place:
+
+```
+total_voided     = SUM(payable_bill_voids.amount WHERE bill_sid = X)
+remaining_unpaid = max(0, original_charge - total_paid - total_voided)
+status           = fully_paid  if remaining_unpaid == 0
+                 | open        if total_paid == 0 AND total_voided == 0
+                 | partial     otherwise
+```
+
+Every downstream consumer (`get_bills`, `get_bill_detail`, `get_employees`,
+`get_employee_bills`, `get_pending_payments.suggested_bills`,
+`reconcile.cumulative_cap`) sees the void-adjusted state by construction.
+
+#### Reconcile cumulative cap — void-aware
+
+`reconcile`'s cap check now uses `original_charge - total_voided` as the
+effective ceiling, so post-void allocations can never exceed what's left:
+
+```
+SUM(amount_applied for bill X across all payments) + new_amount
+   <= original_charge - total_voided
+```
+
+This honors the open-question #4 in the spec: post-mutation cap is
+`paid + voided <= original_charge`.
+
+#### Commission integration — no code change
+
+CR #66's `compute_released_for_month` computes release as
+`item.revenue × effective_rate × (amount_applied / original_charge)`.
+Voids never enter `amount_applied`, so the released portion correctly
+excludes voided VND with zero new logic:
+
+- 100M / paid 80M / voided 20M → release × `(80M / 100M)` = 80% ✓
+- 100M / paid 100M / voided 0M → release × `1.0` = full release ✓
+- 100M / paid 0M / voided 100M → release × `0` = 0 commission ✓
+
+#### Bill flow examples
+
+| Original | Paid | Voided | remaining_unpaid | status |
+|---:|---:|---:|---:|---|
+| 100M | 60M | 0  | 40M | partial |
+| 100M | 60M | 40M | 0   | fully_paid |
+| 100M | 60M | 10M | 30M | partial |
+| 50M  | 0   | 20M | 30M | partial (open → partial) |
+| 50M  | 0   | 50M | 0   | fully_paid (write-off) |
+
+#### Tests
+- 17 new unit tests in `test_bill_voids.py`:
+  - `TestApplyVoids` (6): no-voids passthrough, partial keeps status,
+    full void → fully_paid, open→partial on partial void, full write-off
+    of open bill, multiple voids sum.
+  - `TestVoidRemainingValidation` (7): non-digit bill_sid, non-positive
+    amount, non-string reason, empty voided_by, unknown bill, amount
+    > remaining, void on fully_paid bill.
+  - `TestVoidRemainingHappyPath` (1): INSERT + RETURNING + post-void
+    BillDetail in response.
+  - `TestBillShape` (2): `total_voided` default on row, `voids` array
+    on detail.
+  - `TestReconcileCapWithVoids` (1): cap check subtracts voids.
+- 110 → 127 AP tests pass. Updated 2 existing tests for the new shape:
+  `test_success_creates_all_tables` (init_database now executes 6
+  statements) and `test_empty_when_no_active_bills` (derives status
+  from numbers instead of overriding it directly).
+- 694 across the full suite.
+
+#### Open questions — backend responses
+
+1. **Reversibility**: v1 terminal as recommended. No UPDATE / DELETE
+   on `payable_bill_voids` rows.
+2. **Audit feed**: out of scope per spec.
+3. **Permission**: `@manager_required` (admin + manager). Matches
+   reconcile/unmatch.
+4. **Cumulative cap on partial voids**: confirmed. Cap is
+   `paid + voided <= original_charge`; see void-aware cap block in
+   `reconcile()`.
+
+#### Bumped MINOR
+Additive — new endpoint, additive response fields (`total_voided`,
+`voids`). Existing callers that don't know about voids continue to
+see `total_voided = 0` and a `voids: []` array; the `remaining_unpaid`
+field still has the same meaning (just now subtracts voids too).
+
 ## [2.1.0] — 2026-06-04
 
 ### Added — CR #67: released payments stay editable; `matched_partially` state

@@ -284,11 +284,21 @@ class TestGetEmployees:
         assert data[0]['employee_code'] == 'GH083'
 
     def test_empty_when_no_active_bills(self, mock_repo, sample_bills):
-        # Mark all bills as fully_paid.
+        # Drive all bills into fully_paid by setting total_paid = original.
+        # (CR #68: status is now derived from numbers in `_apply_voids_to_bills`,
+        # so the previous shortcut of setting `status` directly no longer works.)
         for b in sample_bills.values():
+            b['total_paid'] = b['original_charge']
+            b['remaining_unpaid'] = 0
             b['status'] = 'fully_paid'
         mock_repo.get_all_bills.return_value = sample_bills
-        result = AccountPayableService(repository=mock_repo).get_employees()
+        # _apply_voids_to_bills touches Postgres — stub for unit-test isolation.
+        with patch.object(
+            AccountPayableService, '_load_voids_by_bill_sid', return_value={},
+        ), patch.object(
+            AccountPayableService, '_load_manual_allocations', return_value={},
+        ):
+            result = AccountPayableService(repository=mock_repo).get_employees()
         assert result == {'success': True, 'data': []}
 
 

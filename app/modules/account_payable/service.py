@@ -81,6 +81,7 @@ class AccountPayableService:
         Tables:
         - `payable_reconciliations` — manual payment→bill linkages.
         - `payable_item_custom_rates` — user-set per-item release-rate overrides.
+        - `payable_bill_voids` — bill write-offs (CR #68; goodwill / discount).
 
         Called from `scripts/database/init_db.py`. Safe to call repeatedly;
         `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` make
@@ -97,6 +98,8 @@ class AccountPayableService:
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_BILL_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_PAYMENT_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_CUSTOM_RATES_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_BILL_VOIDS_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_BILL_VOIDS_BILL_INDEX)
                 conn.commit()
             return {'success': True}
         except Exception as e:
@@ -359,6 +362,8 @@ class AccountPayableService:
             'customer_name':     bill['customer_name'],
             'original_charge':   bill['original_charge'],
             'total_paid':        bill['total_paid'],
+            # CR #68: always present; 0 when no voids on file.
+            'total_voided':      bill.get('total_voided', 0),
             'remaining_unpaid':  bill['remaining_unpaid'],
             'status':            bill['status'],
             'created_date':      bill['created_date'],
@@ -476,6 +481,9 @@ class AccountPayableService:
         row = self._bill_to_row(bill_sid, b, employee_codes, today)
         row['items'] = items_wire
         row['sale_total_amt'] = b['sale_total_amt']
+        # CR #68: BillDetail surfaces the full void chronology (newest-first
+        # via `_load_voids_by_bill_sid`'s ORDER BY clause).
+        row['voids'] = b.get('voids_internal', [])
         return {'success': True, 'data': row}
 
     def get_employees(self) -> Dict[str, Any]:
@@ -604,7 +612,7 @@ class AccountPayableService:
         return {'success': True, 'data': out}
 
     def _load_bills(self) -> Dict[str, Dict[str, Any]]:
-        """Single-shot bill loader (CR #62).
+        """Single-shot bill loader (CR #62; CR #68 layers voids).
 
         Loads the manual `payable_reconciliations` rows once per request
         and threads them through the Oracle ledger replay so EVERY read
@@ -612,9 +620,85 @@ class AccountPayableService:
         identical replay state. Without this unifier the queue could
         report `unmatched` for the same payment the bill view shows
         `matched (manual)`.
+
+        CR #68: after the replay, `payable_bill_voids` rows are applied
+        on top — each bill gains `total_voided` and `voids_internal`, and
+        `remaining_unpaid` + `status` are recomputed via the new formula
+        `remaining = original_charge - total_paid - total_voided`. Voids
+        do NOT enter `amount_applied`, so commission release (CR #66)
+        correctly excludes them via the existing paid-ratio math.
         """
         manual = self._load_manual_allocations()
-        return self.repository.get_all_bills(manual_allocations_by_payment=manual)
+        bills = self.repository.get_all_bills(manual_allocations_by_payment=manual)
+        self._apply_voids_to_bills(bills)
+        return bills
+
+    def _apply_voids_to_bills(self, bills: Dict[str, Dict[str, Any]]) -> None:
+        """CR #68: layer Postgres `payable_bill_voids` rows on top of the
+        Oracle replay output. Mutates each bill in place to add:
+
+        - `total_voided` (int)
+        - `voids_internal` (list of {void_id, amount, reason, voided_at,
+           voided_by}, newest-first) — used by `get_bill_detail`.
+
+        Then recomputes `remaining_unpaid` and `status` using the void-
+        aware formula so every downstream consumer (queue suggested_bills,
+        employees, reconcile cap, etc.) sees the post-void state.
+        """
+        voids_by_bill = self._load_voids_by_bill_sid()
+        for sid, bill in bills.items():
+            voids = voids_by_bill.get(sid, [])
+            total_voided = sum(v['amount'] for v in voids)
+            bill['total_voided'] = total_voided
+            bill['voids_internal'] = voids
+            # Void-aware remaining + status.
+            original = int(bill['original_charge'])
+            paid = int(bill['total_paid'])
+            new_remaining = max(0, original - paid - total_voided)
+            bill['remaining_unpaid'] = new_remaining
+            if new_remaining == 0:
+                bill['status'] = 'fully_paid'
+            elif paid == 0 and total_voided == 0:
+                bill['status'] = 'open'
+            else:
+                bill['status'] = 'partial'
+
+    def _load_voids_by_bill_sid(self) -> Dict[str, List[Dict[str, Any]]]:
+        """CR #68: read all `payable_bill_voids` rows once per request,
+        grouped by bill_sid (newest-first). Empty dict on connection
+        failure — voids cleanly fall back to "no voids on file" which
+        keeps the bill view working with stale data."""
+        conn = get_postgres_connection()
+        if conn is None:
+            return {}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT void_id, bill_sid, amount, reason,
+                           TO_CHAR(voided_at, 'YYYY-MM-DD') AS voided_at_str,
+                           voided_by
+                    FROM payable_bill_voids
+                    ORDER BY voided_at DESC, void_id DESC
+                ''')
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f'[WARN] AP _load_voids_by_bill_sid failed: {e}')
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            out.setdefault(r[1], []).append({
+                'void_id':   str(r[0]),
+                'amount':    int(r[2]),
+                'reason':    r[3],
+                'voided_at': r[4],
+                'voided_by': r[5],
+            })
+        return out
 
     def _load_manual_allocations(self) -> Dict[str, List[Dict[str, Any]]]:
         """Map payment_doc_sid → list of its linkage rows from
@@ -1012,15 +1096,18 @@ class AccountPayableService:
                     ''', (b_sid,))
                     other_total = int(cur.fetchone()[0]) - own_by_bill.get(b_sid, 0)
                     bill = bills[b_sid]
-                    cap = bill['original_charge']
+                    # CR #68: cap = original_charge - total_voided. Voids
+                    # carve a permanent write-off out of the bill's window;
+                    # subsequent payments can only fill what's left.
+                    cap = int(bill['original_charge']) - int(bill.get('total_voided', 0))
                     if other_total + new_amt > cap:
                         conn.rollback()
                         overflow = other_total + new_amt - cap
                         return {
                             'success': False,
                             'error': (
-                                f'Bill #{bill["doc_no"]} would exceed its original '
-                                f'charge by {overflow:,} VND'
+                                f'Bill #{bill["doc_no"]} would exceed its '
+                                f'available cap by {overflow:,} VND'
                             ),
                         }
 
@@ -1214,6 +1301,115 @@ class AccountPayableService:
             'data': {
                 'payment_doc_sid': str(payment_doc_sid),
                 'deleted_count':   deleted,
+            },
+        }
+
+    def void_remaining(
+        self,
+        bill_sid: str,
+        amount: int,
+        reason: Optional[str],
+        voided_by: str,
+    ) -> Dict[str, Any]:
+        """CR #68: write off part (or all) of a bill's remaining balance.
+
+        Terminal — voids in v1 cannot be reversed (operator creates a
+        manual payment / credit adjustment instead). The void amount is
+        excluded from commission release: it never enters `amount_applied`,
+        and the release math in `compute_released_for_month` (CR #66) uses
+        `amount_applied / original_charge`, so 0 release on voided VND
+        falls out automatically.
+
+        Validations:
+        - `bill_sid` is a digit string; the bill exists in the active
+          AP ledger.
+        - `amount` is a positive int and `<= bill.remaining_unpaid` (the
+          post-void formula, so prior voids are already subtracted).
+        - `reason` is an optional string (nullable).
+        - `voided_by` is the authenticated user's identifier (typically
+          email) — resolved at the route layer from Flask `g`.
+
+        Returns ServiceResult<{ bill: BillDetail, void_id: str }>. On the
+        same request after writing the void, re-loads the bill via
+        `get_bill_detail` so the response reflects the new
+        `total_voided` / `remaining_unpaid` / `status`.
+        """
+        # ── 1. Validate inputs ────────────────────────────────────────
+        if not str(bill_sid).isdigit():
+            return {'success': False, 'error': 'bill_sid must be a numeric string'}
+        if not isinstance(amount, int) or amount <= 0:
+            return {'success': False, 'error': 'amount must be a positive int'}
+        if reason is not None and not isinstance(reason, str):
+            return {'success': False, 'error': 'reason must be a string or null'}
+        if not isinstance(voided_by, str) or not voided_by.strip():
+            return {'success': False, 'error': 'voided_by must be a non-empty string'}
+
+        # ── 2. Load bills, find target, check the new amount fits ────
+        bills = self._load_bills()
+        bill = bills.get(str(bill_sid))
+        if bill is None:
+            return {
+                'success': False,
+                'error': f'Bill {bill_sid} not found in active AP ledger',
+                'not_found': True,
+            }
+        # `remaining_unpaid` already factors in any prior voids via the
+        # `_apply_voids_to_bills` pass.
+        remaining = int(bill['remaining_unpaid'])
+        if remaining <= 0:
+            return {
+                'success': False,
+                'error': (
+                    f'Bill #{bill["doc_no"]} has no remaining balance to void '
+                    f'(already fully settled by payments or prior voids)'
+                ),
+            }
+        if amount > remaining:
+            return {
+                'success': False,
+                'error': (
+                    f'amount ({amount:,}) exceeds bill remaining '
+                    f'({remaining:,})'
+                ),
+            }
+
+        # ── 3. INSERT void row ───────────────────────────────────────
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    INSERT INTO payable_bill_voids
+                        (bill_sid, amount, reason, voided_by)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING void_id
+                ''', (str(bill_sid), amount, reason, voided_by))
+                void_id = cur.fetchone()[0]
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'void failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # ── 4. Build response: refetched BillDetail + new void_id ────
+        detail = self.get_bill_detail(str(bill_sid))
+        if not detail.get('success'):
+            # Highly unlikely (the bill was found above), but surface a
+            # clean error rather than dropping the just-inserted void.
+            return detail
+        return {
+            'success': True,
+            'data': {
+                'bill':    detail['data'],
+                'void_id': str(void_id),
             },
         }
 
