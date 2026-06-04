@@ -226,8 +226,13 @@ class TestReconcileHappyPath:
             'notes_lostdoc': None, 'ref_sale_sid': None,
         }
         _, _, cur = mock_pg
-        # Existing rows EXACTLY match the request.
-        cur.fetchall.return_value = [('1001', 400_000), ('1002', 200_000)]
+        # CR #69: reconcile now does TWO fetchalls — parent rows then
+        # per-item rows. Existing rows EXACTLY match the request; no
+        # per-item rows on file (proportional historical state).
+        cur.fetchall.side_effect = [
+            [('1001', 400_000), ('1002', 200_000)],  # existing parent rows
+            [],                                       # existing per-item rows
+        ]
 
         r = service.reconcile('9003', [
             {'bill_sid': '1001', 'amount': 400_000},
@@ -304,7 +309,11 @@ class TestReconcileEdgeCases:
         }
         _, _, cur = mock_pg
         # Existing: a different allocation shape (one bill, 300k).
-        cur.fetchall.return_value = [('1001', 300_000)]
+        # CR #69: two fetchalls — parents then per-item rows (empty here).
+        cur.fetchall.side_effect = [
+            [('1001', 300_000)],   # existing parent rows
+            [],                    # existing per-item rows (none — historical proportional)
+        ]
         # Other-payment baseline = 0 for all bills.
         cur.fetchone.return_value = (300_000,)   # includes our own row
         cur.rowcount = 1   # DELETE will remove 1 row
@@ -331,7 +340,11 @@ class TestReconcileEdgeCases:
             'notes_lostdoc': None, 'ref_sale_sid': None,
         }
         _, _, cur = mock_pg
-        cur.fetchall.return_value = [('1001', 300_000), ('1002', 300_000)]
+        # CR #69: two fetchalls — parents then per-item rows (empty here).
+        cur.fetchall.side_effect = [
+            [('1001', 300_000), ('1002', 300_000)],
+            [],
+        ]
         cur.fetchone.return_value = (300_000,)
         cur.rowcount = 1   # We expected 2, but only 1 was deleted → conflict.
 
@@ -384,7 +397,11 @@ class TestReconcileCr67:
             'notes_lostdoc': None, 'ref_sale_sid': None,
         }
         _, _, cur = mock_pg
-        cur.fetchall.return_value = [('1001', 400_000), ('1002', 200_000)]
+        # CR #69: two fetchalls — parents then per-item rows.
+        cur.fetchall.side_effect = [
+            [('1001', 400_000), ('1002', 200_000)],
+            [],
+        ]
         cur.fetchone.return_value = (0,)
         cur.rowcount = 2
 

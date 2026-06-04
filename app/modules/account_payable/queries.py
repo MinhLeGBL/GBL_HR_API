@@ -45,6 +45,34 @@ class AccountPayableQueries:
             ON payable_reconciliations(payment_doc_sid)
     """
 
+    # CR #69 — per-item allocation rows. Each reconciliation may have zero
+    # rows (proportional mode — split paid amount across bill items by
+    # revenue weight) or one+ rows (priority mode — assign to specific
+    # items in click order). `amount_assigned` is the result of the
+    # priority-fill algorithm computed at write time so commission release
+    # doesn't need to recompute.
+    #
+    # `reconciliation_id` FKs `payable_reconciliations.id` (the field is
+    # named `id` historically, not `reconciliation_id` as the CR spec
+    # writes — the FK works either way).
+    # ON DELETE CASCADE: when the parent reconciliation is dropped (via
+    # reconcile's "edit" path or an unmatch), item rows go with it.
+    CREATE_RECONCILIATION_ITEMS_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_reconciliation_items (
+            reconciliation_id BIGINT       NOT NULL
+                              REFERENCES payable_reconciliations(id)
+                              ON DELETE CASCADE,
+            upc               VARCHAR(50)  NOT NULL,
+            order_index       INTEGER      NOT NULL,
+            amount_assigned   BIGINT       NOT NULL CHECK (amount_assigned >= 0),
+            PRIMARY KEY (reconciliation_id, upc)
+        )
+    """
+    CREATE_RECONCILIATION_ITEMS_UPC_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_payable_reco_items_upc
+            ON payable_reconciliation_items(upc)
+    """
+
     # ────────────────────────────────────────────────────────────────────
     # Oracle — Charge-tender ledger for AP (unscoped, running balance).
     # ────────────────────────────────────────────────────────────────────
