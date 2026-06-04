@@ -1,11 +1,13 @@
 """
 Oracle + PostgreSQL SQL queries for the account_payable module (CR #60).
 
-The Oracle side reuses the same Charge-tender ledger algorithm that
-`CommissionRepository.get_unpaid_bill_amounts` walks — REF_SALE_SID first,
-then FIFO across remaining open bills — but unscoped (running balance,
-not month-scoped) and with extra columns the AP UI needs (`doc_store_code`,
-`notes_lostdoc`, joined `customer_name`).
+The Oracle side reuses the Charge-tender ledger pull from
+`CommissionRepository.get_unpaid_bill_amounts` but unscoped (running
+balance, not month-scoped) and with extra columns the AP UI needs
+(`doc_store_code`, `notes_lostdoc`, joined `customer_name`). The
+allocation logic itself only auto-applies REF_SALE_SID matches and
+manual `payable_reconciliations` rows — FIFO was removed in v2.0.0
+after evidence of mis-allocation against payment notes.
 
 The PostgreSQL side reads/writes:
 - `payable_reconciliations` — manual payment→bill linkages

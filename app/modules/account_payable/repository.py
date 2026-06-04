@@ -5,11 +5,11 @@ Mirrors commission's repository/service split so the service stays focused
 on shape/business logic while Oracle access lives here. Two responsibilities:
 
 1. **Ledger replay** (`get_all_bills`) — walks every active customer's
-   Charge tender events, applies REF_SALE_SID → FIFO matching, and emits
-   one record per Charge bill with its current balance + payment
-   chronology. Same algorithm as
-   `CommissionRepository._replay_charge_ledger`, plus payment-record
-   bookkeeping the AP UI needs.
+   Charge tender events, applies REF_SALE_SID + manual reconciliation
+   matching (v2.0.0 removed the FIFO fallback), and emits one record
+   per Charge bill with its current balance + payment chronology. Same
+   algorithm as `CommissionRepository._replay_charge_ledger`, plus
+   payment-record bookkeeping the AP UI needs.
 
 2. **Bill line items** (`get_bill_items`) — DOCUMENT_ITEM rows joined to
    employee + product info for a list of bill_sids. Column shape matches
@@ -37,16 +37,15 @@ class AccountPayableRepository:
     ) -> Dict[str, Dict[str, Any]]:
         """Return per-bill state for every Charge bill in the active window.
 
-        Algorithm (REF_SALE_SID → manual → FIFO replay, run per customer):
+        Algorithm (REF_SALE_SID → manual, run per customer; v2.0.0 dropped
+        the FIFO fallback — see CHANGELOG v2.0.0):
           1. Pull every Charge tender event for customers active in the
              past 24 months (see ORACLE_ALL_CHARGE_LEDGER).
           2. Pass 1: payments with REF_SALE_SID apply to that exact bill.
-          3. Pass 1.5 (CR #62): apply `payable_reconciliations` manual
-             rows (when provided) — displaces FIFO inference for the
-             same payment.
-          4. Pass 2: leftover payment magnitude applies FIFO to the
-             customer's oldest open bills (insertion order = chronological).
-          5. Emit one record per bill (open / partial / fully_paid) with
+          3. Pass 2 (CR #62): apply `payable_reconciliations` manual rows
+             (when provided). Payments with leftover magnitude after this
+             pass STAY UNMATCHED — no automatic FIFO fallback.
+          4. Emit one record per bill (open / partial / fully_paid) with
              `payments[]` chronology.
 
         Args:
@@ -77,7 +76,7 @@ class AccountPayableRepository:
                             'payment_doc_no':   str | None,
                             'payment_date':     'YYYY-MM-DD',
                             'amount_applied':   int,
-                            'source':           'ref_sale_sid' | 'manual' | 'fifo',
+                            'source':           'ref_sale_sid' | 'manual',
                         },
                         ...
                     ],
@@ -121,7 +120,7 @@ class AccountPayableRepository:
             )
             # Walk-in bills have no customer; group them under a sentinel
             # key so the replay still runs per-customer (each walk-in is
-            # effectively its own customer — no cross-bill FIFO possible).
+            # effectively its own customer).
             key = customer_sid if customer_sid is not None else f'__walkin__:{row["doc_sid"]}'
             events_by_customer.setdefault(key, []).append(row)
 
@@ -170,10 +169,15 @@ class AccountPayableRepository:
         events: List[Dict[str, Any]],
         manual_allocations_by_payment: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-        """REF_SALE_SID → manual → FIFO replay (CR #62).
+        """REF_SALE_SID → manual replay (CR #62; v2.0.0 removed FIFO).
 
         Each bill records which payments touched it via `payments_chrono`
-        (chronological order, with `source` ∈ {ref_sale_sid, manual, fifo}).
+        (chronological order, with `source` ∈ {ref_sale_sid, manual}).
+
+        v2.0.0: FIFO fallback was removed after evidence of mis-allocation
+        — see CHANGELOG. Payments with leftover magnitude after the manual
+        pass stay UNMATCHED (their `remaining > 0` in the returned payments
+        list); they surface as `unmatched` / `is_overdue` in the queue.
 
         Args:
             events: chronologically-sorted per-customer ledger rows. Must
@@ -182,14 +186,14 @@ class AccountPayableRepository:
                 post_month, ref_sale_sid, sale_total_amt.
             manual_allocations_by_payment: optional dict mapping
                 payment_doc_sid → list of {bill_sid, amount_applied} rows
-                from `payable_reconciliations`. Applied as Pass 1.5 (after
-                REF_SALE_SID, before FIFO) so manual reconciles displace
-                whatever FIFO would otherwise have inferred.
+                from `payable_reconciliations`. The ONLY automatic source
+                of bill→payment linkage besides REF_SALE_SID.
 
         Returns:
             (bills, payments) where `bills` is dict[doc_sid → bill record
-            with `payments_chrono` list] and `payments` is the (now-exhausted)
-            payment event list.
+            with `payments_chrono` list] and `payments` is the payment
+            event list (some may have non-zero `remaining` — those are
+            the unmatched ones).
         """
         manual_allocations_by_payment = manual_allocations_by_payment or {}
         bills: Dict[str, Dict[str, Any]] = {}
@@ -237,11 +241,11 @@ class AccountPayableRepository:
                 'source':          'ref_sale_sid',
             })
 
-        # Pass 1.5 (CR #62): manual `payable_reconciliations` rows.
-        # Apply BEFORE FIFO so manual reconciles displace what FIFO would
-        # otherwise infer. Bill cross-customer mismatches (manual row's
-        # bill_sid not in this customer's bills) are silently skipped —
-        # the row will fire in that customer's replay instead.
+        # Pass 2 (CR #62): manual `payable_reconciliations` rows. The ONLY
+        # auto source besides REF_SALE_SID (v2.0.0 removed FIFO). Bill
+        # cross-customer mismatches (manual row's bill_sid not in this
+        # customer's bills) are silently skipped — the row will fire in
+        # that customer's replay instead.
         for p in payments:
             if p['remaining'] <= 0:
                 continue
@@ -269,29 +273,9 @@ class AccountPayableRepository:
                     'source':          'manual',
                 })
 
-        # Pass 2: FIFO over remaining open bills, in customer insertion order.
-        for p in payments:
-            if p['remaining'] <= 0:
-                continue
-            for b in bills.values():
-                if p['remaining'] <= 0:
-                    break
-                if b['remaining'] <= 0:
-                    continue
-                consumed = min(b['remaining'], p['remaining'])
-                b['remaining'] -= consumed
-                p['remaining'] -= consumed
-                b['payments_chrono'].append({
-                    'payment_doc_sid': str(p['doc_sid']),
-                    'payment_doc_no':  str(p['doc_no']) if p['doc_no'] is not None else None,
-                    'payment_date':    p['post_date_str'],
-                    'amount_applied':  int(consumed),
-                    'source':          'fifo',
-                })
-
-        # Sort each bill's payment chronology by date — Pass 1 (ref) can
-        # have arrived chronologically before Pass 2 (fifo) hits the same
-        # bill, but our two-pass ordering interleaves them by pass, not date.
+        # Sort each bill's payment chronology by date — Pass 1 (ref) and
+        # Pass 2 (manual) can have arrived in any order; our two-pass
+        # iteration interleaves them by pass, not by date.
         for b in bills.values():
             b['payments_chrono'].sort(key=lambda x: x['payment_date'])
 
