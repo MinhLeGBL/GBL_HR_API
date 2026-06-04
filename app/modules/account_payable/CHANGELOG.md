@@ -3,6 +3,141 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.3.0] — 2026-06-04
+
+### Added — CR #69: per-item allocation (proportional vs priority)
+
+#### Motivation
+
+`reconcile`'s allocation was bill-level — the backend split the paid
+amount across the bill's items by revenue weight (proportional). That
+works for the common case but misses two patterns:
+
+1. **Customer pays for specific item(s) only**: bill with a 200M dress
+   (employee A) and a 100M jewelry (employee B). Customer pays 200M
+   intending to clear the dress. Proportional: each item releases 67%;
+   employee A under-paid, employee B over-paid. Priority `["DRESS"]`:
+   employee A releases on full 200M, employee B gets 0.
+2. **Operator picks priority order**: multi-item bill, partial payment,
+   operator wants specific items cleared first.
+
+CR #69 adds an optional `items: string[]` per allocation. Null/absent →
+proportional (existing behavior, no schema change). One+ UPCs → priority
+order: fill each in turn up to `item.revenue_with_vat`, overflow rejected.
+
+#### Schema
+
+New Postgres table `payable_reconciliation_items` (idempotent in
+`init_database`):
+
+```sql
+CREATE TABLE payable_reconciliation_items (
+    reconciliation_id BIGINT NOT NULL
+        REFERENCES payable_reconciliations(id) ON DELETE CASCADE,
+    upc               VARCHAR(50)  NOT NULL,
+    order_index       INTEGER      NOT NULL,
+    amount_assigned   BIGINT       NOT NULL CHECK (amount_assigned >= 0),
+    PRIMARY KEY (reconciliation_id, upc)
+);
+CREATE INDEX idx_payable_reco_items_upc ON payable_reconciliation_items(upc);
+```
+
+`ON DELETE CASCADE` on the FK: when reconcile's "edit" path drops the
+parent rows, item rows go with them automatically. No orphan cleanup
+needed.
+
+`amount_assigned` is the result of the priority-fill stored at write
+time so commission release doesn't recompute (and so the queue can
+display the historical priority order verbatim).
+
+#### Request shape — additive
+
+```json
+POST /reconcile
+{
+  "payment_doc_sid": "...",
+  "allocations": [
+    { "bill_sid": "...", "amount": N, "items": ["UPC-A", "UPC-B"] },
+    { "bill_sid": "...", "amount": M, "items": null }
+  ]
+}
+```
+
+- `items` is `string[] | null`. **Empty list normalizes to null** (proportional).
+- Order matters — array order is the priority sequence.
+- Mixed mode in one payment is **allowed**: each allocation independently
+  picks its mode (per-allocation independence — most callers won't mix
+  but the data model supports it for the degenerate single-item case).
+
+#### Validation — three new 400 cases
+
+1. `items` contains a UPC that doesn't belong to `bill_sid`.
+2. Same UPC listed twice in the same allocation's `items[]`.
+3. `amount` exceeds the combined `revenue_with_vat` of the listed items.
+
+Error messages include the bill `doc_no` and concrete amounts so the
+frontend can surface them without guesswork (CR #69 open Q #4).
+
+#### Idempotency check — items-aware
+
+Comparing existing rows to requested rows now incorporates the items
+list per allocation. An edit that adds/removes/reorders items writes
+new state even when (bill_sid, amount) is unchanged.
+
+#### Commission release — per-item factor
+
+`compute_released_for_month` (CR #66) used a uniform per-bill paid
+ratio: `amount_applied / original_charge`. Now computes a per-item
+factor:
+
+- For each in-month payment touching this (bill, item):
+  - Proportional payment → adds `pay_amount / original_charge` (same for every item)
+  - Priority payment → adds `amount_assigned / item.revenue_with_vat` (0 if item not in priority list)
+- Item's total factor = sum across all in-month payments.
+
+Backward-compatible: when no payment is in priority mode, every item
+gets the same factor as before. Verified against the existing
+`test_released_accumulator` suite (no changes needed there).
+
+#### Queue round-trip
+
+`PendingPayment.allocations[i]` now includes `items: string[] | null` —
+priority UPCs in `order_index` sequence, or null when the allocation
+is proportional. Frontend round-trips this to restore the dialog state
+when re-editing a stored allocation.
+
+#### Tests
+- 15 new in `test_reconcile_per_item.py`:
+  - `TestAssignPerItem` (6): priority-fill algorithm — single full, single
+    partial, multi-item overflow, short-circuit, order-sensitivity,
+    overflow ValueError.
+  - `TestReconcileItemsValidation` (6): non-list rejected, empty → proportional,
+    dup UPC, UPC not on bill, amount > combined revenue, non-string UPC.
+  - `TestReconcileItemsHappyPath` (3): priority writes per-item rows
+    + assignments; proportional doesn't; release math in toast.
+- 4 existing tests updated for new fetchall pattern (two SELECTs per reconcile)
+  + 1 init_database call_count bump (was 6, now 8) + 2 queue tests
+  for the new `items: null` field on allocations.
+- 127 → 142 AP tests; 709 across the full suite.
+
+#### Open questions — backend responses
+
+1. **Storage** (join table vs JSONB): chose the join table per CR
+   recommendation. Audit-friendly (one row per assignment), UPC index
+   enables "show all linkages that ever touched item X".
+2. **Mixed mode within one payment**: supported. Per-allocation
+   independence is a side effect of the data shape; no extra
+   validation cost. Matches the degenerate single-item-bill case.
+3. **Order persistence**: confirmed. `_load_reconciliation_items_for_payments`
+   reads rows `ORDER BY order_index`; queue round-trip preserves order.
+4. **Validation message format**: bill_doc_no + concrete numbers
+   included in the three new 400 messages.
+
+#### Bumped MINOR
+Additive — new optional field, new schema (empty for existing data),
+new validation paths only fire when `items` is provided. Existing
+proportional callers behave identically.
+
 ## [2.2.0] — 2026-06-04
 
 ### Added — CR #68: manual void of remaining outstanding (gift / discount)
