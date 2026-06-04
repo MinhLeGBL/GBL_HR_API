@@ -68,6 +68,73 @@ class TestReplayChronology:
         assert bills['B1']['payments_chrono'][0]['amount_applied'] == 400_000
         assert bills['B1']['payments_chrono'][0]['source'] == 'ref_sale_sid'
 
+    def test_ref_payment_exceeding_bill_leaves_payment_remainder_unmatched(self):
+        """v2.0.0: when a REF_SALE_SID payment's magnitude exceeds the
+        referenced bill's remaining balance, the bill is fully cleared
+        and the payment's leftover stays UNMATCHED — it does NOT spill
+        over to other open bills (that would be FIFO, which we removed).
+
+        Mirrors the real bill 2978 scenario: a "Payment on Account →
+        Charge" entry intended to clear bill 2767 (71.2M) and partially
+        bill 2797 (the second part was never auto-linked because
+        REF_SALE_SID only points at one target).
+        """
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology([
+            _evt('B1', 300_000, '2026-04-01'),     # small target
+            _evt('B2', 500_000, '2026-04-02'),     # another open bill — must NOT auto-fill
+            _evt('PAY1', -800_000, '2026-04-10', ref='B1'),  # 500k leftover after B1
+        ])
+        # B1 fully paid by the REF payment.
+        assert bills['B1']['remaining'] == 0
+        assert bills['B1']['payments_chrono'][0]['source'] == 'ref_sale_sid'
+        assert bills['B1']['payments_chrono'][0]['amount_applied'] == 300_000
+        # B2 stays open — leftover does NOT spill via FIFO.
+        assert bills['B2']['remaining'] == 500_000
+        assert bills['B2']['payments_chrono'] == []
+        # Payment side: 500k of the original 800k stays unmatched.
+        pay = next(p for p in payments if p['doc_sid'] == 'PAY1')
+        assert pay['amount'] == 800_000
+        assert pay['remaining'] == 500_000
+
+    def test_payments_list_tracks_remaining_across_mixed_allocations(self):
+        """v2.0.0 contract on the returned `payments` list: every payment
+        event appears with its `remaining` reflecting the unallocated
+        portion, regardless of whether the allocation came from REF,
+        manual, or stayed empty.
+
+        Same customer ledger covering three payment fates in one replay.
+        """
+        events = [
+            _evt('B1', 1_000_000, '2026-04-01'),
+            _evt('B2',   500_000, '2026-04-02'),
+            _evt('B3',   400_000, '2026-04-03'),
+            # PAY1 fully consumed by REF on B1.
+            _evt('PAY1', -1_000_000, '2026-04-05', ref='B1'),
+            # PAY2 fully consumed by manual on B2.
+            _evt('PAY2',   -500_000, '2026-04-10'),
+            # PAY3 unreferenced and not in manual map → stays fully unmatched.
+            _evt('PAY3',   -400_000, '2026-04-12'),
+        ]
+        manual = {'PAY2': [{'bill_sid': 'B2', 'amount_applied': 500_000}]}
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # Bill side
+        assert bills['B1']['remaining'] == 0      # paid by PAY1 (ref)
+        assert bills['B2']['remaining'] == 0      # paid by PAY2 (manual)
+        assert bills['B3']['remaining'] == 400_000  # untouched — no FIFO
+        # Payment-side `remaining` for each: 0 / 0 / full magnitude.
+        by_doc = {p['doc_sid']: p for p in payments}
+        assert by_doc['PAY1']['amount'] == 1_000_000
+        assert by_doc['PAY1']['remaining'] == 0
+        assert by_doc['PAY2']['amount'] == 500_000
+        assert by_doc['PAY2']['remaining'] == 0
+        assert by_doc['PAY3']['amount'] == 400_000
+        assert by_doc['PAY3']['remaining'] == 400_000
+        # And — crucially — every payment event is in the returned list,
+        # even the unmatched one (this is the queue endpoint's input).
+        assert {p['doc_sid'] for p in payments} == {'PAY1', 'PAY2', 'PAY3'}
+
     def test_unreferenced_payments_stay_unmatched(self):
         """v2.0.0: payments without REF_SALE_SID or manual allocation
         leave every bill open (no FIFO fallback). Their full magnitude
