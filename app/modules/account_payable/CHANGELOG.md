@@ -3,6 +3,90 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.0.0] — 2026-06-04
+
+### BREAKING — FIFO auto-matching removed from the ledger replay
+
+#### Motivation
+
+A live audit of payment-note text vs FIFO allocations found multiple
+cases where the auto-FIFO pass was misallocating payments to the wrong
+bills. Examples spanning 2024-2025:
+
+| Customer | Note (translated intent) | FIFO matched | Verdict |
+|---|---|---|---|
+| To Thi Hanh | "khách thanh toán nợ **bill 5180**" | doc_no **1778** | WRONG |
+| Nguyen Thi Linh San | "Bill **3593**, khách tt công nợ" | doc_no 324, 538, 656, 753, 1168 | WRONG, fragmented across 5 oldest bills |
+| Nguyen Thi Linh San | "Bill **5172**, khách tt acc" | doc_no 1168 | WRONG |
+
+FIFO over-applies when employees write notes (or forget to). The
+silent default — "match to oldest open" — turns out wrong far more
+often than the original CR #59 Phase A assumed. Manual reconciliation
+becomes the only safe path; FIFO offered the appearance of
+auto-matching while quietly mis-attributing commission release to the
+wrong employees.
+
+#### Behaviour change
+
+`_replay_charge_ledger_with_chronology` now runs:
+1. **Pass 1 — REF_SALE_SID** (Oracle's targeted auto-link). Unchanged.
+2. **Pass 2 — manual `payable_reconciliations`** rows. Unchanged.
+3. *(removed)* ~~Pass 3 — FIFO over remaining open bills.~~
+
+Payments without either REF_SALE_SID or a manual reconciliation row
+**stay unmatched**. The queue's `unmatched` / `is_overdue` bucket is
+now the default destination for any unreferenced payment — finance
+must manually allocate via `POST /account-payable/payments/:sid/reconcile`.
+
+#### Response shape
+
+- Bill `payments[*].source` enum narrows from
+  `'ref_sale_sid' | 'manual' | 'fifo'` to `'ref_sale_sid' | 'manual'`.
+  Frontend code that branches on `source === 'fifo'` will no longer hit
+  that branch (defensive: keeping the union type with `'fifo'` is fine
+  for backward compat with any stored snapshots).
+- `match_source` on queue rows similarly narrows.
+- All other field shapes unchanged.
+
+#### Operational impact (live snapshot at branch-cut time)
+
+Re-replaying the past 24 months of charge-tender activity with FIFO
+disabled:
+
+| Today (FIFO on) | After v2.0.0 (FIFO off) |
+|---|---|
+| 116 bills `fully_paid`, 3 partial, 8 open | 2 fully_paid, 3 partial, **122 open** |
+| 89 payments allocated | 8 allocated (REF only), **81 unmatched** |
+| — | **~15 billion VND** of allocations need manual reconciliation |
+
+Finance team must process the unmatched-queue backlog before commission
+release for future months resumes its CR #66 behaviour.
+
+#### Commission release (CR #66) downstream
+
+`compute_released_for_month` will return substantially less per month
+until backfill is complete — only bills with explicit REF_SALE_SID or
+manual reconciliation contribute to released. This is the desired
+correctness behaviour going forward: the previous numbers were
+inflated by incorrect FIFO inferences.
+
+#### Tests
+- Rewrote 5 repository tests + 1 smoke test to assert the no-FIFO
+  behaviour:
+  - `test_unreferenced_payments_stay_unmatched` (was `test_fifo_pays_oldest_first`)
+  - `test_ref_payment_applies_unreferenced_stays_unmatched`
+  - `test_orphan_ref_sale_sid_stays_unmatched`
+  - `test_manual_pass_skips_unknown_bill` — updated expectations
+  - `test_chronology_sorted_by_date_within_bill` — uses ref + manual instead of ref + fifo
+  - `TestGetAllBillsSmoke::test_classifies_status_correctly` — payment without REF stays unmatched
+- 100 AP unit tests pass. 667 across the whole codebase.
+
+#### Bumped MAJOR
+Match semantics fundamentally change. Existing data analysis that
+relies on past FIFO allocations is no longer reproducible from the
+replay alone; existing reconciled state can only be reproduced by
+inserting equivalent `payable_reconciliations` rows.
+
 ## [1.1.1] — 2026-06-02
 
 ### Fixed — CR #63: item description sourced from wrong Oracle column

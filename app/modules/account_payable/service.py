@@ -190,9 +190,10 @@ class AccountPayableService:
         Algorithm — mirrors the spec in
         `docs/cr/commission.md → CR #66 — Spec`:
 
-        1. Load all bills via `_load_bills` (REF_SALE_SID → manual → FIFO
-           replay, CR #62 unified). Reuses the per-request replay output —
-           commission's calculate triggers this once per `POST /calculate`.
+        1. Load all bills via `_load_bills` (REF_SALE_SID → manual replay,
+           CR #62 unified — v2.0.0 removed FIFO). Reuses the per-request
+           replay output — commission's calculate triggers this once per
+           `POST /calculate`.
         2. For each bill, find payments whose `payment_date` falls in the
            target month. A bill is "in scope" for month M if it has any
            such payment. Allocation factor = `sum(amount_applied_in_month)
@@ -443,9 +444,10 @@ class AccountPayableService:
         """Full bill detail with items[] and rate lookups.
 
         Runs the full ledger replay since we need this bill's chronology
-        and customer-scoped FIFO state. A per-bill query is possible but
-        we already cache the replay output below, and consistency with
-        get_bills' chronology matters more than the avoided round-trip.
+        and the customer-scoped allocation state. A per-bill query is
+        possible but we already cache the replay output below, and
+        consistency with get_bills' chronology matters more than the
+        avoided round-trip.
 
         Returns ServiceResult<BillDetail | None>. `None` → 404 at the route layer.
         """
@@ -676,24 +678,27 @@ class AccountPayableService:
         return out
 
     # Source-of-truth priority order for queue match_source (CR #62):
-    # if a payment's allocations span multiple sources (REF_SALE_SID
-    # for part, FIFO for the rest), the row reports the highest-priority
-    # source. ref_sale_sid > manual > fifo.
-    _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1, 'fifo': 2}
+    # if a payment's allocations span both sources, the row reports the
+    # highest-priority source. ref_sale_sid > manual. v2.0.0 removed FIFO
+    # so only these two sources exist.
+    _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1}
 
     def get_pending_payments(self, status: Optional[str] = None) -> Dict[str, Any]:
         """Payments queue (CR #62 — queue mirrors the ledger replay).
 
-        Uses the EXACT replay output the bill view shows (FIFO inferences
-        included). Status logic per CR §"Behaviour matrix":
+        Uses the EXACT replay output the bill view shows. Status logic per
+        CR §"Behaviour matrix" (updated for v2.0.0 — FIFO removed):
 
         - Past-month payment with ANY application in the replay → released,
           drops out of the queue. The applied portion is "released"; any
           remainder is implicit deposit-on-account.
         - Past-month payment with no application → `unmatched` + `is_overdue`.
+          (Note: post-v2.0.0 this includes EVERY past-month payment without
+          an explicit REF_SALE_SID or manual reconciliation — significantly
+          more rows than under the FIFO regime.)
         - Current-month with application → `matched_pending` and
           `match_source` is the highest-priority source in the allocations
-          (ref_sale_sid > manual > fifo).
+          (ref_sale_sid > manual).
         - Current-month with no application → `unmatched` (not overdue).
 
         Each row carries `suggested_bills` = the customer's open + partial
@@ -1066,12 +1071,12 @@ class AccountPayableService:
     def unmatch(self, payment_doc_sid: str) -> Dict[str, Any]:
         """Remove every Postgres `payable_reconciliations` row for the payment.
 
-        CR #62: FIFO-sourced matches cannot be unmatched directly — they
-        are derived from the ledger replay, not stored. If no manual row
-        exists for this payment, return 400 with guidance to manually
-        reconcile against the desired bill(s) instead (which displaces
-        FIFO on the next read via the priority order). Frontend chose
-        option A — reject — over option B (insert a suppression flag).
+        CR #62: REF_SALE_SID-sourced matches cannot be unmatched here —
+        they come from Oracle's `DOCUMENT.REF_SALE_SID` column. If no manual
+        row exists, return 400 with guidance to override the REF link by
+        inserting a manual reconciliation against the desired bill(s).
+        Frontend chose option A — reject — over option B (insert a
+        suppression flag).
 
         Returns `{success, data: {payment_doc_sid, deleted_count}}` on success.
         """
@@ -1093,9 +1098,9 @@ class AccountPayableService:
                         'success': False,
                         'error': (
                             'Payment has no manual linkage to remove. '
-                            'If it was matched via FIFO or REF_SALE_SID, '
-                            'reconcile manually against the desired bill(s) '
-                            'to override the inference.'
+                            'If it was matched via REF_SALE_SID, reconcile '
+                            'manually against the desired bill(s) to override '
+                            'the auto-link.'
                         ),
                         'not_found': True,
                     }

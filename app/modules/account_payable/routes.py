@@ -139,8 +139,8 @@ def reconcile():
 def unmatch_payment(payment_doc_sid: str):
     """Remove an existing manual linkage for the given payment.
 
-    Returns 404 when no manual linkage exists (CR #62 — FIFO/REF cases
-    cannot be unmatched directly; reconcile manually to override instead).
+    Returns 404 when no manual linkage exists (CR #62 — REF_SALE_SID
+    cases cannot be unmatched directly; reconcile manually to override).
     """
     result = _service.unmatch(str(payment_doc_sid))
     if result.get('success'):
