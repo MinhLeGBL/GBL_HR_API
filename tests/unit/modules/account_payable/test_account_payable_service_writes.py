@@ -95,8 +95,8 @@ def freeze_today():
 @pytest.fixture
 def mock_pg():
     """Patch get_postgres_connection in the service module + stub out the
-    rate-lookup + manual-allocations helpers so the cursor isn't asked to
-    multiplex shapes across SQL queries.
+    rate-lookup + manual-allocations + void helpers so the cursor isn't
+    asked to multiplex shapes across SQL queries.
 
     Each test customizes:
       - cur.fetchall.return_value → existing reconciliations [(bill_sid, amount)]
@@ -112,21 +112,22 @@ def mock_pg():
         conn.cursor.return_value.__enter__.return_value = cur
         m.return_value = conn
         # Patch the auxiliary loaders so the same cursor isn't asked to
-        # multiplex row shapes. `_load_manual_allocations` runs first
-        # inside `_load_bills` (CR #62) so we have to stub it too.
+        # multiplex row shapes. `_load_manual_allocations` and CR #68's
+        # `_load_voids_by_bill_sid` both run inside `_load_bills`.
         with patch(
             'app.modules.account_payable.service.AccountPayableService._load_auto_rates',
             return_value={},
+        ), patch(
+            'app.modules.account_payable.service.AccountPayableService._load_custom_rates',
+            return_value={},
+        ), patch(
+            'app.modules.account_payable.service.AccountPayableService._load_manual_allocations',
+            return_value={},
+        ), patch(
+            'app.modules.account_payable.service.AccountPayableService._load_voids_by_bill_sid',
+            return_value={},
         ):
-            with patch(
-                'app.modules.account_payable.service.AccountPayableService._load_custom_rates',
-                return_value={},
-            ):
-                with patch(
-                    'app.modules.account_payable.service.AccountPayableService._load_manual_allocations',
-                    return_value={},
-                ):
-                    yield m, conn, cur
+            yield m, conn, cur
 
 
 # ----------------------------------------------------------------------
