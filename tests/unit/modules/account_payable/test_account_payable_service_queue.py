@@ -186,7 +186,10 @@ class TestGetPendingPayments:
         }]
         assert by_sid['9003']['is_overdue'] is False
 
-        # 9004: current-month, FIFO applied → matched_pending(fifo). CR #62 KEY CASE.
+        # 9004: current-month, FIFO applied 100k of 100k → matched_pending.
+        # (Fixture predates v2.0.0; source label 'fifo' is fine — the queue
+        # just reports it. Replay no longer produces it but tests inject
+        # the same shape to exercise queue logic.)
         assert by_sid['9004']['status'] == 'matched_pending'
         assert by_sid['9004']['match_source'] == 'fifo'
         assert by_sid['9004']['allocations'] == [{
@@ -194,8 +197,11 @@ class TestGetPendingPayments:
         }]
         assert by_sid['9004']['is_overdue'] is False
 
-        # 9005: past-month, FIFO applied → released → NOT in queue
-        assert '9005' not in by_sid
+        # 9005: past-month, FIFO applied 50k of 50k → released.
+        # CR #67: released payments STAY in the queue so finance can edit.
+        assert by_sid['9005']['status'] == 'released'
+        assert by_sid['9005']['is_overdue'] is False
+        assert by_sid['9005']['allocations'][0]['amount_applied'] == 50_000
 
         # 9006: walk-in unmatched
         assert by_sid['9006']['customer_sid'] is None
@@ -216,39 +222,43 @@ class TestGetPendingPayments:
         # ref_sale_sid > fifo in priority order.
         assert row['match_source'] == 'ref_sale_sid'
 
-    def test_partial_application_in_current_month_is_matched_pending(
+    def test_partial_application_in_current_month_is_matched_partially(
         self, service, sample_bills,
     ):
-        """sum(allocations) < payment.amount + current month → still matched_pending.
-        The remainder is implicit deposit-on-account."""
-        # 9004's payment is 100_000; we configured a 100_000 FIFO hit. Now
-        # override to apply only 60_000 (partial) and verify the queue still
-        # treats it as matched_pending.
+        """CR #67: 0 < sum(allocations) < payment.amount → matched_partially,
+        regardless of month. Replaces the v1.0.0 'matched_pending' label."""
+        # 9004's payment is 100_000; apply only 60_000 (partial).
         sample_bills['5002']['payments'] = [
-            _chrono('9004', 60_000, 'fifo', '2026-06-01'),
+            _chrono('9004', 60_000, 'manual', '2026-06-01'),
         ]
         service._load_bills = MagicMock(return_value=sample_bills)
         result = service.get_pending_payments()
         row = next(p for p in result['data'] if p['payment_doc_sid'] == '9004')
-        assert row['status'] == 'matched_pending'
+        assert row['status'] == 'matched_partially'
         assert row['allocations'][0]['amount_applied'] == 60_000
-        # Frontend infers partial-release from sum(allocations) < amount.
         assert row['amount'] == 100_000
+        # Partial state is NOT overdue regardless of month.
+        assert row['is_overdue'] is False
 
-    def test_partial_application_in_past_month_still_releases(
+    def test_partial_application_in_past_month_is_matched_partially(
         self, service, sample_bills,
     ):
-        """Past-month + ANY application → release per CR §"Edge cases #1"."""
-        # Override 9005 to be a partial application.
+        """CR #67: a past-month payment with PARTIAL allocations stays in
+        queue as matched_partially (was: released, drops from queue)."""
+        # 9005's payment is 50_000; apply only 10_000 (partial).
         sample_bills['5002']['payments'] = [
-            _chrono('9004', 100_000, 'fifo', '2026-06-01'),
-            _chrono('9005',  10_000, 'fifo', '2026-04-20'),   # was 50_000
+            _chrono('9004', 100_000, 'manual', '2026-06-01'),
+            _chrono('9005',  10_000, 'manual', '2026-04-20'),   # was 50_000
         ]
         service._load_bills = MagicMock(return_value=sample_bills)
         result = service.get_pending_payments()
-        # 9005 still drops from the queue (partial release is fine).
-        sids = {p['payment_doc_sid'] for p in result['data']}
-        assert '9005' not in sids
+        by_sid = {p['payment_doc_sid']: p for p in result['data']}
+        # 9005 STAYS in queue as matched_partially.
+        assert '9005' in by_sid
+        assert by_sid['9005']['status'] == 'matched_partially'
+        assert by_sid['9005']['allocations'][0]['amount_applied'] == 10_000
+        # matched_partially is never overdue per the rule.
+        assert by_sid['9005']['is_overdue'] is False
 
     def test_suggested_bills_shape(self, service):
         result = service.get_pending_payments()
@@ -271,10 +281,29 @@ class TestGetPendingPayments:
         # Both REF_SALE_SID (9003) and FIFO (9004) are matched_pending.
         assert sids == {'9003', '9004'}
 
+    def test_status_filter_released(self, service):
+        """CR #67 — new filter value; released payments stay in queue."""
+        result = service.get_pending_payments(status='released')
+        sids = {p['payment_doc_sid'] for p in result['data']}
+        assert sids == {'9005'}
+
+    def test_status_filter_matched_partially(self, service, sample_bills):
+        """CR #67 — new filter value: only matched_partially returns."""
+        # Make 9004's allocation partial so it falls into the new bucket.
+        sample_bills['5002']['payments'] = [
+            _chrono('9004', 60_000, 'manual', '2026-06-01'),
+        ]
+        service._load_bills = MagicMock(return_value=sample_bills)
+        result = service.get_pending_payments(status='matched_partially')
+        sids = {p['payment_doc_sid'] for p in result['data']}
+        assert sids == {'9004'}
+
     def test_status_filter_invalid_rejected(self, service):
         result = service.get_pending_payments(status='garbage')
         assert result['success'] is False
         assert 'unmatched' in result['error']
+        assert 'matched_partially' in result['error']
+        assert 'released' in result['error']
 
     def test_empty_payments_returns_empty(self, mock_repo, sample_bills):
         mock_repo.get_charge_payments.return_value = []

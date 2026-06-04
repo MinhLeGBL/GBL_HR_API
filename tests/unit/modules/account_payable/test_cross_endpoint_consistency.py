@@ -81,15 +81,16 @@ class TestBillViewAndQueueAgree:
         svc._load_custom_rates = MagicMock(return_value={})
         return svc
 
-    def test_fifo_past_month_payment_drops_from_queue_and_shows_in_bill(self):
-        """The exact CR #62 scenario: a past-month FIFO-applied payment.
-        Bill view must show it; queue must hide it (released)."""
+    def test_past_month_fully_matched_payment_shows_as_released_in_both(self):
+        """CR #67: a past-month fully-matched payment STAYS in the queue
+        with status='released' so finance can edit allocations. Bill view
+        chronology continues to show it. (Was: dropped from queue pre-CR-67.)"""
         bills = {
             '1001': _bill(
                 '1001', 'D-1001', '999', 'Cust',
                 original=100_000, remaining=0, status='fully_paid',
                 created_date='2026-04-01', post_month='2026-04',
-                payments=[_chrono('P_PAST', 100_000, 'fifo', '2026-04-20')],
+                payments=[_chrono('P_PAST', 100_000, 'manual', '2026-04-20')],
             ),
         }
         payments = [{
@@ -104,13 +105,15 @@ class TestBillViewAndQueueAgree:
         queue = svc.get_pending_payments()['data']
         bill = svc.get_bill_detail('1001')['data']
 
-        # Bill view: shows the FIFO payment in chronology.
+        # Bill view: shows the payment in chronology.
         bill_payment_sids = {p['payment_doc_sid'] for p in bill['payments']}
         assert 'P_PAST' in bill_payment_sids
 
-        # Queue: must NOT show it (released — past month + applied via replay).
-        queue_payment_sids = {p['payment_doc_sid'] for p in queue}
-        assert 'P_PAST' not in queue_payment_sids
+        # Queue: STAYS as released (CR #67).
+        by_sid = {p['payment_doc_sid']: p for p in queue}
+        assert 'P_PAST' in by_sid
+        assert by_sid['P_PAST']['status'] == 'released'
+        assert by_sid['P_PAST']['is_overdue'] is False
 
     def test_fifo_current_month_payment_appears_in_both_with_source_fifo(self):
         bills = {
