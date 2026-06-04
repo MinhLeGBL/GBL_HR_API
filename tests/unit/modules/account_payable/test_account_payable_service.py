@@ -22,9 +22,11 @@ class TestInitDatabase:
         result = AccountPayableService().init_database()
 
         assert result == {'success': True}
-        # payable_reconciliations (1) + 2 indexes + payable_item_custom_rates (1)
-        # + payable_bill_voids (1) + 1 index (CR #68) = 6 execute calls
-        assert mock_cursor.execute.call_count == 6
+        # payable_reconciliations (1) + 2 indexes
+        # + payable_reconciliation_items (1) + 1 index (CR #69)
+        # + payable_item_custom_rates (1)
+        # + payable_bill_voids (1) + 1 index (CR #68) = 8 execute calls
+        assert mock_cursor.execute.call_count == 8
         mock_conn.commit.assert_called_once()
 
         # Spot-check that every target table and key column appears in the executed SQL.
@@ -32,11 +34,13 @@ class TestInitDatabase:
             call.args[0] if call.args else '' for call in mock_cursor.execute.call_args_list
         )
         assert 'payable_reconciliations' in executed_sql
+        assert 'payable_reconciliation_items' in executed_sql
         assert 'payable_item_custom_rates' in executed_sql
         assert 'payable_bill_voids' in executed_sql
         assert 'custom_release_rate' in executed_sql
         assert 'idx_payable_recon_bill' in executed_sql
         assert 'idx_payable_recon_payment' in executed_sql
+        assert 'idx_payable_reco_items_upc' in executed_sql
         assert 'idx_payable_bill_voids_bill_sid' in executed_sql
 
     @patch('app.modules.account_payable.service.get_postgres_connection')

@@ -183,6 +183,7 @@ class TestGetPendingPayments:
         assert by_sid['9003']['match_source'] == 'ref_sale_sid'
         assert by_sid['9003']['allocations'] == [{
             'bill_sid': '5001', 'doc_no': 'D-5001', 'amount_applied': 300_000,
+            'items': None,  # CR #69: proportional default — no priority rows for this fixture
         }]
         assert by_sid['9003']['is_overdue'] is False
 
@@ -194,6 +195,7 @@ class TestGetPendingPayments:
         assert by_sid['9004']['match_source'] == 'fifo'
         assert by_sid['9004']['allocations'] == [{
             'bill_sid': '5002', 'doc_no': 'D-5002', 'amount_applied': 100_000,
+            'items': None,
         }]
         assert by_sid['9004']['is_overdue'] is False
 
