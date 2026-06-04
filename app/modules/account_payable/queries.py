@@ -225,6 +225,31 @@ class AccountPayableQueries:
                  d.NOTES_LOSTDOC, d.REF_SALE_SID, d.invc_post_date
     """
 
+    # Postgres DDL — bill voids (CR #68). History-preserving write-off log:
+    # the operator records that a portion of a bill's remaining balance has
+    # been forgiven (gift / VIP discount / negotiated settlement). The
+    # voided amount NEVER enters `amount_applied` so commission release
+    # (CR #66) correctly excludes it via the existing paid-ratio math.
+    #
+    # Bill SIDs are stringified Oracle 18-digit values — VARCHAR(40) matches
+    # `payable_reconciliations` / `payable_bill_rates`. `voided_by` stores
+    # the user's email (resolved at write time) so reads don't need to
+    # join `users`. v1: no UPDATE / DELETE — voids are terminal.
+    CREATE_BILL_VOIDS_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_bill_voids (
+            void_id     BIGSERIAL    PRIMARY KEY,
+            bill_sid    VARCHAR(40)  NOT NULL,
+            amount      BIGINT       NOT NULL CHECK (amount > 0),
+            reason      TEXT,
+            voided_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            voided_by   VARCHAR(255) NOT NULL
+        )
+    """
+    CREATE_BILL_VOIDS_BILL_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_payable_bill_voids_bill_sid
+            ON payable_bill_voids(bill_sid)
+    """
+
     # Postgres DDL — per-item user-set release-rate overrides.
     # Effective rate per item = custom_release_rate ?? auto_release_rate ?? 0
     # where auto_release_rate comes from commission's `payable_bill_rates`.

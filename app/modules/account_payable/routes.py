@@ -115,6 +115,18 @@ def _current_user_sid() -> int:
     return getattr(g, 'user_sid', None)
 
 
+def _current_user_identifier() -> str:
+    """Display identifier for write-side audit fields (CR #68 `voided_by`).
+    Prefers email; falls back to SID-as-string, then 'unknown'."""
+    email = getattr(g, 'email', None)
+    if email:
+        return str(email)
+    sid = getattr(g, 'sid', None)
+    if sid is not None:
+        return f'sid:{sid}'
+    return 'unknown'
+
+
 @account_payable_bp.route('/reconcile', methods=['POST'])
 @manager_required
 def reconcile():
@@ -151,6 +163,32 @@ def unmatch_payment(payment_doc_sid: str):
     cases cannot be unmatched directly; reconcile manually to override).
     """
     result = _service.unmatch(str(payment_doc_sid))
+    if result.get('success'):
+        return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
+    return jsonify(result), 400
+
+
+@account_payable_bp.route('/bills/<bill_sid>/void', methods=['POST'])
+@manager_required
+def void_bill_remaining(bill_sid: str):
+    """CR #68: write off part (or all) of a bill's remaining balance.
+
+    Request: { amount: int, reason?: string }
+    - `amount` required, > 0, <= bill.remaining_unpaid
+    - `reason` optional (nullable)
+
+    Returns 200 with `{ bill: BillDetail, void_id: str }`.
+    Errors: 400 invalid amount; 404 bill not in active AP ledger.
+    """
+    body = request.get_json(silent=True) or {}
+    result = _service.void_remaining(
+        bill_sid=str(bill_sid),
+        amount=body.get('amount'),
+        reason=body.get('reason'),
+        voided_by=_current_user_identifier(),
+    )
     if result.get('success'):
         return jsonify(result), 200
     if result.get('not_found'):
