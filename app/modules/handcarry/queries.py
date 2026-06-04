@@ -11,9 +11,13 @@ from Oracle (CR #64), so `list_items` calls all four queries per request:
                               status=4). Same source Oracle uses for
                               non-hand-carry inventory.
   - ORACLE_LIFETIME_ADJ_IN    per UPC: sum of direct stock-in adjustments
-                              (ADJ_TYPE=1, status=4). Unioned with
-                              ORACLE_LIFETIME_RECEIVED at the service layer
-                              for the full "ever received" count (CR #65).
+                              (CR #65, refined v0.3.2). Reads qty from the
+                              store-level child adjustment row
+                              (adj_type=0, creating_doc_type=8, status=4),
+                              where `adj_item.adj_value` carries the qty.
+                              Unioned with ORACLE_LIFETIME_RECEIVED at the
+                              service layer for the full "ever received"
+                              count.
 
 All queries accept a comma-separated bind-safe UPC list via the
 `{upcs}` placeholder. The caller is responsible for validating that
@@ -84,22 +88,37 @@ class HandCarryQueries:
         GROUP BY TO_CHAR(i.upc)
     """
 
-    # Lifetime adjustment-in qty per UPC (CR #65). Hand-carry jewelry
-    # often enters inventory via direct stock adjustment (ADJ_TYPE=1)
-    # rather than a voucher receipt — these wouldn't show up in
-    # ORACLE_LIFETIME_RECEIVED above. Union both sources at the service
-    # layer to get the full "ever received" count.
+    # Lifetime adjustment-in qty per UPC (CR #65, refined v0.3.2).
+    #
+    # Hand-carry items frequently enter inventory via a direct stock
+    # adjustment (PrismWeb "ADJUSTMENT" document) rather than a voucher
+    # receipt. Each such doc has TWO `rps.adjustment` rows we care about:
+    #
+    #   - MASTER row     (adj_type=1, creating_doc_type=7, store_sid=NULL):
+    #                    its `adj_item.adj_value` holds the **monetary**
+    #                    value of the adjustment (millions of VND).
+    #   - STORE-CHILD    (adj_type=0, creating_doc_type=8, store_sid=<X>):
+    #                    its `adj_item.adj_value` holds the **qty** (1-3
+    #                    units typical for hand-carry jewelry).
+    #
+    # `rps.adj_qty.qty` is empty for these — Oracle records the qty as
+    # `adj_value` on the store-child line, not in the per-bin qty table.
+    # We sum the store-child `adj_value` to get the true received qty.
+    #
+    # The original CR #65 query joined `rps.adj_qty` to the master row;
+    # all 63 problem UPCs flagged in the audit had zero adj_qty rows and
+    # were missed. This v0.3.2 query recovers every one of them.
     ORACLE_LIFETIME_ADJ_IN = """
         SELECT
-            TO_CHAR(i.upc) AS upc,
-            SUM(aq.qty)    AS quantity_adjusted_in
+            TO_CHAR(i.upc)    AS upc,
+            SUM(ai.adj_value) AS quantity_adjusted_in
         FROM rps.adj_item ai
         JOIN rps.adjustment a    ON a.sid = ai.adj_sid
-                                 AND a.adj_type = 1
+                                 AND a.adj_type = 0
+                                 AND a.creating_doc_type = 8
                                  AND a.status = 4
-        JOIN rps.adj_qty aq      ON aq.adj_item_sid = ai.sid
         JOIN rps.invn_sbs_item i ON i.sid = ai.item_sid
-        WHERE aq.qty > 0
+        WHERE ai.adj_value > 0
           AND TO_CHAR(i.upc) IN ({upcs})
         GROUP BY TO_CHAR(i.upc)
     """

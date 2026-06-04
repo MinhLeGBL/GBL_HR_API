@@ -3,6 +3,52 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.3.2] — 2026-06-04
+
+### Fixed — adjustment-in query was reading qty from the wrong row
+
+After v0.3.1 shipped, an audit reconciling the 63 sentinel-floored UPCs
+against finance's `list upc can check.xlsx` (one row per UPC with the
+ADJUSTMENT doc number) revealed that **every flagged UPC does have a
+real adjustment record in Oracle** — v0.3.1's query was just reading
+qty from a column that's empty for these items.
+
+#### Root cause
+
+Each PrismWeb stock-in adjustment writes TWO `rps.adjustment` rows:
+
+- **Master** (`adj_type=1, creating_doc_type=7, store_sid=NULL`) — its
+  child `adj_item.adj_value` holds the **monetary value** of the
+  adjustment (millions of VND).
+- **Store-child** (`adj_type=0, creating_doc_type=8, store_sid=<X>`) —
+  its child `adj_item.adj_value` holds the **qty** (1-3 units typical
+  for hand-carry jewelry).
+
+`rps.adj_qty.qty` is empty for the 63 problem UPCs — Oracle records
+their qty as `adj_value` on the store-child line, not in the per-bin
+qty table. v0.3.1's query joined `rps.adj_qty` to the master row and
+came up empty.
+
+#### Fix
+
+`ORACLE_LIFETIME_ADJ_IN` now sums `ai.adj_value` on the store-child
+adjustment (`adj_type=0, creating_doc_type=8, status=4`). No service
+or test changes — same return shape per UPC.
+
+#### Live verify
+- **Sentinel-floor fires drop from 63 → 0**: every UPC the audit
+  flagged is recovered with the correct qty.
+- 0 UPCs end up with `quantity_imported > 5× quantity_sold` (no
+  over-counting).
+- Total adj-in source coverage: 155 active UPCs (was 188 — the old
+  query covered ~33 cycle-count adjustments the new query misses,
+  but those items have enough voucher coverage that the sentinel
+  never fires for them anyway).
+
+#### Bumped PATCH — bug fix, response shape unchanged
+The fix only changes which row the adj-in qty is read from. Same
+helper signature, same return shape per UPC, same sentinel semantics.
+
 ## [0.3.1] — 2026-06-02
 
 ### Fixed — CR #65: `quantity_imported` was missing adjustment-in inventory
