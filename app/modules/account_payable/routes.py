@@ -87,12 +87,20 @@ def get_bill_detail(bill_sid: str):
 @account_payable_bp.route('/payments', methods=['GET'])
 @token_required
 def get_pending_payments():
-    """Payments queue. Query param: ?status=unmatched|matched_pending"""
+    """Payments queue. Query param: ?status=unmatched|matched_partially|matched_pending|released
+
+    CR #67 extended the state model — released payments now stay in the
+    queue so finance can edit allocations after release.
+    """
     status = request.args.get('status')
-    if status and status not in ('unmatched', 'matched_pending'):
+    allowed = AccountPayableService._ALLOWED_PAYMENT_STATUSES
+    if status and status not in allowed:
         return jsonify({
             'success': False,
-            'error': f"status must be 'unmatched' or 'matched_pending' (got {status!r})",
+            'error': (
+                f"status must be one of {', '.join(repr(s) for s in allowed)} "
+                f"(got {status!r})"
+            ),
         }), 400
     result = _service.get_pending_payments(status=status)
     return jsonify(result), 200 if result.get('success') else 500
