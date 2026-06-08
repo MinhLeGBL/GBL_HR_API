@@ -1053,9 +1053,14 @@ class AccountPayableService:
                 'amount':                  amt,
                 'is_commission_releasing': is_releasing,
             })
-            # Totals sum POSITIVE money-in legs by category. Negative
-            # Charge legs naturally drop out via `amt <= 0`.
-            if amt <= 0:
+            # Totals sum POSITIVE money-in legs by category. `Charge` is
+            # excluded explicitly (not classed as cash_card OR gift_cert
+            # — it's an AR-side leg, neither customer payment method nor
+            # discount). The check covers payment-doc Charge legs (always
+            # negative — already filtered by `amt <= 0`) AND sale-doc
+            # Charge legs (positive — would otherwise fall into gift_cert
+            # since `is_releasing=False` for Charge).
+            if amt <= 0 or (name or '') == 'Charge':
                 continue
             if is_releasing:
                 cash_card += amt

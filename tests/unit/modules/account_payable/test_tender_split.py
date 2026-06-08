@@ -81,6 +81,24 @@ class TestSummarizeTenderBreakdown:
         assert releasing == 100_000
         assert gift == 0
 
+    def test_positive_charge_leg_excluded_from_both_totals(self):
+        """Sale docs have POSITIVE Charge legs (customer-takes-on-debt).
+        Even though the function is currently called only for payment docs
+        (where Charge is negative), the totals must NOT classify a
+        positive Charge as gift_cert just because Charge carries
+        is_commission_releasing=False. Charge is its own AR-side leg —
+        neither cash_card nor gift_cert."""
+        raw = [
+            {'tender_sid': 'T1', 'tender_name': 'Cash',   'amount':  100_000},
+            # Sale-doc shape: customer also took on 50k of AR debt.
+            {'tender_sid': 'T2', 'tender_name': 'Charge', 'amount':   50_000},
+        ]
+        legs, releasing, gift = AccountPayableService._summarize_tender_breakdown(raw)
+        assert releasing == 100_000
+        assert gift == 0, 'positive Charge must not bleed into gift_cert'
+        # Both legs still appear in the wire breakdown — totals just skip Charge.
+        assert len(legs) == 2
+
     def test_multiple_gc_legs_sum_to_gift_total(self):
         """Edge case: two GC legs combined on the same doc → summed in total."""
         raw = [
