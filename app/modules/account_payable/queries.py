@@ -116,6 +116,16 @@ class AccountPayableQueries:
     #
     # Ordering: by customer + invc_post_date + doc_no so the per-customer
     # ledger replay can run in a single pass.
+    #
+    # CR #71: `SUM(t.amount)` + `GROUP BY` collapses split-tender docs into
+    # ONE event per `doc_sid`. Real-world payments routinely have multiple
+    # `Charge` tender rows (e.g. payment doc 1088: -190M from MC + -42.5M
+    # from Gift Certificate, summing to -232.5M). Without aggregation, the
+    # replay sees these as TWO separate payment events with the same
+    # `doc_sid`, and Pass 2 (manual) re-applies the operator's
+    # `payable_reconciliations` row once per event — double-counting the
+    # allocation. Match the aggregation pattern used by
+    # `ORACLE_PAYMENT_BY_SID` and `ORACLE_CHARGE_PAYMENTS`.
     ORACLE_ALL_CHARGE_LEDGER = """
         WITH active_customers AS (
             SELECT DISTINCT d.bt_cuid AS customer_sid
@@ -132,7 +142,7 @@ class AccountPayableQueries:
             d.sid                                    AS doc_sid,
             d.doc_no                                 AS doc_no,
             d.store_code                             AS doc_store_code,
-            t.amount                                 AS charge_amount,
+            SUM(t.amount)                            AS charge_amount,
             d.invc_post_date                         AS post_date,
             d.ref_sale_sid                           AS ref_sale_sid,
             d.sale_total_amt                         AS sale_total_amt,
@@ -145,6 +155,9 @@ class AccountPayableQueries:
         JOIN active_customers ac ON ac.customer_sid = d.bt_cuid
         LEFT JOIN rps.customer c ON c.sid = d.bt_cuid
         WHERE d.status = 4
+        GROUP BY d.bt_cuid, TRIM(c.first_name), d.sid, d.doc_no,
+                 d.store_code, d.invc_post_date, d.ref_sale_sid,
+                 d.sale_total_amt, d.notes_lostdoc
         ORDER BY d.bt_cuid, d.invc_post_date, d.doc_no
     """
 

@@ -354,3 +354,91 @@ class TestGetAllBillsSmoke:
     def test_connection_failure_returns_empty(self, mock_get_conn):
         mock_get_conn.return_value = None
         assert AccountPayableRepository().get_all_bills() == {}
+
+
+# ----------------------------------------------------------------------
+# CR #71 — split-tender aggregation (regression guard)
+# ----------------------------------------------------------------------
+
+class TestSplitTenderAggregation:
+    """CR #71: payments with multiple `Charge` tender rows (e.g. split
+    MC + Gift Certificate) must collapse into ONE event per doc_sid in
+    the ledger query. Without aggregation, the replay treats each row
+    as a separate payment event with the same doc_sid, and Pass 2
+    (manual) re-applies the operator's reconciliation row once per
+    event — silently doubling the allocation against the bill.
+
+    These tests guard against re-introducing the bug by:
+      1. Asserting the query string contains `SUM(t.amount)` + `GROUP BY`.
+      2. Exercising `get_all_bills` end-to-end with a mocked multi-row
+         Oracle response — the input shape the bug produces when the
+         aggregation is missing.
+    """
+
+    def test_query_aggregates_charge_tender_per_doc(self):
+        """The SQL must SUM tender amounts per doc_sid and GROUP BY all
+        the doc-level columns. Lightweight static check that catches a
+        future refactor stripping the aggregation."""
+        from app.modules.account_payable.queries import AccountPayableQueries
+        sql = AccountPayableQueries.ORACLE_ALL_CHARGE_LEDGER
+        assert 'SUM(t.amount)' in sql
+        assert 'GROUP BY' in sql
+        # Spot-check that the GROUP BY includes the key doc-level columns.
+        assert 'd.sid' in sql
+        assert 'd.doc_no' in sql
+
+    @patch('app.modules.account_payable.repository.get_oracle_connection')
+    def test_get_all_bills_post_fix_treats_one_payment_per_doc(self, mock_get_conn):
+        """With the SQL fix in place, Oracle returns one row per doc_sid
+        even for split-tender payments. `get_all_bills` should treat
+        payment 1088 (charge_amount = -232.5M, aggregated from -190M +
+        -42.5M) as a single payment event — Pass 2's manual allocation
+        applies exactly once, leaving 42.5M as `remaining` on the
+        payment side and bill 501's remaining_unpaid = 42.5M.
+
+        If a regression breaks the SQL aggregation, the bug would
+        re-emerge: TWO events for the same doc_sid → manual row applied
+        twice → bill incorrectly fully_paid. This test would NOT catch
+        that case directly (the bug shape isn't simulated here), but
+        the companion query-string check above does.
+        """
+        # Bill 501 (232.5M outstanding) + payment 1088 (232.5M, no ref).
+        # SUM-aggregated SQL output: one row per doc.
+        rows = [
+            # Customer 1001 — bill 501 (positive Charge)
+            ('1001', 'Le Thi Van', 'B-501', 'D-501', 'RWR', 232_500_000,
+             None, 232_500_000, None, '2024-04-30', '2024-04'),
+            # Customer 1001 — payment 1088 (aggregated Charge magnitude)
+            ('1001', 'Le Thi Van', 'P-1088', 'D-1088', 'RWR', -232_500_000,
+             None, 0, None, '2024-10-31', '2024-10'),
+        ]
+        columns = [
+            'customer_sid', 'customer_name', 'doc_sid', 'doc_no', 'doc_store_code',
+            'charge_amount', 'ref_sale_sid', 'sale_total_amt', 'notes_lostdoc',
+            'post_date_str', 'post_month',
+        ]
+        cur = MagicMock()
+        cur.fetchall.return_value = rows
+        cur.description = [(c.upper(),) for c in columns]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cur
+        mock_get_conn.return_value = conn
+
+        # Operator's manual reconciliation: 190M of payment 1088 → bill 501.
+        manual = {'P-1088': [{'bill_sid': 'B-501', 'amount_applied': 190_000_000}]}
+        result = AccountPayableRepository().get_all_bills(
+            manual_allocations_by_payment=manual,
+        )
+
+        bill = result['B-501']
+        # Bill is partially paid: 190M against 232.5M → 42.5M remaining.
+        assert bill['total_paid'] == 190_000_000
+        assert bill['remaining_unpaid'] == 42_500_000
+        assert bill['status'] == 'partial'
+        # EXACTLY ONE chrono entry from the manual reconciliation (pre-fix:
+        # two entries — 190M + 42.5M).
+        chrono = bill['payments']
+        assert len(chrono) == 1
+        assert chrono[0]['payment_doc_sid'] == 'P-1088'
+        assert chrono[0]['amount_applied'] == 190_000_000
+        assert chrono[0]['source'] == 'manual'
