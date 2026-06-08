@@ -281,7 +281,8 @@ class TestReconcileItemsHappyPath:
         cur.fetchall.side_effect = [
             [],                    # existing parent rows
             [],                    # existing per-item rows
-            [(42, '1001')],        # SELECT id, bill_sid post-INSERT
+            # CR #72: post-INSERT SELECT now also reads tender_category.
+            [(42, '1001', 'cash_card')],
         ]
         cur.fetchone.return_value = (0,)
 
@@ -325,7 +326,8 @@ class TestReconcileItemsHappyPath:
         cur.fetchall.side_effect = [
             [],
             [],
-            [(42, '1001')],
+            # CR #72: post-INSERT SELECT now includes tender_category.
+            [(42, '1001', 'cash_card')],
         ]
         cur.fetchone.return_value = (0,)
 
@@ -366,16 +368,17 @@ class TestLoadReconciliationItemsForPayments:
     def test_groups_rows_by_payment_bill_pair_in_order(self, mock_get_conn):
         # Mock the Postgres JOIN returning rows for two (pay, bill) pairs,
         # each with multiple items in increasing order_index.
+        # CR #72: returned rows now include r.tender_category as the 3rd col.
         rows = [
-            # ('PAY1', '1001'): 3 items in priority order
-            ('PAY1', '1001', 'UPC-A', 0, 100_000),
-            ('PAY1', '1001', 'UPC-B', 1, 80_000),
-            ('PAY1', '1001', 'UPC-C', 2, 20_000),
-            # ('PAY1', '1002'): single item
-            ('PAY1', '1002', 'UPC-D', 0, 50_000),
-            # ('PAY2', '1003'): two items
-            ('PAY2', '1003', 'UPC-E', 0, 75_000),
-            ('PAY2', '1003', 'UPC-F', 1, 25_000),
+            # ('PAY1', '1001', 'cash_card'): 3 items in priority order
+            ('PAY1', '1001', 'cash_card', 'UPC-A', 0, 100_000),
+            ('PAY1', '1001', 'cash_card', 'UPC-B', 1, 80_000),
+            ('PAY1', '1001', 'cash_card', 'UPC-C', 2, 20_000),
+            # ('PAY1', '1002', 'cash_card'): single item
+            ('PAY1', '1002', 'cash_card', 'UPC-D', 0, 50_000),
+            # ('PAY2', '1003', 'cash_card'): two items
+            ('PAY2', '1003', 'cash_card', 'UPC-E', 0, 75_000),
+            ('PAY2', '1003', 'cash_card', 'UPC-F', 1, 25_000),
         ]
         cur = MagicMock()
         cur.fetchall.return_value = rows
@@ -387,22 +390,26 @@ class TestLoadReconciliationItemsForPayments:
             ['PAY1', 'PAY2']
         )
 
-        # Three distinct (payment, bill) keys.
-        assert set(out.keys()) == {('PAY1', '1001'), ('PAY1', '1002'), ('PAY2', '1003')}
+        # Three distinct (payment, bill, tender_category) keys.
+        assert set(out.keys()) == {
+            ('PAY1', '1001', 'cash_card'),
+            ('PAY1', '1002', 'cash_card'),
+            ('PAY2', '1003', 'cash_card'),
+        }
 
-        # ('PAY1', '1001') items preserve order_index 0 → 2.
-        first = out[('PAY1', '1001')]
+        # ('PAY1', '1001', 'cash_card') items preserve order_index 0 → 2.
+        first = out[('PAY1', '1001', 'cash_card')]
         assert [r['upc'] for r in first] == ['UPC-A', 'UPC-B', 'UPC-C']
         assert [r['order_index'] for r in first] == [0, 1, 2]
         assert [r['amount_assigned'] for r in first] == [100_000, 80_000, 20_000]
 
         # Single-item case.
-        assert out[('PAY1', '1002')] == [
+        assert out[('PAY1', '1002', 'cash_card')] == [
             {'upc': 'UPC-D', 'order_index': 0, 'amount_assigned': 50_000},
         ]
 
         # Cross-payment grouping works.
-        assert [r['upc'] for r in out[('PAY2', '1003')]] == ['UPC-E', 'UPC-F']
+        assert [r['upc'] for r in out[('PAY2', '1003', 'cash_card')]] == ['UPC-E', 'UPC-F']
 
     @patch('app.modules.account_payable.service.get_postgres_connection')
     def test_empty_input_returns_empty_dict_no_query(self, mock_get_conn):
@@ -503,7 +510,7 @@ class TestComputeReleasedForMonthPriority:
         svc = self._build_service(
             bills, items,
             per_item_rows={
-                ('PAY1', bill_sid): [{
+                ('PAY1', bill_sid, 'cash_card'): [{
                     'upc': 'DRESS-A1', 'order_index': 0,
                     'amount_assigned': 200_000_000,
                 }],
@@ -540,7 +547,7 @@ class TestComputeReleasedForMonthPriority:
         svc = self._build_service(
             bills, items,
             per_item_rows={
-                ('PAY1', bill_sid): [{
+                ('PAY1', bill_sid, 'cash_card'): [{
                     'upc': 'DRESS-A1', 'order_index': 0,
                     'amount_assigned': 100_000_000,
                 }],
@@ -641,7 +648,8 @@ class TestReconcileMixedMode:
             cur.fetchall.side_effect = [
                 [],                       # existing parent rows
                 [],                       # existing per-item rows
-                [(42, '1001'), (43, '1002')],   # SELECT id, bill_sid post-INSERT
+                # CR #72: post-INSERT SELECT now also reads tender_category.
+            [(42, '1001', 'cash_card'), (43, '1002', 'cash_card')],
             ]
             cur.fetchone.return_value = (0,)
             cur.rowcount = 0
