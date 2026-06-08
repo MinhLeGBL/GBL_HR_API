@@ -81,6 +81,7 @@ class AccountPayableService:
         Tables:
         - `payable_reconciliations` — manual payment→bill linkages.
         - `payable_reconciliation_items` — per-item priority assignment (CR #69).
+        - `payable_payment_remakes` — remake/corrective payment tags (CR #70).
         - `payable_item_custom_rates` — user-set per-item release-rate overrides.
         - `payable_bill_voids` — bill write-offs (CR #68; goodwill / discount).
 
@@ -100,6 +101,8 @@ class AccountPayableService:
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_PAYMENT_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATION_ITEMS_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATION_ITEMS_UPC_INDEX)
+                cur.execute(AccountPayableQueries.CREATE_PAYMENT_REMAKES_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_PAYMENT_REMAKES_ACTIVE_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_CUSTOM_RATES_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_BILL_VOIDS_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_BILL_VOIDS_BILL_INDEX)
@@ -266,6 +269,13 @@ class AccountPayableService:
         per_item_assignments = self._load_reconciliation_items_for_payments(
             scope_payment_sids
         )
+        # CR #70: defensive — payments tagged as remake should have NO
+        # reconciliation rows by construction (tag_remake DELETEs them),
+        # so they wouldn't appear in scope_payment_sids in normal flow.
+        # We still skip them explicitly here in case a race condition
+        # (mid-tag reconcile) leaves stray rows behind.
+        active_remakes = self._load_active_remakes()
+        remake_pay_sids = set(active_remakes.keys())
 
         def _factor_for_item(
             bill_sid: str, item_upc: str,
@@ -279,6 +289,10 @@ class AccountPayableService:
             total = 0.0
             for p in payments_in_month_by_bill.get(bill_sid, []):
                 pay_sid = p['payment_doc_sid']
+                # CR #70: skip remake-tagged payments — they're explicitly
+                # excluded from release per spec.
+                if pay_sid in remake_pay_sids:
+                    continue
                 per_item_rows = per_item_assignments.get((pay_sid, bill_sid))
                 if per_item_rows is None:
                     # Proportional payment — every item shares the same factor.
@@ -749,6 +763,46 @@ class AccountPayableService:
         return out
 
     # ------------------------------------------------------------------
+    # CR #70 — remake / corrective payment tag
+    # ------------------------------------------------------------------
+
+    def _load_active_remakes(self) -> Dict[str, Dict[str, Any]]:
+        """CR #70: map `payment_doc_sid` → {tagged_at, tagged_by} for every
+        payment currently tagged as a remake (active row in
+        `payable_payment_remakes` where `untagged_at IS NULL`).
+
+        Used by `_build_pending_payment_rows` to override the computed
+        status to `'remake'` and surface the audit fields on the
+        PendingPayment row. Empty dict on connection failure — payments
+        cleanly fall back to their computed status.
+        """
+        conn = get_postgres_connection()
+        if conn is None:
+            return {}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT payment_doc_sid,
+                           TO_CHAR(tagged_at, 'YYYY-MM-DD') AS tagged_at_str,
+                           tagged_by
+                    FROM payable_payment_remakes
+                    WHERE untagged_at IS NULL
+                ''')
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f'[WARN] AP _load_active_remakes failed: {e}')
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return {
+            r[0]: {'tagged_at': r[1], 'tagged_by': r[2]}
+            for r in rows
+        }
+
+    # ------------------------------------------------------------------
     # CR #69 — per-item allocation (proportional vs priority)
     # ------------------------------------------------------------------
 
@@ -896,9 +950,13 @@ class AccountPayableService:
     _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1}
 
     # CR #67 state model — uniform across queue + reconcile responses.
-    # `is_overdue` continues to gate ONLY on (unmatched AND past_month).
+    # CR #70 adds `'remake'` — applied as an OVERRIDE in
+    # `_build_pending_payment_rows` (not via `_payment_status_for` since
+    # remake state lives in `payable_payment_remakes`, not in the
+    # payment/applied math). `is_overdue` continues to gate ONLY on
+    # `(unmatched AND past_month)` — remake is never overdue.
     _ALLOWED_PAYMENT_STATUSES = (
-        'unmatched', 'matched_partially', 'matched_pending', 'released',
+        'unmatched', 'matched_partially', 'matched_pending', 'released', 'remake',
     )
 
     @staticmethod
@@ -1006,6 +1064,8 @@ class AccountPayableService:
         per_item_for_pay_bill = self._load_reconciliation_items_for_payments(
             [p['payment_doc_sid'] for p in payments_meta]
         )
+        # CR #70: active remake tags override the computed status.
+        active_remakes = self._load_active_remakes()
 
         current_month = _current_month_str(today)
         out: List[Dict[str, Any]] = []
@@ -1014,22 +1074,38 @@ class AccountPayableService:
             allocs = payment_allocations.get(p['payment_doc_sid'], [])
             applied = sum(a['amount_applied'] for a in allocs)
 
-            payment_status, is_overdue = self._payment_status_for(
-                amount=p['amount'], applied=applied,
-                pay_month=pay_month, current_month=current_month,
-            )
+            remake_info = active_remakes.get(p['payment_doc_sid'])
+            if remake_info is not None:
+                # CR #70: remake override — payment is excluded from queue
+                # action ("settled"); allocations dropped from display;
+                # is_overdue cleared; surface tagged_at + tagged_by.
+                payment_status = 'remake'
+                is_overdue = False
+                allocs_for_display: List[Dict[str, Any]] = []
+                match_source = None
+                remake_tagged_at = remake_info['tagged_at']
+                remake_tagged_by = remake_info['tagged_by']
+            else:
+                payment_status, is_overdue = self._payment_status_for(
+                    amount=p['amount'], applied=applied,
+                    pay_month=pay_month, current_month=current_month,
+                )
+                allocs_for_display = allocs
+                match_source = None  # filled below if non-empty
+                remake_tagged_at = None
+                remake_tagged_by = None
 
             if status_filter and status_filter != payment_status:
                 continue
 
-            if allocs:
+            if allocs_for_display:
                 # Highest-priority source across the allocations wins.
                 match_source = min(
-                    (a['source'] for a in allocs),
+                    (a['source'] for a in allocs_for_display),
                     key=lambda s: self._MATCH_SOURCE_PRIORITY.get(s, 99),
                 )
                 allocations_out = []
-                for a in allocs:
+                for a in allocs_for_display:
                     # CR #69: surface stored priority UPCs, in order_index
                     # sequence; null when the allocation is proportional.
                     item_rows = per_item_for_pay_bill.get(
@@ -1045,26 +1121,28 @@ class AccountPayableService:
                         'items':          items_field,
                     })
             else:
-                match_source = None
                 allocations_out = []
 
             out.append({
-                'payment_doc_sid': p['payment_doc_sid'],
-                'payment_doc_no':  p['payment_doc_no'],
-                'payment_date':    p['payment_date'],
-                'doc_store_code':  p['doc_store_code'],
-                'customer_sid':    p['customer_sid'],
-                'customer_name':   p['customer_name'],
-                'amount':          p['amount'],
-                'notes_lostdoc':   p['notes_lostdoc'],
-                'status':          payment_status,
-                'match_source':    match_source,
-                'is_overdue':      is_overdue,
-                'allocations':     allocations_out,
-                'suggested_bills': (
+                'payment_doc_sid':  p['payment_doc_sid'],
+                'payment_doc_no':   p['payment_doc_no'],
+                'payment_date':     p['payment_date'],
+                'doc_store_code':   p['doc_store_code'],
+                'customer_sid':     p['customer_sid'],
+                'customer_name':    p['customer_name'],
+                'amount':           p['amount'],
+                'notes_lostdoc':    p['notes_lostdoc'],
+                'status':           payment_status,
+                'match_source':     match_source,
+                'is_overdue':       is_overdue,
+                'allocations':      allocations_out,
+                'suggested_bills':  (
                     open_bills_by_customer.get(p['customer_sid'], [])
-                    if p['customer_sid'] else []
+                    if (p['customer_sid'] and payment_status != 'remake') else []
                 ),
+                # CR #70: audit fields. Both null when status ≠ 'remake'.
+                'remake_tagged_at': remake_tagged_at,
+                'remake_tagged_by': remake_tagged_by,
             })
         out.sort(key=lambda r: r['payment_date'], reverse=True)
         return out
@@ -1701,6 +1779,165 @@ class AccountPayableService:
                 'void_id': str(void_id),
             },
         }
+
+    # ------------------------------------------------------------------
+    # CR #70 — tag / untag remake (corrective payment)
+    # ------------------------------------------------------------------
+
+    def tag_remake(
+        self, payment_doc_sid: str, tagged_by: str,
+    ) -> Dict[str, Any]:
+        """CR #70: tag an unmatched / matched_partially payment as a
+        remake (corrective doc — no real outstanding bill behind it).
+
+        Validations:
+        - `payment_doc_sid` is a digit string.
+        - Payment exists in the active Charge window (else 404).
+        - Current status is `unmatched` or `matched_partially`; reject
+          `matched_pending` / `released` (operator must unmatch first).
+        - No allocation source is `ref_sale_sid` — Oracle-auto-linked
+          payments must be fixed at the source bill in Oracle.
+        - If already tagged → 200 no-op (idempotent per spec).
+        - `tagged_by` is non-empty (typically user email from g.email).
+
+        Side effects (when not a no-op):
+        - DELETE any rows in `payable_reconciliations` for this payment
+          (per spec: "drops any existing allocations"). CASCADE FK drops
+          the per-item rows automatically.
+        - INSERT a new active row into `payable_payment_remakes`.
+
+        Returns ServiceResult<PendingPayment> with the updated state
+        (status='remake', allocations=[], remake_tagged_at + _by populated).
+        """
+        if not str(payment_doc_sid).isdigit():
+            return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
+        if not isinstance(tagged_by, str) or not tagged_by.strip():
+            return {'success': False, 'error': 'tagged_by must be a non-empty string'}
+
+        # Quick existence check via the queue's projection — gives us both
+        # the existence guarantee and the computed status in one call.
+        existing = self._pending_payment_for(str(payment_doc_sid))
+        if existing is None:
+            return {
+                'success': False,
+                'error': f'Payment {payment_doc_sid} not found in active Charge ledger',
+                'not_found': True,
+            }
+
+        current_status = existing['status']
+        # Idempotent: already tagged → return current state.
+        if current_status == 'remake':
+            return {'success': True, 'data': existing}
+
+        # Reject if the payment is bound to a real bill linkage.
+        if current_status in ('matched_pending', 'released'):
+            return {
+                'success': False,
+                'error': (
+                    f'Payment {payment_doc_sid} is in state {current_status!r}; '
+                    'unmatch first before tagging as remake'
+                ),
+            }
+        if existing.get('match_source') == 'ref_sale_sid':
+            return {
+                'success': False,
+                'error': (
+                    f'Payment {payment_doc_sid} is auto-linked via '
+                    'REF_SALE_SID; remake tag must be made at the source '
+                    'bill in Oracle'
+                ),
+            }
+
+        # Write: drop any manual reconciliations + INSERT remake row.
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'DELETE FROM payable_reconciliations WHERE payment_doc_sid = %s',
+                    (str(payment_doc_sid),),
+                )
+                cur.execute('''
+                    INSERT INTO payable_payment_remakes
+                        (payment_doc_sid, tagged_by)
+                    VALUES (%s, %s)
+                ''', (str(payment_doc_sid), tagged_by))
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'tag-remake failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # Re-project the payment so the response reflects the post-tag
+        # state (status='remake', allocations=[], audit fields set).
+        updated = self._pending_payment_for(str(payment_doc_sid))
+        return {'success': True, 'data': updated}
+
+    def untag_remake(
+        self, payment_doc_sid: str, untagged_by: str,
+    ) -> Dict[str, Any]:
+        """CR #70: reverse a remake tag — the payment returns to the
+        unmatched queue (with `is_overdue` recomputed from its date).
+
+        Validations:
+        - `payment_doc_sid` is a digit string.
+        - Payment is currently tagged as remake (else 400).
+        - `untagged_by` is non-empty.
+
+        Side effect: UPDATE the active remake row, setting `untagged_at`
+        + `untagged_by`. Keeps a history row for finance audit.
+        """
+        if not str(payment_doc_sid).isdigit():
+            return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
+        if not isinstance(untagged_by, str) or not untagged_by.strip():
+            return {'success': False, 'error': 'untagged_by must be a non-empty string'}
+
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                # UPDATE the active row (untagged_at IS NULL). If no
+                # active row exists, the rowcount tells us this payment
+                # isn't tagged → reject.
+                cur.execute('''
+                    UPDATE payable_payment_remakes
+                    SET untagged_at = NOW(), untagged_by = %s
+                    WHERE payment_doc_sid = %s
+                      AND untagged_at IS NULL
+                ''', (untagged_by, str(payment_doc_sid)))
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return {
+                        'success': False,
+                        'error': (
+                            f'Payment {payment_doc_sid} is not currently '
+                            'tagged as remake'
+                        ),
+                    }
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'untag-remake failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        updated = self._pending_payment_for(str(payment_doc_sid))
+        return {'success': True, 'data': updated}
 
     def set_item_custom_rate(
         self,

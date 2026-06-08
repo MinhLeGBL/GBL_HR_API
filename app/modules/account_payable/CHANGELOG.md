@@ -3,6 +3,132 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.4.0] — 2026-06-08
+
+### Added — CR #70: remake / corrective payment tag
+
+#### Motivation
+
+Cashier-issued corrective payment docs ("remake" to fix an employee
+mistake on the original sale) have no real outstanding bill behind
+them — the original bill has been settled / voided / replaced. Today
+these payments sit forever in the unmatched queue: the operator can't
+reconcile (no bill to point at) and can't unmatch (already unmatched).
+They distort the queue's `Unmatched` count and push the operator
+toward false-positive reconciles against unrelated bills.
+
+CR #70 adds a manual **Tag as remake** operator action: the payment
+moves to a new `remake` state, any prior allocations are dropped, and
+the payment is excluded from commission release. Reversible via
+**Untag remake**.
+
+#### Schema
+
+History-preserving table — each tag inserts a new row; each untag
+UPDATEs the active row to set `untagged_at`. Active tag = latest row
+with `untagged_at IS NULL`.
+
+```sql
+CREATE TABLE payable_payment_remakes (
+    id              BIGSERIAL    PRIMARY KEY,
+    payment_doc_sid VARCHAR(40)  NOT NULL,
+    tagged_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    tagged_by       VARCHAR(255) NOT NULL,
+    untagged_at     TIMESTAMPTZ  NULL,
+    untagged_by     VARCHAR(255) NULL
+);
+CREATE INDEX idx_payable_payment_remakes_active
+    ON payable_payment_remakes(payment_doc_sid)
+    WHERE untagged_at IS NULL;
+```
+
+The partial index speeds up the common active-tag lookup; full table
+scans only happen for audit queries.
+
+#### Endpoints — new
+
+**`POST /payments/:payment_doc_sid/tag-remake`** (manager)
+- 200 with updated `PendingPayment` (idempotent: re-tag returns current state)
+- 400 if `match_source == 'ref_sale_sid'` (Oracle-auto-linked — fix at source)
+- 400 if status is `matched_pending` or `released` (unmatch first)
+- 404 if payment not in active Charge ledger
+- Side effect: `DELETE FROM payable_reconciliations WHERE payment_doc_sid = X`
+  (per spec: "drops any existing allocations"). The CR #69 CASCADE FK
+  drops per-item rows automatically.
+
+**`POST /payments/:payment_doc_sid/untag-remake`** (manager)
+- 200 with updated `PendingPayment` (status returns to `unmatched`,
+  `is_overdue` recomputed from payment date)
+- 400 if payment is not currently tagged as remake
+- Side effect: UPDATE active row, set `untagged_at` + `untagged_by`.
+
+#### State model
+
+`PaymentStatus` adds `'remake'`:
+
+```
+unmatched | matched_partially | matched_pending | released | remake
+```
+
+`PendingPayment` gains two nullable audit fields:
+- `remake_tagged_at: string | null` — ISO YYYY-MM-DD when tagged
+- `remake_tagged_by: string | null` — user email / display name
+
+Both null when status ≠ `'remake'`. The remake override is applied at
+the queue projection layer (`_build_pending_payment_rows`) by checking
+`_load_active_remakes()` per request — the underlying status math
+(`_payment_status_for`) is unchanged.
+
+When `remake` override fires: `is_overdue = false`, `allocations = []`,
+`match_source = null`, `suggested_bills = []` (the payment is "settled"
+from the queue's perspective).
+
+#### Queue filter
+
+`?status=remake` joins the existing four-value enum. Omitting `status`
+returns all five states.
+
+#### Commission release exclusion
+
+`compute_released_for_month` (CR #66) reads `payable_reconciliations`
+to drive release math. Remake payments have no rows there by
+construction (tag_remake DELETEs them). Belt-and-suspenders: the
+release helper now also reads `_load_active_remakes()` and explicitly
+skips payments in that set inside `_factor_for_item` — guards against
+race conditions between tag-remake and a concurrent reconcile insert.
+
+#### Tests
+- 20 new in `test_payment_remakes.py`:
+  - `TestLoadActiveRemakes` (2): query + filter, connection failure
+  - `TestTagRemakeValidation` (7): non-digit sid, empty tagged_by,
+    unknown payment, matched_pending, released, ref_sale_sid, already
+    tagged (idempotent no-op)
+  - `TestTagRemakeHappyPath` (2): DELETE + INSERT path for
+    matched_partially; INSERT-only path for unmatched
+  - `TestUntagRemake` (4): validation + not-tagged 400 + active row UPDATE
+  - `TestQueueRemakeOverride` (3): allocations dropped + audit fields,
+    null fields on non-remake, status-filter works for `'remake'`
+  - `TestReleaseSkipsRemake` (2): baseline + defensive skip
+- 1 existing init_database call_count bumped (was 8, now 10).
+- 149 → 169 AP tests; 736 across the full suite.
+
+#### Open questions — backend responses
+1. **Audit history**: separate history table per recommendation.
+   `payable_payment_remakes` rows are append-only; untag UPDATEs the
+   row in place (sets `untagged_at`), preserving the original
+   `tagged_at` / `tagged_by` for audit. Each re-tag inserts a new row.
+2. **Permission**: `@manager_required` (admin + manager). Matches
+   reconcile / void / unmatch.
+3. **Auto-tag heuristic**: out of scope per spec.
+4. **Untag → reconcile new bill**: no special handling — existing
+   untag → reconcile flow covers it.
+
+#### Bumped MINOR
+Additive — new endpoints, new optional fields on PendingPayment, new
+status value. Existing callers that don't know about remake see
+`status` they recognize (untagged payments fall through to the
+4-state model) and ignore the new nullable fields.
+
 ## [2.3.0] — 2026-06-04
 
 ### Added — CR #69: per-item allocation (proportional vs priority)
