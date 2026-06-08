@@ -170,6 +170,48 @@ def unmatch_payment(payment_doc_sid: str):
     return jsonify(result), 400
 
 
+@account_payable_bp.route('/payments/<payment_doc_sid>/tag-remake', methods=['POST'])
+@manager_required
+def tag_payment_remake(payment_doc_sid: str):
+    """CR #70: tag a corrective payment as remake.
+
+    Drops any existing allocations and excludes the payment from
+    commission release. Returns 200 with the updated PendingPayment.
+
+    Errors:
+      400 — current status is matched_pending/released (unmatch first)
+      400 — match_source is ref_sale_sid (fix at source in Oracle)
+      404 — payment not in active Charge ledger
+    """
+    result = _service.tag_remake(
+        payment_doc_sid=str(payment_doc_sid),
+        tagged_by=_current_user_identifier(),
+    )
+    if result.get('success'):
+        return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
+    return jsonify(result), 400
+
+
+@account_payable_bp.route('/payments/<payment_doc_sid>/untag-remake', methods=['POST'])
+@manager_required
+def untag_payment_remake(payment_doc_sid: str):
+    """CR #70: reverse a remake tag — payment returns to the unmatched
+    queue. Returns 200 with the updated PendingPayment.
+
+    Errors:
+      400 — payment is not currently tagged as remake
+    """
+    result = _service.untag_remake(
+        payment_doc_sid=str(payment_doc_sid),
+        untagged_by=_current_user_identifier(),
+    )
+    if result.get('success'):
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
 @account_payable_bp.route('/bills/<bill_sid>/void', methods=['POST'])
 @manager_required
 def void_bill_remaining(bill_sid: str):

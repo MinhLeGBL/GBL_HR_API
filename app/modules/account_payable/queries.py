@@ -45,6 +45,30 @@ class AccountPayableQueries:
             ON payable_reconciliations(payment_doc_sid)
     """
 
+    # CR #70 — `payable_payment_remakes` history table. Each tag inserts a
+    # new row with `untagged_at NULL`; untag UPDATEs the active row to set
+    # `untagged_at` so the tag's history is preserved for finance audit.
+    #
+    # Active tag for a payment = the most-recent row where
+    # `untagged_at IS NULL`. The partial index speeds up active-tag lookups
+    # (the common read path); full table scans only happen for audit
+    # queries that want the full history.
+    CREATE_PAYMENT_REMAKES_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_payment_remakes (
+            id              BIGSERIAL    PRIMARY KEY,
+            payment_doc_sid VARCHAR(40)  NOT NULL,
+            tagged_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            tagged_by       VARCHAR(255) NOT NULL,
+            untagged_at     TIMESTAMPTZ  NULL,
+            untagged_by     VARCHAR(255) NULL
+        )
+    """
+    CREATE_PAYMENT_REMAKES_ACTIVE_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_payable_payment_remakes_active
+            ON payable_payment_remakes(payment_doc_sid)
+            WHERE untagged_at IS NULL
+    """
+
     # CR #69 — per-item allocation rows. Each reconciliation may have zero
     # rows (proportional mode — split paid amount across bill items by
     # revenue weight) or one+ rows (priority mode — assign to specific
