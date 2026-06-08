@@ -224,6 +224,8 @@ class AccountPayableRepository:
                 })
 
         # Pass 1: REF_SALE_SID. Targeted payments win even if not chronologically first.
+        # CR #72: REF_SALE_SID auto-matches are always cash_card — Retail
+        # Pro only sets REF on real-money settlements, never on GC redemptions.
         for p in payments:
             if not p['ref'] or p['ref'] not in bills:
                 continue
@@ -239,6 +241,7 @@ class AccountPayableRepository:
                 'payment_date':    p['post_date_str'],
                 'amount_applied':  int(consumed),
                 'source':          'ref_sale_sid',
+                'tender_category': 'cash_card',
             })
 
         # Pass 2 (CR #62): manual `payable_reconciliations` rows. The ONLY
@@ -246,6 +249,11 @@ class AccountPayableRepository:
         # cross-customer mismatches (manual row's bill_sid not in this
         # customer's bills) are silently skipped — the row will fire in
         # that customer's replay instead.
+        #
+        # CR #72: each manual row carries `tender_category`. Both
+        # cash_card and gift_certificate rows reduce the bill's remaining
+        # (a GC redemption clears outstanding the same as a cash payment);
+        # commission release filters the GC slice downstream.
         for p in payments:
             if p['remaining'] <= 0:
                 continue
@@ -271,6 +279,7 @@ class AccountPayableRepository:
                     'payment_date':    p['post_date_str'],
                     'amount_applied':  int(consumed),
                     'source':          'manual',
+                    'tender_category': row.get('tender_category') or 'cash_card',
                 })
 
         # Sort each bill's payment chronology by date — Pass 1 (ref) and
@@ -433,3 +442,61 @@ class AccountPayableRepository:
         )
         meta['amount'] = int(meta['amount'] or 0)
         return meta
+
+    # ------------------------------------------------------------------
+    # CR #72 — tender breakdown per payment doc
+    # ------------------------------------------------------------------
+    def get_tender_breakdowns(
+        self, payment_doc_sids: List[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Return {payment_doc_sid: [TenderLeg]} for the given payment docs.
+
+        Each TenderLeg dict has: tender_sid (str), tender_name (str),
+        amount (signed int — positive = money-in, negative = AR-reduction
+        Charge leg). Empty dict on connection failure.
+
+        SIDs in `payment_doc_sids` are stringified and validated as numeric
+        — they're bound as :s0, :s1, ... so no user input is concatenated
+        into the SQL.
+        """
+        if not payment_doc_sids:
+            return {}
+        for s in payment_doc_sids:
+            if not str(s).isdigit():
+                raise ValueError(
+                    f'payment_doc_sids must be numeric strings; got {s!r}'
+                )
+
+        binds = {f's{i}': str(s) for i, s in enumerate(payment_doc_sids)}
+        bind_list = ', '.join(f':{k}' for k in binds.keys())
+        sql = self.queries.ORACLE_TENDER_BREAKDOWN_BY_SIDS.format(
+            bind_list=bind_list,
+        )
+
+        conn = get_oracle_connection()
+        if not conn:
+            return {}
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, binds)
+                rows = cursor.fetchall()
+                columns = [d[0].lower() for d in cursor.description]
+        except Exception as e:
+            print(f"ERROR querying AP tender breakdown: {e}")
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            row = dict(zip(columns, r))
+            doc_sid = str(row['payment_doc_sid'])
+            out.setdefault(doc_sid, []).append({
+                'tender_sid':  str(row['tender_sid']),
+                'tender_name': row['tender_name'],
+                'amount':      int(row['amount'] or 0),
+            })
+        return out

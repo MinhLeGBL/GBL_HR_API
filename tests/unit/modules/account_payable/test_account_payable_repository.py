@@ -57,6 +57,8 @@ class TestReplayChronology:
             'payment_date':    '2026-04-10',
             'amount_applied':  1_000_000,
             'source':          'ref_sale_sid',
+            # CR #72: REF_SALE_SID auto-matches are always cash_card.
+            'tender_category': 'cash_card',
         }
 
     def test_partial_ref_payment_leaves_remaining(self):

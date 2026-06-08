@@ -99,6 +99,14 @@ class AccountPayableService:
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_BILL_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_PAYMENT_INDEX)
+                # CR #72 — migrate pre-existing tables: add tender_category
+                # column (defaults to 'cash_card' for legacy rows) and swap
+                # the (payment, bill) UNIQUE for the new (payment, bill,
+                # tender_category) UNIQUE so the same bill can be targeted
+                # from both cash_card and gift_certificate panels.
+                cur.execute(AccountPayableQueries.ADD_RECONCILIATIONS_TENDER_CATEGORY_COLUMN)
+                cur.execute(AccountPayableQueries.DROP_RECONCILIATIONS_OLD_UNIQUE)
+                cur.execute(AccountPayableQueries.ADD_RECONCILIATIONS_TENDER_UNIQUE)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATION_ITEMS_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATION_ITEMS_UPC_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_PAYMENT_REMAKES_TABLE)
@@ -243,11 +251,17 @@ class AccountPayableService:
 
         # 1. Find bills with payments in the target month — track each
         #    payment separately (CR #69: per-payment per-item factors).
+        # CR #72: ONLY cash_card chronology entries release commission.
+        # Gift Certificate entries clear the bill (count toward total_paid)
+        # but contribute 0 to release — the boss-approved discount semantics.
         payments_in_month_by_bill: Dict[str, List[Dict[str, Any]]] = {}
         for bill_sid, bill in bills.items():
             for p in bill.get('payments', []):
-                if p.get('payment_date', '')[:7] == target_month_str:
-                    payments_in_month_by_bill.setdefault(bill_sid, []).append(p)
+                if p.get('payment_date', '')[:7] != target_month_str:
+                    continue
+                if (p.get('tender_category') or 'cash_card') != self._TENDER_CATEGORY_CASH_CARD:
+                    continue
+                payments_in_month_by_bill.setdefault(bill_sid, []).append(p)
 
         if not payments_in_month_by_bill:
             return {}
@@ -293,7 +307,12 @@ class AccountPayableService:
                 # excluded from release per spec.
                 if pay_sid in remake_pay_sids:
                     continue
-                per_item_rows = per_item_assignments.get((pay_sid, bill_sid))
+                # CR #72: only cash_card items count for release. The
+                # surrounding loop already filtered the chrono entries to
+                # cash_card, so this lookup is for the matching parent row.
+                per_item_rows = per_item_assignments.get(
+                    (pay_sid, bill_sid, self._TENDER_CATEGORY_CASH_CARD)
+                )
                 if per_item_rows is None:
                     # Proportional payment — every item shares the same factor.
                     if original_charge > 0:
@@ -404,6 +423,8 @@ class AccountPayableService:
         """Project a repository bill record + employee_codes into the
         wire-shape BillRow defined by the frontend types.ts."""
         # Decorate each payment chronology entry with release_status / release_month.
+        # CR #72: surface tender_category so the BillDetailDialog can show
+        # a 💵/🎁 badge per payment ref.
         payments_out: List[Dict[str, Any]] = []
         for p in bill['payments']:
             status, month = _release_status_for_payment(p['payment_date'], today)
@@ -415,6 +436,7 @@ class AccountPayableService:
                 'source':          p['source'],
                 'release_status':  status,
                 'release_month':   month,
+                'tender_category': p.get('tender_category') or 'cash_card',
             })
         return {
             'bill_sid':          bill_sid,
@@ -839,13 +861,19 @@ class AccountPayableService:
 
     def _load_reconciliation_items_for_payments(
         self, payment_doc_sids: List[str],
-    ) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    ) -> Dict[Tuple[str, str, str], List[Dict[str, Any]]]:
         """CR #69: load per-item assignment rows joined to their parent
-        reconciliation, keyed by (payment_doc_sid, bill_sid).
+        reconciliation, keyed by (payment_doc_sid, bill_sid, tender_category).
 
         Each value is a list of `{upc, order_index, amount_assigned}` in
         order_index sequence. Empty dict on connection failure — callers
         treat missing keys as proportional mode (existing behaviour).
+
+        CR #72: keyed by tender_category as well — a split-tender payment
+        can have separate priority lists for its cash_card and
+        gift_certificate slices of the same bill. Commission release in
+        `compute_released_for_month` consults only the cash_card slice;
+        the queue display surfaces each allocation row's own items list.
         """
         if not payment_doc_sids:
             return {}
@@ -855,13 +883,14 @@ class AccountPayableService:
         try:
             with conn.cursor() as cur:
                 cur.execute('''
-                    SELECT r.payment_doc_sid, r.bill_sid,
+                    SELECT r.payment_doc_sid, r.bill_sid, r.tender_category,
                            i.upc, i.order_index, i.amount_assigned
                     FROM payable_reconciliations r
                     JOIN payable_reconciliation_items i
                          ON i.reconciliation_id = r.id
                     WHERE r.payment_doc_sid = ANY(%s)
-                    ORDER BY r.payment_doc_sid, r.bill_sid, i.order_index
+                    ORDER BY r.payment_doc_sid, r.bill_sid,
+                             r.tender_category, i.order_index
                 ''', (list(payment_doc_sids),))
                 rows = cur.fetchall()
         except Exception as e:
@@ -872,13 +901,13 @@ class AccountPayableService:
                 conn.close()
             except Exception:
                 pass
-        out: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        out: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
         for r in rows:
-            key = (r[0], r[1])
+            key = (r[0], r[1], r[2] or 'cash_card')
             out.setdefault(key, []).append({
-                'upc':             r[2],
-                'order_index':     int(r[3]),
-                'amount_assigned': int(r[4]),
+                'upc':             r[3],
+                'order_index':     int(r[4]),
+                'amount_assigned': int(r[5]),
             })
         return out
 
@@ -889,6 +918,11 @@ class AccountPayableService:
 
         This output is also the canonical input to `get_all_bills` so the
         bill view and queue endpoint see identical replay state.
+
+        CR #72: each row carries `tender_category` ('cash_card' or
+        'gift_certificate'). The replay treats both categories as
+        bill-clearing (both reduce `remaining_unpaid`); only commission
+        release filters out 'gift_certificate' downstream.
         """
         conn = get_postgres_connection()
         if conn is None:
@@ -896,7 +930,8 @@ class AccountPayableService:
         try:
             with conn.cursor() as cur:
                 cur.execute('''
-                    SELECT payment_doc_sid, bill_sid, amount_applied
+                    SELECT payment_doc_sid, bill_sid, amount_applied,
+                           tender_category
                     FROM payable_reconciliations
                 ''')
                 rows = cur.fetchall()
@@ -911,8 +946,9 @@ class AccountPayableService:
         out: Dict[str, List[Dict[str, Any]]] = {}
         for r in rows:
             out.setdefault(r[0], []).append({
-                'bill_sid':       r[1],
-                'amount_applied': int(r[2]),
+                'bill_sid':        r[1],
+                'amount_applied':  int(r[2]),
+                'tender_category': r[3] or 'cash_card',
             })
         return out
 
@@ -923,21 +959,25 @@ class AccountPayableService:
         """Transpose bills' `payments_chrono` into a per-payment view.
 
         Each output entry maps `payment_doc_sid` → list of dicts:
-            {bill_sid, doc_no, amount_applied, source, payment_date}
+            {bill_sid, doc_no, amount_applied, source, payment_date,
+             tender_category}
         sorted by `payment_date` (stable across the input bills).
 
         Used by `get_pending_payments` so its status logic consumes the
-        SAME replay output the bill view shows (CR #62).
+        SAME replay output the bill view shows (CR #62). `tender_category`
+        is plumbed through for CR #72 — a single (payment, bill) can have
+        BOTH cash_card and gift_certificate entries on a split-tender doc.
         """
         out: Dict[str, List[Dict[str, Any]]] = {}
         for bill_sid, b in bills.items():
             for entry in b.get('payments', []):
                 out.setdefault(entry['payment_doc_sid'], []).append({
-                    'bill_sid':       bill_sid,
-                    'doc_no':         b['doc_no'],
-                    'amount_applied': entry['amount_applied'],
-                    'source':         entry['source'],
-                    'payment_date':   entry['payment_date'],
+                    'bill_sid':        bill_sid,
+                    'doc_no':          b['doc_no'],
+                    'amount_applied':  entry['amount_applied'],
+                    'source':          entry['source'],
+                    'payment_date':    entry['payment_date'],
+                    'tender_category': entry.get('tender_category') or 'cash_card',
                 })
         for entries in out.values():
             entries.sort(key=lambda e: (e['payment_date'], e['bill_sid']))
@@ -948,6 +988,72 @@ class AccountPayableService:
     # highest-priority source. ref_sale_sid > manual. v2.0.0 removed FIFO
     # so only these two sources exist.
     _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1}
+
+    # ------------------------------------------------------------------
+    # CR #72 — tender-category classification
+    # ------------------------------------------------------------------
+    # Backend-side allowlist of tender names that DON'T release commission.
+    # The frontend (per CR #72 Q1) defers to backend on this taxonomy.
+    # v1 covers only Gift Certificate. Other non-releasing tenders
+    # (deposits, store credit) are out-of-scope per the CR spec.
+    _NON_RELEASING_TENDER_NAMES = frozenset({'Gift Certificate'})
+
+    _TENDER_CATEGORY_CASH_CARD = 'cash_card'
+    _TENDER_CATEGORY_GIFT_CERT = 'gift_certificate'
+    _ALLOWED_TENDER_CATEGORIES = (
+        _TENDER_CATEGORY_CASH_CARD, _TENDER_CATEGORY_GIFT_CERT,
+    )
+
+    @classmethod
+    def _is_commission_releasing_tender(cls, tender_name: Optional[str]) -> bool:
+        """A money-in tender leg releases commission unless it's in the
+        non-releasing allowlist. `Charge` (the AR-reduction offset) is never
+        passed to this — it's filtered before the call."""
+        return (tender_name or '') not in cls._NON_RELEASING_TENDER_NAMES
+
+    @classmethod
+    def _summarize_tender_breakdown(
+        cls, legs: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        """CR #72: project raw `rps.tender` rows into the wire shape and
+        compute per-category amount totals.
+
+        Returns `(tender_breakdown, commission_releasing_amount,
+        gift_certificate_amount)`:
+        - `tender_breakdown`: full leg list, each enriched with
+          `is_commission_releasing`. Includes BOTH positive money-in
+          legs AND the offsetting negative Charge legs (frontend wants
+          the raw rps.tender view per the spec).
+        - `commission_releasing_amount`: sum of POSITIVE legs whose
+          tender_name is releasing (MC/Cash/etc., excludes Charge).
+        - `gift_certificate_amount`: sum of POSITIVE GC legs.
+
+        Together these two totals equal `payment.amount` (the sum of
+        negative Charge magnitudes) — that's the Retail Pro tender-balance
+        invariant. Empty input → ([], 0, 0).
+        """
+        wire_legs: List[Dict[str, Any]] = []
+        cash_card = 0
+        gift_cert = 0
+        for leg in legs:
+            name = leg.get('tender_name')
+            amt = int(leg.get('amount') or 0)
+            is_releasing = cls._is_commission_releasing_tender(name)
+            wire_legs.append({
+                'tender_sid':              leg.get('tender_sid'),
+                'tender_name':             name,
+                'amount':                  amt,
+                'is_commission_releasing': is_releasing,
+            })
+            # Sum positive money-in legs by category. Negative Charge legs
+            # and zero-amount rows are ignored for the totals.
+            if amt <= 0 or (name or '') == 'Charge':
+                continue
+            if is_releasing:
+                cash_card += amt
+            else:
+                gift_cert += amt
+        return wire_legs, cash_card, gift_cert
 
     # CR #67 state model — uniform across queue + reconcile responses.
     # CR #70 adds `'remake'` — applied as an OVERRIDE in
@@ -1066,6 +1172,11 @@ class AccountPayableService:
         )
         # CR #70: active remake tags override the computed status.
         active_remakes = self._load_active_remakes()
+        # CR #72: per-payment tender breakdown (MC / Cash / Gift Certificate
+        # legs). One Oracle round-trip for all in-scope payments.
+        tender_legs_by_payment = self.repository.get_tender_breakdowns(
+            [p['payment_doc_sid'] for p in payments_meta]
+        )
 
         current_month = _current_month_str(today)
         out: List[Dict[str, Any]] = []
@@ -1105,44 +1216,57 @@ class AccountPayableService:
                     key=lambda s: self._MATCH_SOURCE_PRIORITY.get(s, 99),
                 )
                 allocations_out = []
+                # CR #69 priority items keyed by (payment, bill, tender_cat) —
+                # split-tender allocations on the same bill may carry their
+                # own per-tender items lists (or both None for proportional).
                 for a in allocs_for_display:
-                    # CR #69: surface stored priority UPCs, in order_index
-                    # sequence; null when the allocation is proportional.
+                    alloc_tender_cat = a.get('tender_category') or 'cash_card'
                     item_rows = per_item_for_pay_bill.get(
-                        (p['payment_doc_sid'], a['bill_sid'])
+                        (p['payment_doc_sid'], a['bill_sid'], alloc_tender_cat)
                     )
                     items_field: Optional[List[str]] = (
                         [row['upc'] for row in item_rows] if item_rows else None
                     )
                     allocations_out.append({
-                        'bill_sid':       a['bill_sid'],
-                        'doc_no':         a['doc_no'],
-                        'amount_applied': a['amount_applied'],
-                        'items':          items_field,
+                        'bill_sid':        a['bill_sid'],
+                        'doc_no':          a['doc_no'],
+                        'amount_applied':  a['amount_applied'],
+                        'items':           items_field,
+                        'tender_category': alloc_tender_cat,
                     })
             else:
                 allocations_out = []
 
+            # CR #72: tender breakdown + per-category amounts.
+            raw_legs = tender_legs_by_payment.get(p['payment_doc_sid'], [])
+            tender_breakdown, releasing_amt, gift_amt = (
+                self._summarize_tender_breakdown(raw_legs)
+            )
+
             out.append({
-                'payment_doc_sid':  p['payment_doc_sid'],
-                'payment_doc_no':   p['payment_doc_no'],
-                'payment_date':     p['payment_date'],
-                'doc_store_code':   p['doc_store_code'],
-                'customer_sid':     p['customer_sid'],
-                'customer_name':    p['customer_name'],
-                'amount':           p['amount'],
-                'notes_lostdoc':    p['notes_lostdoc'],
-                'status':           payment_status,
-                'match_source':     match_source,
-                'is_overdue':       is_overdue,
-                'allocations':      allocations_out,
+                'payment_doc_sid':              p['payment_doc_sid'],
+                'payment_doc_no':               p['payment_doc_no'],
+                'payment_date':                 p['payment_date'],
+                'doc_store_code':               p['doc_store_code'],
+                'customer_sid':                 p['customer_sid'],
+                'customer_name':                p['customer_name'],
+                'amount':                       p['amount'],
+                'notes_lostdoc':                p['notes_lostdoc'],
+                'status':                       payment_status,
+                'match_source':                 match_source,
+                'is_overdue':                   is_overdue,
+                'allocations':                  allocations_out,
                 'suggested_bills':  (
                     open_bills_by_customer.get(p['customer_sid'], [])
                     if (p['customer_sid'] and payment_status != 'remake') else []
                 ),
                 # CR #70: audit fields. Both null when status ≠ 'remake'.
-                'remake_tagged_at': remake_tagged_at,
-                'remake_tagged_by': remake_tagged_by,
+                'remake_tagged_at':             remake_tagged_at,
+                'remake_tagged_by':             remake_tagged_by,
+                # CR #72: split-tender breakdown for the dual-panel UX.
+                'tender_breakdown':             tender_breakdown,
+                'commission_releasing_amount':  releasing_amt,
+                'gift_certificate_amount':      gift_amt,
             })
         out.sort(key=lambda r: r['payment_date'], reverse=True)
         return out
@@ -1249,14 +1373,17 @@ class AccountPayableService:
         - payment: full PendingPayment shape post-write (CR #67); items[]
           per allocation reflects what was just written (CR #69).
         """
-        # ── 1. Validate inputs (CR #69 adds items[] per allocation) ──
+        # ── 1. Validate inputs (CR #69 items[]; CR #72 tender_category) ──
         if not str(payment_doc_sid).isdigit():
             return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
         if not isinstance(allocations, list):
             return {'success': False, 'error': 'allocations must be a list'}
-        # Each entry: (bill_sid_str, amount_int, items_list_or_None).
+        # Each entry: (bill_sid_str, amount_int, items_list_or_None, tender_category).
         # `items_list_or_None` is None for proportional, list[str] (≥1 UPC) for priority.
-        validated: List[Tuple[str, int, Optional[List[str]]]] = []
+        # `tender_category` is 'cash_card' or 'gift_certificate' (defaults
+        # to 'cash_card' when the frontend omits the field — pre-CR #72
+        # clients still work).
+        validated: List[Tuple[str, int, Optional[List[str]], str]] = []
         for a in allocations:
             b_sid = str(a.get('bill_sid') or '')
             if not b_sid.isdigit():
@@ -1284,8 +1411,19 @@ class AccountPayableService:
                 items_list = list(raw_items)   # preserve order — that's the priority sequence
             else:
                 return {'success': False, 'error': 'allocation.items must be a list or null'}
-            validated.append((b_sid, amt, items_list))
-        total_alloc = sum(amt for _, amt, _ in validated)
+            # CR #72: tender_category — required for GC, defaults to
+            # cash_card otherwise (back-compat for pre-1.7.0 frontend).
+            tender_cat = a.get('tender_category') or self._TENDER_CATEGORY_CASH_CARD
+            if tender_cat not in self._ALLOWED_TENDER_CATEGORIES:
+                return {
+                    'success': False,
+                    'error': (
+                        f'allocation.tender_category must be one of '
+                        f'{self._ALLOWED_TENDER_CATEGORIES}; got {tender_cat!r}'
+                    ),
+                }
+            validated.append((b_sid, amt, items_list, tender_cat))
+        total_alloc = sum(amt for _, amt, _, _ in validated)
 
         # ── 2. Fetch payment from Oracle ──────────────────────────────
         payment = self.repository.get_payment_meta(payment_doc_sid)
@@ -1304,9 +1442,45 @@ class AccountPayableService:
                 ),
             }
 
+        # ── 2b. CR #72: per-category caps from the payment's tender breakdown ──
+        # Skip the Oracle round-trip if every allocation is cash_card AND
+        # the total already fits payment.amount (the legacy invariant) —
+        # cash_card-only requests don't need the breakdown.
+        if any(cat == self._TENDER_CATEGORY_GIFT_CERT for _, _, _, cat in validated):
+            tender_legs = self.repository.get_tender_breakdowns([payment_doc_sid]).get(
+                payment_doc_sid, [],
+            )
+            _legs, releasing_cap, gift_cap = self._summarize_tender_breakdown(tender_legs)
+            cash_total = sum(
+                amt for _, amt, _, cat in validated
+                if cat == self._TENDER_CATEGORY_CASH_CARD
+            )
+            gift_total = sum(
+                amt for _, amt, _, cat in validated
+                if cat == self._TENDER_CATEGORY_GIFT_CERT
+            )
+            if cash_total > releasing_cap:
+                return {
+                    'success': False,
+                    'error': (
+                        f'cash/card allocations sum ({cash_total:,}) must not '
+                        f'exceed the payment\'s commission-releasing amount '
+                        f'({releasing_cap:,})'
+                    ),
+                }
+            if gift_total > gift_cap:
+                return {
+                    'success': False,
+                    'error': (
+                        f'gift-certificate allocations sum ({gift_total:,}) '
+                        f'must not exceed the payment\'s gift-certificate '
+                        f'amount ({gift_cap:,})'
+                    ),
+                }
+
         # ── 3. Bill lookups (single ledger replay) ────────────────────
         bills = self._load_bills()
-        for b_sid, amt, _items in validated:
+        for b_sid, amt, _items, _tc in validated:
             if b_sid not in bills:
                 return {
                     'success': False,
@@ -1316,13 +1490,13 @@ class AccountPayableService:
 
         # ── 3b. CR #69: validate priority items against the bill ──────
         # Per-bill item-revenue map for any allocation that has items[].
-        priority_bill_sids = [b for b, _, items in validated if items]
+        priority_bill_sids = [b for b, _, items, _ in validated if items]
         item_rev_by_bill: Dict[str, Dict[str, int]] = {}
         if priority_bill_sids:
             bill_item_rows = self.repository.get_bill_items(priority_bill_sids)
             for r in bill_item_rows:
                 item_rev_by_bill.setdefault(r['bill_sid'], {})[r['upc']] = int(r['revenue_with_vat'] or 0)
-            for b_sid, amt, items in validated:
+            for b_sid, amt, items, _tc in validated:
                 if not items:
                     continue
                 bill_items = item_rev_by_bill.get(b_sid, {})
@@ -1353,40 +1527,42 @@ class AccountPayableService:
         try:
             with conn.cursor() as cur:
                 # Existing parent linkages for THIS payment.
+                # CR #72: a single (payment, bill) can now have TWO rows
+                # (one per tender_category). Idempotency compares the full
+                # (bill, amount, items, tender_category) shape.
                 cur.execute('''
-                    SELECT bill_sid, amount_applied
+                    SELECT bill_sid, amount_applied, tender_category
                     FROM payable_reconciliations
                     WHERE payment_doc_sid = %s
-                    ORDER BY bill_sid
+                    ORDER BY bill_sid, tender_category
                 ''', (str(payment_doc_sid),))
-                existing = [(r[0], int(r[1])) for r in cur.fetchall()]
+                existing = [
+                    (r[0], int(r[1]), r[2] or 'cash_card') for r in cur.fetchall()
+                ]
 
-                # CR #69: existing per-item rows for the idempotency check.
+                # CR #69: existing per-item rows. Keyed by (bill, tender_category)
+                # since CR #72 splits the parent into two rows per (pay, bill).
                 cur.execute('''
-                    SELECT r.bill_sid, i.upc, i.order_index
+                    SELECT r.bill_sid, r.tender_category, i.upc, i.order_index
                     FROM payable_reconciliations r
                     JOIN payable_reconciliation_items i ON i.reconciliation_id = r.id
                     WHERE r.payment_doc_sid = %s
-                    ORDER BY r.bill_sid, i.order_index
+                    ORDER BY r.bill_sid, r.tender_category, i.order_index
                 ''', (str(payment_doc_sid),))
-                existing_items_by_bill: Dict[str, List[str]] = {}
+                existing_items_by_key: Dict[Tuple[str, str], List[str]] = {}
                 for r in cur.fetchall():
-                    existing_items_by_bill.setdefault(r[0], []).append(r[1])
-
-                def _full_shape(allocs_with_items, items_by_bill):
-                    return sorted(
-                        (b, amt, tuple(items if items else items_by_bill.get(b, [])))
-                        for b, amt, items in allocs_with_items
-                    )
+                    existing_items_by_key.setdefault(
+                        (r[0], r[1] or 'cash_card'), [],
+                    ).append(r[2])
 
                 # Recast existing rows into the same shape for comparison.
                 existing_full = sorted(
-                    (b, amt, tuple(existing_items_by_bill.get(b, [])))
-                    for b, amt in existing
+                    (b, amt, tuple(existing_items_by_key.get((b, tc), [])), tc)
+                    for b, amt, tc in existing
                 )
                 requested_full = sorted(
-                    (b, amt, tuple(items or []))
-                    for b, amt, items in validated
+                    (b, amt, tuple(items or []), tc)
+                    for b, amt, items, tc in validated
                 )
                 if existing_full == requested_full:
                     conn.commit()
@@ -1394,11 +1570,18 @@ class AccountPayableService:
                         payment=payment, allocations=validated, bills=bills,
                     )
 
-                # Cumulative cap (CR #68 void-aware).
+                # Cumulative cap (CR #68 void-aware). Cap applies to TOTAL
+                # allocations against the bill regardless of category — a
+                # bill's cap is a property of the bill, not the tender mix.
                 own_by_bill: Dict[str, int] = {}
-                for b_sid, amt in existing:
+                for b_sid, amt, _tc in existing:
                     own_by_bill[b_sid] = own_by_bill.get(b_sid, 0) + amt
-                for b_sid, new_amt, _items in validated:
+                # Pre-sum the requested allocations per bill to enforce the
+                # cap across BOTH categories on a split-tender row.
+                new_by_bill: Dict[str, int] = {}
+                for b_sid, new_amt, _items, _tc in validated:
+                    new_by_bill[b_sid] = new_by_bill.get(b_sid, 0) + new_amt
+                for b_sid, bill_new_total in new_by_bill.items():
                     cur.execute('''
                         SELECT COALESCE(SUM(amount_applied), 0)
                         FROM payable_reconciliations
@@ -1407,9 +1590,9 @@ class AccountPayableService:
                     other_total = int(cur.fetchone()[0]) - own_by_bill.get(b_sid, 0)
                     bill = bills[b_sid]
                     cap = int(bill['original_charge']) - int(bill.get('total_voided', 0))
-                    if other_total + new_amt > cap:
+                    if other_total + bill_new_total > cap:
                         conn.rollback()
-                        overflow = other_total + new_amt - cap
+                        overflow = other_total + bill_new_total - cap
                         return {
                             'success': False,
                             'error': (
@@ -1435,24 +1618,30 @@ class AccountPayableService:
                 if validated:
                     cur.executemany('''
                         INSERT INTO payable_reconciliations
-                            (payment_doc_sid, bill_sid, amount_applied, created_by)
-                        VALUES (%s, %s, %s, %s)
+                            (payment_doc_sid, bill_sid, amount_applied,
+                             tender_category, created_by)
+                        VALUES (%s, %s, %s, %s, %s)
                     ''', [
-                        (str(payment_doc_sid), b_sid, amt, created_by_user_sid)
-                        for b_sid, amt, _items in validated
+                        (str(payment_doc_sid), b_sid, amt, tc, created_by_user_sid)
+                        for b_sid, amt, _items, tc in validated
                     ])
 
                     # CR #69: write per-item rows for priority allocations.
-                    if any(items for _, _, items in validated):
+                    # CR #72: id lookup keyed by (bill, tender_category)
+                    # so the split-tender case writes items under the
+                    # correct parent row.
+                    if any(items for _, _, items, _ in validated):
                         cur.execute('''
-                            SELECT id, bill_sid
+                            SELECT id, bill_sid, tender_category
                             FROM payable_reconciliations
                             WHERE payment_doc_sid = %s
                         ''', (str(payment_doc_sid),))
-                        id_by_bill = {r[1]: r[0] for r in cur.fetchall()}
+                        id_by_key = {
+                            (r[1], r[2] or 'cash_card'): r[0] for r in cur.fetchall()
+                        }
 
                         item_rows: List[Tuple[int, str, int, int]] = []
-                        for b_sid, amt, items in validated:
+                        for b_sid, amt, items, tc in validated:
                             if not items:
                                 continue
                             assignments = self._assign_per_item(
@@ -1460,7 +1649,7 @@ class AccountPayableService:
                                 item_revenue_by_upc=item_rev_by_bill[b_sid],
                                 amount=amt,
                             )
-                            recon_id = id_by_bill[b_sid]
+                            recon_id = id_by_key[(b_sid, tc)]
                             for order_index, (upc, assigned) in enumerate(assignments):
                                 item_rows.append(
                                     (recon_id, upc, order_index, assigned)
@@ -1490,7 +1679,7 @@ class AccountPayableService:
 
     def _reconcile_response(
         self, *, payment: Dict[str, Any],
-        allocations: List[Tuple[str, int, Optional[List[str]]]],
+        allocations: List[Tuple[str, int, Optional[List[str]], str]],
         bills: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Build the ReconcileResult (CR #67; CR #69 priority-aware):
@@ -1507,7 +1696,7 @@ class AccountPayableService:
         today = _today()
         pay_month = payment['payment_date'][:7]
         cur_month = _current_month_str(today)
-        total_alloc = sum(amt for _, amt, _ in allocations)
+        total_alloc = sum(amt for _, amt, _, _ in allocations)
         outcome, _is_overdue = self._payment_status_for(
             amount=payment['amount'], applied=total_alloc,
             pay_month=pay_month, current_month=cur_month,
@@ -1519,15 +1708,23 @@ class AccountPayableService:
         }
 
         # Release totals: computed for past-month allocations with money on them.
+        # CR #72: only cash_card allocations release commission. GC
+        # allocations clear the bill but contribute 0 to the toast.
+        cash_card_allocs = [
+            (b, amt, items)
+            for b, amt, items, tc in allocations
+            if tc == self._TENDER_CATEGORY_CASH_CARD
+        ]
+        cash_card_total = sum(amt for _, amt, _ in cash_card_allocs)
         is_past = pay_month < cur_month
-        if is_past and total_alloc > 0:
-            alloc_bill_sids = [b_sid for b_sid, _, _ in allocations]
+        if is_past and cash_card_total > 0:
+            alloc_bill_sids = [b_sid for b_sid, _, _ in cash_card_allocs]
             items = self.repository.get_bill_items(alloc_bill_sids)
             auto = self._load_auto_rates(alloc_bill_sids)
             custom = self._load_custom_rates(alloc_bill_sids)
             by_emp: Dict[str, int] = {}
             total_release = 0
-            for b_sid, amt, priority_items in allocations:
+            for b_sid, amt, priority_items in cash_card_allocs:
                 bill = bills[b_sid]
                 if bill['original_charge'] <= 0:
                     continue

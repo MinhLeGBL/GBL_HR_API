@@ -3,6 +3,135 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.5.0] — 2026-06-08
+
+### Added — CR #72: split-tender reconciliation (Gift Certificate allocation separate from cash/card)
+
+A Charge-payment doc in Retail Pro can carry multiple tender legs of
+different types — `MC` / `Cash` (real money) interleaved with
+`Gift Certificate` (a boss-approved discount). Per company policy, the
+GC portion clears the bill but must NOT release commission to the
+employee. Before this CR, the AP system collapsed all `Charge` legs
+into a single `payment.amount` and let the operator allocate the
+aggregate freely — there was no way to mark a slice of a payment as
+"GC-paid", so operators either left payments as `matched_partially`
+(common — see live payment 1088) or used the CR #68 void path as a
+semantically muddled workaround.
+
+#### What changed
+
+- **`PendingPayment` shape** — three additive fields:
+  - `tender_breakdown: TenderLeg[]` — full per-leg list from
+    `rps.tender` (positive money-in legs + offsetting negative `Charge`
+    legs), in original POS sequence. Each leg carries
+    `is_commission_releasing` (true for everything except
+    `Gift Certificate`).
+  - `commission_releasing_amount: number` — sum of positive money-in
+    legs whose tender is releasing (MC / Cash / etc.).
+  - `gift_certificate_amount: number` — sum of positive `Gift
+    Certificate` legs.
+  - Invariant: `commission_releasing_amount + gift_certificate_amount
+    == amount` (the existing AR-reduction total).
+
+- **`ReconcileRequest.allocations[]`** — gains optional
+  `tender_category: 'cash_card' | 'gift_certificate'` per allocation.
+  Defaults to `'cash_card'` when omitted, so pre-1.7.0 frontend clients
+  continue to work. Per-category caps enforced server-side:
+  `sum(cash_card) ≤ commission_releasing_amount` and
+  `sum(gift_certificate) ≤ gift_certificate_amount`.
+
+- **`PendingPaymentAllocation`** — adds `tender_category` so the
+  ReconcileDialog can render allocations under the correct panel
+  (💵 cash/card or 🎁 gift certificate).
+
+- **`payable_reconciliations` schema** — adds a `tender_category
+  VARCHAR(20) NOT NULL DEFAULT 'cash_card'` column. The old `(payment,
+  bill)` UNIQUE is replaced with `(payment, bill, tender_category)` so
+  the same bill can be targeted from BOTH categories on a split-tender
+  payment. Migration is fully idempotent (`ADD COLUMN IF NOT EXISTS` +
+  DROP/ADD constraint).
+
+- **`compute_released_for_month` (CR #66)** — filters `payments_chrono`
+  entries by `tender_category == 'cash_card'`. GC entries still
+  contribute to `total_paid` (the bill closes the same way) but
+  contribute 0 to commission release.
+
+- **Bill `payments_chrono`** — every entry gains `tender_category` so
+  `BillDetailDialog` can show a 💵/🎁 badge per payment ref.
+
+- **REF_SALE_SID auto-matches** are always tagged `cash_card` — Retail
+  Pro only sets REF on real-money settlements, never on GC redemptions.
+
+#### Tender taxonomy (backend allowlist)
+
+Per CR #72 Q1 (frontend defers to backend), the non-releasing tender
+allowlist for v1 is `frozenset({'Gift Certificate'})`. Every other
+tender name (MC, Cash, VISA, Bank Transfer, future names) defaults to
+releasing. Extending the list later is one constant + a test.
+
+#### Backfill (per CR #72 Q4)
+
+No migration script. Existing `payable_reconciliations` rows backfill
+to `tender_category = 'cash_card'` via the column default — they were
+always cash/card before this CR. Existing partial payments (like 1088
+today, with 42.5M of GC sitting unallocated) surface the unallocated
+GC slice in the new dialog panel on first open.
+
+#### Live verification — payment 1088 (RWR)
+
+Pre-CR-#72 state (post-CR-#71 fix):
+```
+payment.amount = 232,500,000
+allocations = [(bill 501, 190M)]
+status = matched_partially
+```
+
+After ship (frontend lands CR #72 UX):
+```
+commission_releasing_amount = 190,000,000
+gift_certificate_amount     =  42,500,000
+tender_breakdown = [MC +190M, Charge -190M, GC +42.5M, Charge -42.5M]
+```
+
+Operator opens the dialog → GC panel pre-shows 42.5M Required →
+allocates to bill 501 → bill 501 flips to `fully_paid`. Commission
+release for April 2024 stays at `190M × rate` (the GC portion releases
+0). No data migration; no manual cleanup.
+
+#### Tests
+
+26 new tests in `tests/unit/modules/account_payable/test_tender_split.py`
+covering:
+- `_summarize_tender_breakdown` — empty / cash-only / split / GC-only /
+  multi-GC fixtures
+- `_is_commission_releasing_tender` — GC excluded, MC/Cash/VISA/unknown
+  included
+- `get_tender_breakdowns` — repository shape, empty input, conn failure
+- Replay propagation — REF→cash_card, manual default cash_card, manual
+  GC, split-tender → 2 chrono entries
+- Reconcile validation — invalid category rejected, missing defaults to
+  cash_card, per-category caps (cash + GC), happy path with split
+- Reconcile response — GC-only past-month payment releases 0
+- `compute_released_for_month` — GC-only → 0, cash-only → full,
+  split-tender → cash-portion only
+- PendingPayment shape — tender_breakdown + amounts surfaced
+
+Existing tests updated where mocks needed the new column shape (init
+DDL call count 10 → 13; existing-row tuples gain `tender_category`;
+per-item lookup keys go from 2-tuple to 3-tuple).
+
+All 197 AP tests pass; full unit suite (764 tests) green.
+
+#### Files touched
+
+- `app/modules/account_payable/queries.py` — new DDL + Oracle tender query
+- `app/modules/account_payable/repository.py` — `get_tender_breakdowns`,
+  replay carries `tender_category`
+- `app/modules/account_payable/service.py` — classifier, reconcile
+  validation + persistence, `compute_released_for_month` filter,
+  PendingPayment projection
+- `app/modules/account_payable/__init__.py` — version 2.4.1 → 2.5.0
+
 ## [2.4.1] — 2026-06-08
 
 ### Fixed — CR #71: split-tender payments double-allocate against bills

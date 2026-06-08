@@ -25,15 +25,23 @@ class AccountPayableQueries:
 
     # Postgres DDL — `payable_reconciliations` linkage table.
     # Created idempotently from `init_database()`.
+    #
+    # CR #72 — `tender_category` discriminates the slice of the payment's
+    # tender legs this allocation draws from. 'cash_card' (real money in)
+    # releases commission via CR #66; 'gift_certificate' clears the bill
+    # but contributes 0 to release (boss-approved discount).
+    # The UNIQUE key includes `tender_category` so the operator can target
+    # the same bill from BOTH categories on a split-tender payment.
     CREATE_RECONCILIATIONS_TABLE = """
         CREATE TABLE IF NOT EXISTS payable_reconciliations (
             id              BIGSERIAL PRIMARY KEY,
             payment_doc_sid VARCHAR(40) NOT NULL,
             bill_sid        VARCHAR(40) NOT NULL,
             amount_applied  BIGINT NOT NULL,
+            tender_category VARCHAR(20) NOT NULL DEFAULT 'cash_card',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_by      INT REFERENCES users(sid),
-            UNIQUE (payment_doc_sid, bill_sid)
+            UNIQUE (payment_doc_sid, bill_sid, tender_category)
         )
     """
     CREATE_RECONCILIATIONS_BILL_INDEX = """
@@ -43,6 +51,34 @@ class AccountPayableQueries:
     CREATE_RECONCILIATIONS_PAYMENT_INDEX = """
         CREATE INDEX IF NOT EXISTS idx_payable_recon_payment
             ON payable_reconciliations(payment_doc_sid)
+    """
+
+    # CR #72 — migration for tables created before the column existed.
+    # Idempotent: ADD COLUMN IF NOT EXISTS + DROP/ADD constraint pair.
+    # The DROP targets the auto-generated PG name for the old 2-col UNIQUE.
+    ADD_RECONCILIATIONS_TENDER_CATEGORY_COLUMN = """
+        ALTER TABLE payable_reconciliations
+            ADD COLUMN IF NOT EXISTS tender_category
+                VARCHAR(20) NOT NULL DEFAULT 'cash_card'
+    """
+    DROP_RECONCILIATIONS_OLD_UNIQUE = """
+        ALTER TABLE payable_reconciliations
+            DROP CONSTRAINT IF EXISTS
+                payable_reconciliations_payment_doc_sid_bill_sid_key
+    """
+    ADD_RECONCILIATIONS_TENDER_UNIQUE = """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'payable_reconciliations_payment_bill_tender_key'
+            ) THEN
+                ALTER TABLE payable_reconciliations
+                    ADD CONSTRAINT payable_reconciliations_payment_bill_tender_key
+                        UNIQUE (payment_doc_sid, bill_sid, tender_category);
+            END IF;
+        END
+        $$
     """
 
     # CR #70 — `payable_payment_remakes` history table. Each tag inserts a
@@ -288,6 +324,37 @@ class AccountPayableQueries:
           AND d.SID = :payment_doc_sid
         GROUP BY d.SID, d.DOC_NO, d.STORE_CODE, d.BT_CUID, c.FIRST_NAME,
                  d.NOTES_LOSTDOC, d.REF_SALE_SID, d.invc_post_date
+    """
+
+    # ────────────────────────────────────────────────────────────────────
+    # Oracle — full tender breakdown for a list of payment doc_sids (CR #72).
+    # ────────────────────────────────────────────────────────────────────
+    # Pulls EVERY tender row on each payment doc, not just `Charge`. The
+    # AP service uses this to compute:
+    #   commission_releasing_amount = sum of positive money-in legs whose
+    #       tender_name is NOT 'Gift Certificate' (MC, Cash, VISA, etc.)
+    #   gift_certificate_amount     = sum of positive 'Gift Certificate' legs
+    #
+    # `payment.amount` (sum of negative `Charge` magnitudes) equals
+    # `commission_releasing_amount + gift_certificate_amount` by the
+    # Retail Pro tender-balancing invariant.
+    #
+    # Order by sid so the breakdown reflects the original POS leg sequence
+    # (the cashier saw MC entered first, then GC). Frontend uses this order
+    # for display.
+    #
+    # The doc_sid list is bound as :s0, :s1, ... — the repository expands
+    # the IN clause and supplies bind values, so no string concatenation
+    # of user input ever reaches the query.
+    ORACLE_TENDER_BREAKDOWN_BY_SIDS = """
+        SELECT
+            t.doc_sid        AS payment_doc_sid,
+            t.sid            AS tender_sid,
+            t.tender_name    AS tender_name,
+            t.amount         AS amount
+        FROM rps.tender t
+        WHERE t.doc_sid IN ({bind_list})
+        ORDER BY t.doc_sid, t.sid
     """
 
     # Postgres DDL — bill voids (CR #68). History-preserving write-off log:

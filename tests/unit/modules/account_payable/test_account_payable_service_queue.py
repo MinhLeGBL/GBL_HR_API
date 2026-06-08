@@ -42,13 +42,15 @@ def _bill(
 
 
 def _chrono(payment_doc_sid, amount, source, payment_date,
-            payment_doc_no=None):
+            payment_doc_no=None, tender_category='cash_card'):
     return {
         'payment_doc_sid': payment_doc_sid,
         'payment_doc_no':  payment_doc_no or f'P-{payment_doc_sid}',
         'payment_date':    payment_date,
         'amount_applied':  amount,
         'source':          source,
+        # CR #72: tender_category defaults to cash_card.
+        'tender_category': tender_category,
     }
 
 
@@ -140,6 +142,10 @@ def sample_bills():
 def mock_repo(sample_payments):
     repo = MagicMock()
     repo.get_charge_payments.return_value = sample_payments
+    # CR #72: queue projection pulls tender breakdown for every payment.
+    # Empty dict => commission_releasing_amount=0, gift_certificate_amount=0
+    # (no GC legs in the fixture data).
+    repo.get_tender_breakdowns.return_value = {}
     return repo
 
 
@@ -183,7 +189,8 @@ class TestGetPendingPayments:
         assert by_sid['9003']['match_source'] == 'ref_sale_sid'
         assert by_sid['9003']['allocations'] == [{
             'bill_sid': '5001', 'doc_no': 'D-5001', 'amount_applied': 300_000,
-            'items': None,  # CR #69: proportional default — no priority rows for this fixture
+            'items': None,                # CR #69: proportional default
+            'tender_category': 'cash_card',  # CR #72: default category
         }]
         assert by_sid['9003']['is_overdue'] is False
 
@@ -196,6 +203,7 @@ class TestGetPendingPayments:
         assert by_sid['9004']['allocations'] == [{
             'bill_sid': '5002', 'doc_no': 'D-5002', 'amount_applied': 100_000,
             'items': None,
+            'tender_category': 'cash_card',
         }]
         assert by_sid['9004']['is_overdue'] is False
 
