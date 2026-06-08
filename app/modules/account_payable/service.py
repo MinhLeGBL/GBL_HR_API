@@ -1038,16 +1038,24 @@ class AccountPayableService:
         for leg in legs:
             name = leg.get('tender_name')
             amt = int(leg.get('amount') or 0)
-            is_releasing = cls._is_commission_releasing_tender(name)
+            # `is_commission_releasing` applies to money-in tender legs only
+            # (MC / Cash / Gift Certificate / etc.). The `Charge` legs are
+            # AR-reduction offsets — not customer-paid tenders — so they
+            # carry False here. Frontend can iterate the full leg list
+            # without special-casing Charge.
+            if (name or '') == 'Charge':
+                is_releasing = False
+            else:
+                is_releasing = cls._is_commission_releasing_tender(name)
             wire_legs.append({
                 'tender_sid':              leg.get('tender_sid'),
                 'tender_name':             name,
                 'amount':                  amt,
                 'is_commission_releasing': is_releasing,
             })
-            # Sum positive money-in legs by category. Negative Charge legs
-            # and zero-amount rows are ignored for the totals.
-            if amt <= 0 or (name or '') == 'Charge':
+            # Totals sum POSITIVE money-in legs by category. Negative
+            # Charge legs naturally drop out via `amt <= 0`.
+            if amt <= 0:
                 continue
             if is_releasing:
                 cash_card += amt
