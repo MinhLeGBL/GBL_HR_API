@@ -3,7 +3,7 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
-## [0.4.0] — 2026-06-09
+## [1.0.0] — 2026-06-09
 
 ### Changed — `POST /handcarry/import` no longer requires manager role
 
