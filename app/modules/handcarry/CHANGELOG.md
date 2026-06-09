@@ -3,6 +3,19 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.4.0] — 2026-06-09
+
+### Changed — `POST /handcarry/import` no longer requires manager role
+
+The import endpoint now accepts any authenticated user (`@token_required`).
+Previously gated by `@manager_required` (admin or manager only).
+Rationale: anyone who can see the hand-carry page should be able to add
+UPCs to the flag list. Per-row `PUT` / `DELETE` remain `@manager_required`.
+
+#### Tests
+- `test_upcs_body_supported` now mocks `role='staff'` to lock in the
+  new behavior.
+
 ## [0.3.2] — 2026-06-04
 
 ### Fixed — adjustment-in query was reading qty from the wrong row

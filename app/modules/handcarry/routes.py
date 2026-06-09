@@ -40,7 +40,7 @@ def list_handcarry():
 
 
 @handcarry_bp.route('/import', methods=['POST'])
-@manager_required
+@token_required
 def import_handcarry():
     """
     Bulk import UPCs into the hand-carry flag list (CR #64).
