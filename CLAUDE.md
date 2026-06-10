@@ -184,9 +184,16 @@ GBL_HR_API/                              GBL_MASTER_FRONTEND/
 ### Branch isolation
 
 - **CR files** (`docs/cr/*`) exist on their **own feature branch only**.
-  Stripped at deploy by [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
-  alongside `tests/` and `document/`. Don't push CR files onto `staging` or
-  `deployment` via PR merges — if one leaks, revert in a follow-up.
+- **Auto-strip on push to staging** — [.github/workflows/docs-janitor.yml](.github/workflows/docs-janitor.yml)
+  removes any `docs/cr/*` files that slip onto staging via PR merges and commits
+  the cleanup automatically (`docs(janitor): strip docs/cr from staging [skip ci]`).
+- **Strip at deploy** — [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
+  removes `docs/cr/` server-side alongside `tests/` and `document/`. Belt-and-braces.
+- **Local sync helper** — after merging staging into your feature branch, run
+  [scripts/sync-from-staging.sh](scripts/sync-from-staging.sh) (or `.ps1` on
+  Windows) to drop any foreign features' `docs/cr/*` that the merge pulled in.
+  Computes feature key from the branch name (`feature/handcarry-cr-65` → `handcarry`)
+  and keeps only `docs/cr/<key>.md`.
 - **Backend's CHANGELOG.md per module** persists on every branch and into deployment.
 
 ### Feature-to-file mapping
