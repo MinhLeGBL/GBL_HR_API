@@ -222,6 +222,18 @@ shapes transparently — see `.claude/skills/checkcr/SKILL.md`.
 | ⏳ | Pending the recipient's implementation |
 | Done | Implemented and confirmed |
 
+### When to raise a CR vs ship independently
+
+Not every backend change needs a CR. Decide by whether the frontend has to do
+something:
+
+- **Frontend has to react** (new endpoint, contract change, response-shape
+  delta, deprecation) → raise an outgoing CR (see below) or wait for the
+  frontend's incoming CR and implement it.
+- **Pure backend** (refactor, internal query change, bug fix that preserves
+  the response shape, perf improvement) → no CR file. Bump the module's
+  `__version__` and add a `CHANGELOG.md` entry. Done.
+
 ### When implementing an incoming CR (frontend → backend)
 
 1. **Respond in the pending section** of the frontend's `docs/cr/<feature>.md` —
