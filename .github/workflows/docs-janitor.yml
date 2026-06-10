@@ -1,0 +1,38 @@
+name: Docs Janitor (staging)
+
+# Enforces the CR-system branch-isolation rule: CR files (docs/cr/*) are
+# branch-local and must NEVER live on staging. Whenever a feature merges into
+# staging, this strips docs/cr/ from staging. The backend's per-module
+# CHANGELOG.md files (app/modules/*/CHANGELOG.md) and the shared CLAUDE.md
+# are left untouched.
+
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: docs-janitor-staging
+  cancel-in-progress: false
+
+jobs:
+  strip-cr:
+    runs-on: ubuntu-latest
+    # Loop guard: skip the run triggered by our own janitor commit.
+    if: ${{ github.event.head_commit.author.name != 'github-actions[bot]' || !contains(github.event.head_commit.message, 'docs(janitor)') }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+      - name: Strip docs/cr from staging
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -d docs/cr ]; then
+            git rm -r --quiet docs/cr || true
+          fi
+          git add -A
+          git diff --cached --quiet || git commit -m "docs(janitor): strip docs/cr from staging [skip ci]"
+          git push origin staging
