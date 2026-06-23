@@ -349,8 +349,10 @@ class TestCalculateStoreCommissionV2:
         manager = next(e for e in result['employees'] if e['is_manager'])
         assert manager['manager_bonus'] == 750_000
 
-    def test_probation_employee_gets_equal_share_only(self, service, mock_repo):
-        """Probation employee only receives the equal share, not individual share or manager bonus."""
+    def test_probation_employee_gets_full_store_commission(self, service, mock_repo):
+        """Probation employee receives FULL store commission (individual + equal share),
+        same as everyone else. Probation only excludes PERSONAL commission (tested
+        separately in TestCalculatePersonalCommissions)."""
         all_sales_df = self._make_all_sales_df('HBT',
             store_rows=[
                 {'revenue_with_vat': 900_000, 'discount_rate': 0.0},   # FP
@@ -364,6 +366,7 @@ class TestCalculateStoreCommissionV2:
             ],
         )
 
+        # user2 (index 1) is the probation employee; index 0 is the manager.
         employees = self._make_employees(2, manager_index=0, probation_indices=[1])
 
         result = service.calculate_store_commission_v2(
@@ -377,10 +380,11 @@ class TestCalculateStoreCommissionV2:
 
         assert result['eligible'] is True
         probation_emp = next(e for e in result['employees'] if e['is_probation'])
-        # Probation employee: total = equal_share only (no individual_share, no manager_bonus)
-        assert probation_emp['total_store_commission'] == pytest.approx(probation_emp['equal_share'])
-        # Confirm individual_share is calculated but not added to total
-        assert probation_emp['individual_share'] > 0 or probation_emp['individual_share'] == 0
+        # Probation makes sales → has a positive individual share, and total includes it.
+        assert probation_emp['individual_share'] > 0
+        assert probation_emp['total_store_commission'] == pytest.approx(
+            probation_emp['individual_share'] + probation_emp['equal_share'] + probation_emp['manager_bonus']
+        )
 
     def test_seniority_affects_tier_category(self, service, mock_repo):
         """Employees with seniority >= 3 years are Senior, otherwise Junior."""
@@ -1126,6 +1130,32 @@ class TestCalculatePersonalCommissions:
 
         result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
         assert result.iloc[0]['commission_suitcase'] == 2 * 500_000  # 2 units, not 1 line
+
+    def test_probation_employee_earns_no_personal_commission(self, service, mock_repo):
+        """Probation employees are excluded from ALL personal commission (fashion,
+        jewelry, suitcase, hand-carry, ...) — they only get store commission."""
+        sales_df = self._make_sales_df([
+            # FP fashion that would normally earn at tier3 (100%+ achievement)
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT', 'ABC', 0, 'SHIRTS', 'RTW', 0.0, 2_000_000, 1_818_182],
+            # a TVL suitcase item (flat 500k) and a jewelry item — also excluded
+            [2, 'UPC002', 'BILL1', 'HBT', '2025-01-15', '10:01:00',
+             None, 'SID1', 'user1', 'HBT', 'TVL', 0, 'LUGGAGE', 'ACC', 0.0, 5_000_000, 4_545_454],
+        ])
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [{
+            'employee_code': 'EMP001', 'employee_username': 'user1',
+            'personal_target': 1_000_000, 'full_name': 'Probationer',
+            'store_code': 'HBT', 'is_probation': True,
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        emp = result.iloc[0]
+        assert emp['total'] == 0
+        assert emp['commission_fashion_fp'] == 0
+        assert emp['commission_suitcase'] == 0
 
     def test_hand_carry_commission_by_vendor(self, service, mock_repo):
         """Hand carry items earn commission based on vendor rates."""

@@ -970,6 +970,14 @@ class CommissionService:
                 results.append(self._build_empty_personal_result(employee_code, employee_name, emp_store_code))
                 continue
 
+            # Probation employees earn NO personal commission (fashion / jewelry /
+            # suitcase / hand-carry / home-decor / over-target all excluded). They
+            # still receive their full STORE commission — handled in
+            # calculate_store_commission_v2.
+            if employee_data.get('is_probation', False):
+                results.append(self._build_empty_personal_result(employee_code, employee_name, emp_store_code))
+                continue
+
             # Check if employee has username (can make sales)
             # Employees without username cannot sell items but are included for store commission share
             if not employee_username or employee_username not in employee_username_to_sid_dict:
@@ -1796,11 +1804,11 @@ class CommissionService:
                     manager_bonus = MANAGER_BONUS_70_PLUS
 
             # 4.4: Calculate Total Store Commission
-            # If employee is on probation, they only receive equal share portion
-            if emp['is_probation']:
-                total_store_commission = equal_share
-            else:
-                total_store_commission = individual_share + equal_share + manager_bonus
+            # Probation employees receive their FULL store commission (individual +
+            # equal + any manager bonus) — same as everyone else. Probation only
+            # excludes PERSONAL commission, which is handled in
+            # calculate_personal_commissions, not here.
+            total_store_commission = individual_share + equal_share + manager_bonus
 
             results.append({
                 'employee_code': emp['employee_code'],

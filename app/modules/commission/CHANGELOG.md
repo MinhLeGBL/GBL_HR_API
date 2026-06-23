@@ -3,6 +3,26 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [3.1.0] — 2026-06-23
+
+### Changed — probation employees: full store commission, no personal commission
+
+Corrected the probation rule. Previously a probation employee received **only the 30%
+equal share** of store commission and still earned personal commission. The correct rule:
+
+- **Store commission applies in full** to probation employees — individual (70%) + equal
+  (30%) share, exactly like everyone else (`calculate_store_commission_v2` no longer caps
+  probation to the equal share).
+- **Personal commission does NOT apply** to probation employees — fashion, jewelry,
+  suitcase, hand-carry, home-decor, and over-target are all excluded
+  (`calculate_personal_commissions` returns an empty result for `is_probation`).
+
+So a probation employee who sells at an eligible store receives their full store commission
+but no personal commission. Verified live against May 2026: GL304/GL305 store commission now
+matches the manual (was equal-share-only); their personal stays 0. (GL298 is a stale-flag
+case — the manual treats it as non-probation; its contract should be updated if it has
+graduated from probation.)
+
 ## [3.0.0] — 2026-06-22
 
 ### Changed — consolidate calculation to one DB-authoritative engine; fix store-pool dilution
