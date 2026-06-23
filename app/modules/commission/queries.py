@@ -275,7 +275,10 @@ class CommissionQueries:
                   di.price, 0)                                                    as revenue_with_vat,
             -- CR #20: flat 10% VAT (di.price / 1.1) instead of actual rate (di.price - di.tax_amt)
             ROUND((CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END) *
-                  di.price / 1.1, 0)                                              as revenue_before_vat
+                  di.price / 1.1, 0)                                              as revenue_before_vat,
+            -- Net units sold (returns negative). Needed for per-piece commissions
+            -- like suitcase/Travelite (500k/cái) where a line may carry qty > 1.
+            (CASE WHEN di.item_type = 2 THEN di.qty * -1 ELSE di.qty END)          as qty_sold
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON d.SID = di.DOC_SID
         LEFT JOIN EMPLOYEE emp ON di.EMPLOYEE1_SID = emp.SID

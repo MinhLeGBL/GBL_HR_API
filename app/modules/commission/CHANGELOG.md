@@ -3,6 +3,47 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [3.0.0] — 2026-06-22
+
+### Changed — consolidate calculation to one DB-authoritative engine; fix store-pool dilution
+
+**Bug.** `POST /commission/calculate` (the CR #29 frontend-payload path,
+`calculate_commissions_v2`) built each store's roster from the request body. The
+frontend assembles that body from the store-view revenue screen, which groups
+contributors by **sale location** (`doc_store_code`). A cross-store seller (home
+store ≠ sale store) therefore rode into the destination store's employee list,
+inflating `total_employee_count`. Since the pool already excludes cross-store sales
+(`store_code == X AND doc_store_code == X`), such a seller added **+1 to the 30%
+equal-share divisor but 0 to the pool** — diluting every roster member's share.
+Verified on RWT May 2026: shared share `402,832` (÷13) vs correct `436,402` (÷12).
+
+**Fix / consolidation.** `/commission/calculate` is now fully DB-authoritative and is
+the single calculate engine (`CommissionService.calculate_commissions`, formerly the
+unused `calculate_commissions_for_period`):
+
+- Each store's roster = commission-**active** employees whose resolved assigned store
+  (override → status-history → default) is that store. `is_commission_active` is now
+  surfaced by `_get_employees_with_username_for_period` and filtered in the per-store
+  grouping. This sets pool membership, `total_employee_count`, and `total_working_days`.
+- Cross-store sellers are rostered under their **home** store only. Their out-of-store
+  sales reach the destination store's **total-revenue-for-eligibility** and their own
+  **personal** commission, but never any store's pool.
+- Revenue adjustments are loaded from the DB (`commission_revenue_adjustments`), not the
+  request. Per-store adjustments now feed (a) store-revenue-for-eligibility — all
+  adjustments booked at the location, and (b) the pool — only a roster employee's
+  **in-store fashion** adjustments.
+
+**API.** `POST /commission/calculate` now takes `{month, year}`. A legacy `stores`
+array is accepted but **ignored** (adjustments/targets are read from the DB; save them
+first via `PUT /commission/revenue/adjustments/<code>` and `PUT /commission/stores/<code>`).
+
+### Removed
+
+- `CommissionService.calculate_commissions_v2` (replaced by `calculate_commissions`).
+- Routes `POST /commission/store/calculate-v2` and `POST /commission/personal/calculate`
+  — no frontend or internal callers. The service methods `calculate_store_commission_v2`
+  and `calculate_personal_commissions` remain as internal sub-engines.
+
 ## [2.2.0] — 2026-06-02
 
 ### Added — CR #66: populate `released_by_category` from Account Payable linkages

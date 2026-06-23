@@ -542,6 +542,131 @@ class TestCalculateStoreCommissionV2:
         # They still get the equal share
         assert no_username_emp['equal_share'] > 0
 
+    def _roster_one(self):
+        """A single non-manager senior roster member: EMP001 / user1."""
+        return [{
+            'employee_code': 'EMP001', 'employee_username': 'user1', 'full_name': 'Employee 1',
+            'seniority': 5, 'personal_target': 500_000_000, 'working_day_count': 22,
+            'is_manager': False, 'is_probation': False,
+        }]
+
+    def test_cross_store_seller_excluded_from_pool(self, service, mock_repo):
+        """A seller whose home store != this store (cross-store) must NOT contribute
+        to the store commission pool. Store kept in the 70-80% band (single 0.5% tier)
+        so the pool math is unambiguous."""
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 7_000_000, 'discount_rate': 0.0},   # FP
+                {'revenue_with_vat': 500_000, 'discount_rate': 0.5},     # markdown → 75% of 10M
+            ],
+            employee_rows=[
+                # user1: HBT employee selling at HBT (in-store) → pool
+                {'employee_username': 'user1', 'revenue_before_vat': 4_000_000, 'discount_rate': 0.1,
+                 'store_code': 'HBT', 'doc_store_code': 'HBT'},
+                # user9: home RWR, sold AT HBT (cross-store). revenue_with_vat=0 keeps
+                # achievement fixed; a big before_vat would balloon the pool if wrongly counted.
+                {'employee_username': 'user9', 'revenue_before_vat': 5_000_000, 'discount_rate': 0.1,
+                 'store_code': 'RWR', 'doc_store_code': 'HBT'},
+            ],
+        )
+
+        result = service.calculate_store_commission_v2(
+            store_code='HBT', store_target=10_000_000, store_fp_ratio_target=0.70,
+            query_date=self._make_query_date(), employees=self._roster_one(),
+            all_sales_df=all_sales_df,
+        )
+
+        assert result['eligible'] is True
+        assert {e['employee_code'] for e in result['employees']} == {'EMP001'}  # user9 absent
+        # Pool = only user1's in-store FP at the 70-80% tier (0.5%). user9's 5,000,000
+        # must not appear, else pool would be (4M+5M)*0.005.
+        assert result['store_pool'] == pytest.approx(4_000_000 * 0.005)
+
+    def test_cross_store_sale_counts_toward_store_revenue(self, service, mock_repo):
+        """A cross-store seller's sale at this location DOES count toward store revenue
+        used for eligibility/achievement (even though it is excluded from the pool)."""
+        all_sales_df = self._make_all_sales_df('HBT',
+            store_rows=[
+                {'revenue_with_vat': 7_000_000, 'discount_rate': 0.0},   # 70% on its own
+            ],
+            employee_rows=[
+                # cross-store sale carries revenue_with_vat → lifts store revenue to 80%.
+                {'employee_username': 'user9', 'revenue_with_vat': 1_000_000,
+                 'revenue_before_vat': 900_000, 'discount_rate': 0.1,
+                 'store_code': 'RWR', 'doc_store_code': 'HBT'},
+            ],
+        )
+
+        result = service.calculate_store_commission_v2(
+            store_code='HBT', store_target=10_000_000, store_fp_ratio_target=0.70,
+            query_date=self._make_query_date(), employees=self._roster_one(),
+            all_sales_df=all_sales_df,
+        )
+
+        assert result['actual_revenue'] == pytest.approx(8_000_000)  # includes the cross-store 1M
+        assert result['achievement_pct'] == pytest.approx(80.0)
+
+    def test_in_store_adjustment_flows_into_pool(self, service, mock_repo):
+        """A roster employee's IN-STORE fashion adjustment increases the store pool.
+        Target scaled to 10M so the small adjustment stays inside the 70-80% band."""
+        sales = dict(
+            store_code='HBT',
+            store_rows=[
+                {'revenue_with_vat': 7_000_000, 'discount_rate': 0.0},
+                {'revenue_with_vat': 500_000, 'discount_rate': 0.5},
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 4_000_000, 'discount_rate': 0.1,
+                 'store_code': 'HBT', 'doc_store_code': 'HBT'},
+            ],
+        )
+
+        baseline = service.calculate_store_commission_v2(
+            store_code='HBT', store_target=10_000_000, store_fp_ratio_target=0.70,
+            query_date=self._make_query_date(), employees=self._roster_one(),
+            all_sales_df=self._make_all_sales_df(**sales),
+        )
+        adjusted = service.calculate_store_commission_v2(
+            store_code='HBT', store_target=10_000_000, store_fp_ratio_target=0.70,
+            query_date=self._make_query_date(), employees=self._roster_one(),
+            all_sales_df=self._make_all_sales_df(**sales),
+            revenue_adjustments_by_store={'EMP001': {'HBT': {'fashion_fp': 100_000}}},
+        )
+
+        # +100_000 FP at the 70-80% tier rate (0.5%) → +500 pool.
+        assert adjusted['store_pool'] == pytest.approx(baseline['store_pool'] + 100_000 * 0.005)
+
+    def test_cross_store_adjustment_not_in_pool_but_in_store_revenue(self, service, mock_repo):
+        """An adjustment booked at this location by a NON-roster (cross-store) employee
+        lifts store revenue (eligibility) but never the pool."""
+        sales = dict(
+            store_code='HBT',
+            store_rows=[
+                {'revenue_with_vat': 7_000_000, 'discount_rate': 0.0},
+                {'revenue_with_vat': 500_000, 'discount_rate': 0.5},
+            ],
+            employee_rows=[
+                {'employee_username': 'user1', 'revenue_before_vat': 4_000_000, 'discount_rate': 0.1,
+                 'store_code': 'HBT', 'doc_store_code': 'HBT'},
+            ],
+        )
+
+        baseline = service.calculate_store_commission_v2(
+            store_code='HBT', store_target=10_000_000, store_fp_ratio_target=0.70,
+            query_date=self._make_query_date(), employees=self._roster_one(),
+            all_sales_df=self._make_all_sales_df(**sales),
+        )
+        # EMP999 is a cross-store seller (not in HBT roster); small enough to stay in-band.
+        adjusted = service.calculate_store_commission_v2(
+            store_code='HBT', store_target=10_000_000, store_fp_ratio_target=0.70,
+            query_date=self._make_query_date(), employees=self._roster_one(),
+            all_sales_df=self._make_all_sales_df(**sales),
+            revenue_adjustments_by_store={'EMP999': {'HBT': {'fashion_fp': 200_000}}},
+        )
+
+        assert adjusted['store_pool'] == pytest.approx(baseline['store_pool'])  # pool unchanged
+        assert adjusted['actual_revenue'] == pytest.approx(baseline['actual_revenue'] + 200_000)
+
 
 # ======================================================================
 # calculate_combined_commission
@@ -746,6 +871,9 @@ class TestCalculatePersonalCommissions:
         # if they want; default unpaid_bills_map (empty) makes all rows have
         # unpaid_ratio=0, so withholding is zero.
         df['bill_sid'] = df['bill_number'].astype(str).map(lambda b: f'BILL_SID_{b}')
+        # Net units per line; one unit by default. Tests can override per row to
+        # exercise per-piece commissions (suitcase/Travelite) with qty > 1.
+        df['qty_sold'] = 1
         return df
 
     def test_missing_month_returns_error_df(self, service, mock_repo):
@@ -978,6 +1106,26 @@ class TestCalculatePersonalCommissions:
         )
         emp = result.iloc[0]
         assert emp['commission_suitcase'] == 2 * 500_000  # 2 items x 500k
+
+    def test_suitcase_commission_counts_units_not_lines(self, service, mock_repo):
+        """Suitcase pays 500k per UNIT: a single TVL line with qty 2 = 1,000,000
+        (regression for the GL030 May-2026 undercount — was counting line items)."""
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT',
+             'TVL', 0, 'LUGGAGE', 'ACC', 0.3, 18_900_000, 17_181_818],
+        ])
+        sales_df.loc[sales_df['vendor_code'] == 'TVL', 'qty_sold'] = 2  # one line, two pieces
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+
+        employees = [{
+            'employee_code': 'EMP001', 'employee_username': 'user1',
+            'personal_target': 100_000_000, 'full_name': 'Suitcase Seller', 'store_code': 'HBT',
+        }]
+
+        result = service.calculate_personal_commissions(month=1, year=2025, employees=employees)
+        assert result.iloc[0]['commission_suitcase'] == 2 * 500_000  # 2 units, not 1 line
 
     def test_hand_carry_commission_by_vendor(self, service, mock_repo):
         """Hand carry items earn commission based on vendor rates."""
@@ -1770,3 +1918,96 @@ class TestEmployeeCommissionException:
         assert row['commission_vhernier'] == 3_000_000 * 0.02  # 60,000
         assert row['commission_jewelry'] == 3_000_000 * 0.02
         assert row['total'] == (10_000_000 * 0.007) + (3_000_000 * 0.02)  # 130,000
+
+
+# ======================================================================
+# calculate_commissions (DB-authoritative engine) — roster authority
+# ======================================================================
+
+class TestCalculateCommissionsRosterAuthority:
+    """The single calculate engine derives each store's roster from the assignment
+    setting (commission-active only). Inactive employees never count; a cross-store
+    seller is rostered under their HOME store, not where they sold. Guards the
+    store-pool dilution bug (RWT May 2026: GL229)."""
+
+    _COLS = [
+        'sale_id', 'upc', 'upc_clean', 'bill_number', 'doc_store_code', 'sale_date',
+        'sale_time', 'customer_sid', 'employee_sid', 'employee_username', 'store_code',
+        'vendor_code', 'is_jewelry', 'category', 'department', 'discount_rate',
+        'revenue_with_vat', 'revenue_before_vat',
+    ]
+
+    def _row(self, **kw):
+        base = {c: None for c in self._COLS}
+        base.update({
+            'vendor_code': 'ABC', 'is_jewelry': 0, 'category': '', 'department': 'RTW',
+            'discount_rate': 0.0, 'revenue_with_vat': 0, 'revenue_before_vat': 0,
+        })
+        base.update(kw)
+        return base
+
+    def _roster_record(self, code, user, store, active=True, manager=False):
+        return {
+            'store_code': store, 'store_name': store, 'employee_code': code,
+            'full_name': code, 'join_date': '2018-01-01', 'retailpro_username': user,
+            'contract': 'PERMANENT', 'is_manager': manager, 'personal_target': 500_000_000,
+            'working_day': 26, 'is_commission_active': active,
+        }
+
+    def test_inactive_excluded_and_cross_store_rostered_at_home(self, mock_repo):
+        import pandas as pd
+        from app.modules.commission.service import CommissionService
+
+        # Roster setting: RWT has 2 active + 1 INACTIVE; user9 is an RWR employee.
+        roster = [
+            self._roster_record('EMP001', 'user1', 'RWT'),
+            self._roster_record('EMP002', 'user2', 'RWT'),
+            self._roster_record('EMP300', 'user3', 'RWT', active=False),  # inactive
+            self._roster_record('EMP900', 'user9', 'RWR'),                # home RWR
+        ]
+
+        sales = pd.DataFrame([
+            # RWT store-level revenue (drives achievement): 8.0M of 10M = 80%
+            self._row(doc_store_code='RWT', revenue_with_vat=8_000_000, discount_rate=0.0),
+            # RWT in-store sellers
+            self._row(doc_store_code='RWT', store_code='RWT', employee_username='user1',
+                      employee_sid=1, revenue_before_vat=3_000_000, discount_rate=0.1),
+            self._row(doc_store_code='RWT', store_code='RWT', employee_username='user2',
+                      employee_sid=2, revenue_before_vat=2_000_000, discount_rate=0.1),
+            # user9 (home RWR) sold AT RWT — cross-store
+            self._row(doc_store_code='RWT', store_code='RWR', employee_username='user9',
+                      employee_sid=9, revenue_with_vat=1_000_000, revenue_before_vat=900_000,
+                      discount_rate=0.1),
+            # RWR store-level revenue so RWR is eligible too
+            self._row(doc_store_code='RWR', revenue_with_vat=9_000_000, discount_rate=0.0),
+        ], columns=self._COLS)
+
+        mock_repo.get_all_sales_data.return_value = sales
+        mock_repo.get_hand_carry_upcs.return_value = []
+        service = CommissionService(repository=mock_repo)
+
+        store_settings = {'success': True, 'stores': [
+            {'store_code': 'RWT', 'store_name': 'RWT', 'store_target': 10_000_000, 'fp_ratio_target': 50},
+            {'store_code': 'RWR', 'store_name': 'RWR', 'store_target': 10_000_000, 'fp_ratio_target': 50},
+        ]}
+
+        with patch.object(service, '_get_employees_with_username_for_period', return_value=roster), \
+             patch('app.modules.commission.service.CommissionStoreSettingsService') as MockSS, \
+             patch('app.modules.commission.service.CommissionRevenueService') as MockRev, \
+             patch('app.modules.account_payable.AccountPayableService') as MockAP:
+            MockSS.return_value.get_commission_stores.return_value = store_settings
+            MockRev.return_value._load_adjustments.return_value = {}
+            MockAP.return_value.compute_released_for_month.return_value = {}
+
+            result = service.calculate_commissions(month=5, year=2026)
+
+        assert result['success'] is True
+        stores = {s['store_code']: s for s in result['stores']}
+
+        # RWT roster = 2 active employees only; inactive EMP300 and cross-store EMP900 absent.
+        rwt_codes = {e['employee_code'] for e in stores['RWT']['employees']}
+        assert rwt_codes == {'EMP001', 'EMP002'}
+
+        # user9 is rostered under her HOME store RWR, not RWT.
+        rwr_codes = {e['employee_code'] for e in stores['RWR']['employees']}
+        assert 'EMP900' in rwr_codes
