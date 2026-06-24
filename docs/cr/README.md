@@ -46,4 +46,4 @@ Status markers: ⏳ = pending frontend action · Done = frontend confirmed.
 
 | CR | Date | Description | Status |
 |----|------|-------------|--------|
-| #B1 | 2026-06-23 | Commission: `POST /commission/calculate` is now DB-authoritative — body `{month, year}`, legacy `stores[]` ignored; roster + 30% equal-share divisor derived from the assignment roster (commission-active only); cross-store sellers rostered under home store. Removed `POST /store/calculate-v2` + `POST /personal/calculate` | ⏳ Backend done · Frontend done (v3.4.0) |
+| #B1 | 2026-06-23 | Commission: `POST /commission/calculate` is now DB-authoritative — body `{month, year}`, legacy `stores[]` ignored; roster + 30% equal-share divisor derived from the assignment roster (commission-active only); cross-store sellers rostered under home store. Removed `POST /store/calculate-v2` + `POST /personal/calculate` | Done (backend v3.0.0 · frontend v3.4.0) |
