@@ -18,6 +18,7 @@ jobs:
       crm: ${{ steps.changes.outputs.crm }}
       dashboard: ${{ steps.changes.outputs.dashboard }}
       employees: ${{ steps.changes.outputs.employees }}
+      handcarry: ${{ steps.changes.outputs.handcarry }}
       health: ${{ steps.changes.outputs.health }}
       permissions: ${{ steps.changes.outputs.permissions }}
       stores: ${{ steps.changes.outputs.stores }}
@@ -57,6 +58,9 @@ jobs:
             employees:
               - 'app/modules/employees/**'
               - 'tests/unit/modules/employees/**'
+            handcarry:
+              - 'app/modules/handcarry/**'
+              - 'tests/unit/modules/handcarry/**'
             health:
               - 'app/modules/health/**'
               - 'tests/unit/modules/health/**'
@@ -101,6 +105,7 @@ jobs:
           [ "${{ needs.detect.outputs.crm }}" = "true" ]         && PATHS="$PATHS tests/unit/modules/crm"
           [ "${{ needs.detect.outputs.dashboard }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/dashboard"
           [ "${{ needs.detect.outputs.employees }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/employees"
+          [ "${{ needs.detect.outputs.handcarry }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/handcarry"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"

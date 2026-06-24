@@ -87,12 +87,20 @@ def get_bill_detail(bill_sid: str):
 @account_payable_bp.route('/payments', methods=['GET'])
 @token_required
 def get_pending_payments():
-    """Payments queue. Query param: ?status=unmatched|matched_pending"""
+    """Payments queue. Query param: ?status=unmatched|matched_partially|matched_pending|released
+
+    CR #67 extended the state model — released payments now stay in the
+    queue so finance can edit allocations after release.
+    """
     status = request.args.get('status')
-    if status and status not in ('unmatched', 'matched_pending'):
+    allowed = AccountPayableService._ALLOWED_PAYMENT_STATUSES
+    if status and status not in allowed:
         return jsonify({
             'success': False,
-            'error': f"status must be 'unmatched' or 'matched_pending' (got {status!r})",
+            'error': (
+                f"status must be one of {', '.join(repr(s) for s in allowed)} "
+                f"(got {status!r})"
+            ),
         }), 400
     result = _service.get_pending_payments(status=status)
     return jsonify(result), 200 if result.get('success') else 500
@@ -105,6 +113,18 @@ def get_pending_payments():
 def _current_user_sid() -> int:
     """Pull the authenticated user's SID off Flask `g` (set by token_required)."""
     return getattr(g, 'user_sid', None)
+
+
+def _current_user_identifier() -> str:
+    """Display identifier for write-side audit fields (CR #68 `voided_by`).
+    Prefers email; falls back to SID-as-string, then 'unknown'."""
+    email = getattr(g, 'email', None)
+    if email:
+        return str(email)
+    sid = getattr(g, 'sid', None)
+    if sid is not None:
+        return f'sid:{sid}'
+    return 'unknown'
 
 
 @account_payable_bp.route('/reconcile', methods=['POST'])
@@ -139,10 +159,78 @@ def reconcile():
 def unmatch_payment(payment_doc_sid: str):
     """Remove an existing manual linkage for the given payment.
 
-    Returns 404 when no manual linkage exists (CR #62 — FIFO/REF cases
-    cannot be unmatched directly; reconcile manually to override instead).
+    Returns 404 when no manual linkage exists (CR #62 — REF_SALE_SID
+    cases cannot be unmatched directly; reconcile manually to override).
     """
     result = _service.unmatch(str(payment_doc_sid))
+    if result.get('success'):
+        return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
+    return jsonify(result), 400
+
+
+@account_payable_bp.route('/payments/<payment_doc_sid>/tag-remake', methods=['POST'])
+@manager_required
+def tag_payment_remake(payment_doc_sid: str):
+    """CR #70: tag a corrective payment as remake.
+
+    Drops any existing allocations and excludes the payment from
+    commission release. Returns 200 with the updated PendingPayment.
+
+    Errors:
+      400 — current status is matched_pending/released (unmatch first)
+      400 — match_source is ref_sale_sid (fix at source in Oracle)
+      404 — payment not in active Charge ledger
+    """
+    result = _service.tag_remake(
+        payment_doc_sid=str(payment_doc_sid),
+        tagged_by=_current_user_identifier(),
+    )
+    if result.get('success'):
+        return jsonify(result), 200
+    if result.get('not_found'):
+        return jsonify(result), 404
+    return jsonify(result), 400
+
+
+@account_payable_bp.route('/payments/<payment_doc_sid>/untag-remake', methods=['POST'])
+@manager_required
+def untag_payment_remake(payment_doc_sid: str):
+    """CR #70: reverse a remake tag — payment returns to the unmatched
+    queue. Returns 200 with the updated PendingPayment.
+
+    Errors:
+      400 — payment is not currently tagged as remake
+    """
+    result = _service.untag_remake(
+        payment_doc_sid=str(payment_doc_sid),
+        untagged_by=_current_user_identifier(),
+    )
+    if result.get('success'):
+        return jsonify(result), 200
+    return jsonify(result), 400
+
+
+@account_payable_bp.route('/bills/<bill_sid>/void', methods=['POST'])
+@manager_required
+def void_bill_remaining(bill_sid: str):
+    """CR #68: write off part (or all) of a bill's remaining balance.
+
+    Request: { amount: int, reason?: string }
+    - `amount` required, > 0, <= bill.remaining_unpaid
+    - `reason` optional (nullable)
+
+    Returns 200 with `{ bill: BillDetail, void_id: str }`.
+    Errors: 400 invalid amount; 404 bill not in active AP ledger.
+    """
+    body = request.get_json(silent=True) or {}
+    result = _service.void_remaining(
+        bill_sid=str(bill_sid),
+        amount=body.get('amount'),
+        reason=body.get('reason'),
+        voided_by=_current_user_identifier(),
+    )
     if result.get('success'):
         return jsonify(result), 200
     if result.get('not_found'):

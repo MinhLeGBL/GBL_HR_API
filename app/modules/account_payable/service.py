@@ -80,7 +80,10 @@ class AccountPayableService:
 
         Tables:
         - `payable_reconciliations` — manual payment→bill linkages.
+        - `payable_reconciliation_items` — per-item priority assignment (CR #69).
+        - `payable_payment_remakes` — remake/corrective payment tags (CR #70).
         - `payable_item_custom_rates` — user-set per-item release-rate overrides.
+        - `payable_bill_voids` — bill write-offs (CR #68; goodwill / discount).
 
         Called from `scripts/database/init_db.py`. Safe to call repeatedly;
         `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` make
@@ -96,7 +99,13 @@ class AccountPayableService:
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_TABLE)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_BILL_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_RECONCILIATIONS_PAYMENT_INDEX)
+                cur.execute(AccountPayableQueries.CREATE_RECONCILIATION_ITEMS_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_RECONCILIATION_ITEMS_UPC_INDEX)
+                cur.execute(AccountPayableQueries.CREATE_PAYMENT_REMAKES_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_PAYMENT_REMAKES_ACTIVE_INDEX)
                 cur.execute(AccountPayableQueries.CREATE_CUSTOM_RATES_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_BILL_VOIDS_TABLE)
+                cur.execute(AccountPayableQueries.CREATE_BILL_VOIDS_BILL_INDEX)
                 conn.commit()
             return {'success': True}
         except Exception as e:
@@ -190,9 +199,10 @@ class AccountPayableService:
         Algorithm — mirrors the spec in
         `docs/cr/commission.md → CR #66 — Spec`:
 
-        1. Load all bills via `_load_bills` (REF_SALE_SID → manual → FIFO
-           replay, CR #62 unified). Reuses the per-request replay output —
-           commission's calculate triggers this once per `POST /calculate`.
+        1. Load all bills via `_load_bills` (REF_SALE_SID → manual replay,
+           CR #62 unified — v2.0.0 removed FIFO). Reuses the per-request
+           replay output — commission's calculate triggers this once per
+           `POST /calculate`.
         2. For each bill, find payments whose `payment_date` falls in the
            target month. A bill is "in scope" for month M if it has any
            such payment. Allocation factor = `sum(amount_applied_in_month)
@@ -231,24 +241,73 @@ class AccountPayableService:
         if not bills:
             return {}
 
-        # 1. Find bills with payments in the target month + total applied.
-        applied_in_month_by_bill: Dict[str, int] = {}
+        # 1. Find bills with payments in the target month — track each
+        #    payment separately (CR #69: per-payment per-item factors).
+        payments_in_month_by_bill: Dict[str, List[Dict[str, Any]]] = {}
         for bill_sid, bill in bills.items():
-            applied_in_month = sum(
-                p['amount_applied'] for p in bill.get('payments', [])
-                if p.get('payment_date', '')[:7] == target_month_str
-            )
-            if applied_in_month > 0:
-                applied_in_month_by_bill[bill_sid] = applied_in_month
+            for p in bill.get('payments', []):
+                if p.get('payment_date', '')[:7] == target_month_str:
+                    payments_in_month_by_bill.setdefault(bill_sid, []).append(p)
 
-        if not applied_in_month_by_bill:
+        if not payments_in_month_by_bill:
             return {}
 
         # 2. Fetch line items + rate lookups for in-scope bills.
-        scope_sids = list(applied_in_month_by_bill.keys())
+        scope_sids = list(payments_in_month_by_bill.keys())
         items = self.repository.get_bill_items(scope_sids)
         auto_rates = self._load_auto_rates(scope_sids)
         custom_rates = self._load_custom_rates(scope_sids)
+
+        # CR #69: per-item priority assignments per (payment, bill).
+        # Empty dict when nothing is in priority mode — the per-item
+        # factor falls through to the proportional path automatically.
+        scope_payment_sids = sorted({
+            p['payment_doc_sid']
+            for plist in payments_in_month_by_bill.values()
+            for p in plist
+        })
+        per_item_assignments = self._load_reconciliation_items_for_payments(
+            scope_payment_sids
+        )
+        # CR #70: defensive — payments tagged as remake should have NO
+        # reconciliation rows by construction (tag_remake DELETEs them),
+        # so they wouldn't appear in scope_payment_sids in normal flow.
+        # We still skip them explicitly here in case a race condition
+        # (mid-tag reconcile) leaves stray rows behind.
+        active_remakes = self._load_active_remakes()
+        remake_pay_sids = set(active_remakes.keys())
+
+        def _factor_for_item(
+            bill_sid: str, item_upc: str,
+            item_revenue_with_vat: float, original_charge: float,
+        ) -> float:
+            """Sum per-payment factors for this (bill, item) across all
+            in-month payments. Proportional payments contribute the same
+            paid-ratio to every item; priority payments contribute
+            `amount_assigned / item.revenue_with_vat` ONLY to listed
+            items (0 to everything else)."""
+            total = 0.0
+            for p in payments_in_month_by_bill.get(bill_sid, []):
+                pay_sid = p['payment_doc_sid']
+                # CR #70: skip remake-tagged payments — they're explicitly
+                # excluded from release per spec.
+                if pay_sid in remake_pay_sids:
+                    continue
+                per_item_rows = per_item_assignments.get((pay_sid, bill_sid))
+                if per_item_rows is None:
+                    # Proportional payment — every item shares the same factor.
+                    if original_charge > 0:
+                        total += float(p['amount_applied']) / float(original_charge)
+                else:
+                    # Priority payment — find this item's assignment (or 0).
+                    assigned = next(
+                        (row['amount_assigned'] for row in per_item_rows
+                         if row['upc'] == item_upc),
+                        0,
+                    )
+                    if assigned > 0 and item_revenue_with_vat > 0:
+                        total += float(assigned) / float(item_revenue_with_vat)
+            return total
 
         # 3. Accumulate per (employee_code, category_key).
         released_by_emp_by_cat: Dict[str, Dict[str, float]] = {}
@@ -261,12 +320,19 @@ class AccountPayableService:
             original_charge = bills[bill_sid]['original_charge']
             if original_charge <= 0:
                 continue
-            allocation_factor = (
-                applied_in_month_by_bill[bill_sid] / float(original_charge)
+            revenue_with_vat = float(item.get('revenue_with_vat') or 0)
+            allocation_factor = _factor_for_item(
+                bill_sid=bill_sid, item_upc=item.get('upc') or '',
+                item_revenue_with_vat=revenue_with_vat,
+                original_charge=original_charge,
             )
+            if allocation_factor == 0:
+                # CR #69: priority mode silently excludes unlisted items —
+                # not a missing-snapshot warning. Skip without counting.
+                continue
             upc = item.get('upc')
             qty = int(item.get('qty') or 0)
-            revenue_with_vat = float(item.get('revenue_with_vat') or 0)
+            # revenue_with_vat already pulled above for the factor lookup.
             vendor = item.get('vendor_code')
 
             # Suitcase: flat per qty × allocation, no rate snapshot.
@@ -358,6 +424,8 @@ class AccountPayableService:
             'customer_name':     bill['customer_name'],
             'original_charge':   bill['original_charge'],
             'total_paid':        bill['total_paid'],
+            # CR #68: always present; 0 when no voids on file.
+            'total_voided':      bill.get('total_voided', 0),
             'remaining_unpaid':  bill['remaining_unpaid'],
             'status':            bill['status'],
             'created_date':      bill['created_date'],
@@ -443,9 +511,10 @@ class AccountPayableService:
         """Full bill detail with items[] and rate lookups.
 
         Runs the full ledger replay since we need this bill's chronology
-        and customer-scoped FIFO state. A per-bill query is possible but
-        we already cache the replay output below, and consistency with
-        get_bills' chronology matters more than the avoided round-trip.
+        and the customer-scoped allocation state. A per-bill query is
+        possible but we already cache the replay output below, and
+        consistency with get_bills' chronology matters more than the
+        avoided round-trip.
 
         Returns ServiceResult<BillDetail | None>. `None` → 404 at the route layer.
         """
@@ -474,6 +543,9 @@ class AccountPayableService:
         row = self._bill_to_row(bill_sid, b, employee_codes, today)
         row['items'] = items_wire
         row['sale_total_amt'] = b['sale_total_amt']
+        # CR #68: BillDetail surfaces the full void chronology (newest-first
+        # via `_load_voids_by_bill_sid`'s ORDER BY clause).
+        row['voids'] = b.get('voids_internal', [])
         return {'success': True, 'data': row}
 
     def get_employees(self) -> Dict[str, Any]:
@@ -602,7 +674,7 @@ class AccountPayableService:
         return {'success': True, 'data': out}
 
     def _load_bills(self) -> Dict[str, Dict[str, Any]]:
-        """Single-shot bill loader (CR #62).
+        """Single-shot bill loader (CR #62; CR #68 layers voids).
 
         Loads the manual `payable_reconciliations` rows once per request
         and threads them through the Oracle ledger replay so EVERY read
@@ -610,9 +682,205 @@ class AccountPayableService:
         identical replay state. Without this unifier the queue could
         report `unmatched` for the same payment the bill view shows
         `matched (manual)`.
+
+        CR #68: after the replay, `payable_bill_voids` rows are applied
+        on top — each bill gains `total_voided` and `voids_internal`, and
+        `remaining_unpaid` + `status` are recomputed via the new formula
+        `remaining = original_charge - total_paid - total_voided`. Voids
+        do NOT enter `amount_applied`, so commission release (CR #66)
+        correctly excludes them via the existing paid-ratio math.
         """
         manual = self._load_manual_allocations()
-        return self.repository.get_all_bills(manual_allocations_by_payment=manual)
+        bills = self.repository.get_all_bills(manual_allocations_by_payment=manual)
+        self._apply_voids_to_bills(bills)
+        return bills
+
+    def _apply_voids_to_bills(self, bills: Dict[str, Dict[str, Any]]) -> None:
+        """CR #68: layer Postgres `payable_bill_voids` rows on top of the
+        Oracle replay output. Mutates each bill in place to add:
+
+        - `total_voided` (int)
+        - `voids_internal` (list of {void_id, amount, reason, voided_at,
+           voided_by}, newest-first) — used by `get_bill_detail`.
+
+        Then recomputes `remaining_unpaid` and `status` using the void-
+        aware formula so every downstream consumer (queue suggested_bills,
+        employees, reconcile cap, etc.) sees the post-void state.
+        """
+        voids_by_bill = self._load_voids_by_bill_sid()
+        for sid, bill in bills.items():
+            voids = voids_by_bill.get(sid, [])
+            total_voided = sum(v['amount'] for v in voids)
+            bill['total_voided'] = total_voided
+            bill['voids_internal'] = voids
+            # Void-aware remaining + status.
+            original = int(bill['original_charge'])
+            paid = int(bill['total_paid'])
+            new_remaining = max(0, original - paid - total_voided)
+            bill['remaining_unpaid'] = new_remaining
+            if new_remaining == 0:
+                bill['status'] = 'fully_paid'
+            elif paid == 0 and total_voided == 0:
+                bill['status'] = 'open'
+            else:
+                bill['status'] = 'partial'
+
+    def _load_voids_by_bill_sid(self) -> Dict[str, List[Dict[str, Any]]]:
+        """CR #68: read all `payable_bill_voids` rows once per request,
+        grouped by bill_sid (newest-first). Empty dict on connection
+        failure — voids cleanly fall back to "no voids on file" which
+        keeps the bill view working with stale data."""
+        conn = get_postgres_connection()
+        if conn is None:
+            return {}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT void_id, bill_sid, amount, reason,
+                           TO_CHAR(voided_at, 'YYYY-MM-DD') AS voided_at_str,
+                           voided_by
+                    FROM payable_bill_voids
+                    ORDER BY voided_at DESC, void_id DESC
+                ''')
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f'[WARN] AP _load_voids_by_bill_sid failed: {e}')
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            out.setdefault(r[1], []).append({
+                'void_id':   str(r[0]),
+                'amount':    int(r[2]),
+                'reason':    r[3],
+                'voided_at': r[4],
+                'voided_by': r[5],
+            })
+        return out
+
+    # ------------------------------------------------------------------
+    # CR #70 — remake / corrective payment tag
+    # ------------------------------------------------------------------
+
+    def _load_active_remakes(self) -> Dict[str, Dict[str, Any]]:
+        """CR #70: map `payment_doc_sid` → {tagged_at, tagged_by} for every
+        payment currently tagged as a remake (active row in
+        `payable_payment_remakes` where `untagged_at IS NULL`).
+
+        Used by `_build_pending_payment_rows` to override the computed
+        status to `'remake'` and surface the audit fields on the
+        PendingPayment row. Empty dict on connection failure — payments
+        cleanly fall back to their computed status.
+        """
+        conn = get_postgres_connection()
+        if conn is None:
+            return {}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT payment_doc_sid,
+                           TO_CHAR(tagged_at, 'YYYY-MM-DD') AS tagged_at_str,
+                           tagged_by
+                    FROM payable_payment_remakes
+                    WHERE untagged_at IS NULL
+                ''')
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f'[WARN] AP _load_active_remakes failed: {e}')
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return {
+            r[0]: {'tagged_at': r[1], 'tagged_by': r[2]}
+            for r in rows
+        }
+
+    # ------------------------------------------------------------------
+    # CR #69 — per-item allocation (proportional vs priority)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assign_per_item(
+        items_in_order: List[str],
+        item_revenue_by_upc: Dict[str, int],
+        amount: int,
+    ) -> List[Tuple[str, int]]:
+        """Priority-fill algorithm: walk `items_in_order`, take
+        `min(item.revenue_with_vat, remaining)` from each, stop when
+        amount is exhausted. Returns [(upc, amount_assigned), ...] in
+        order_index sequence.
+
+        Raises ValueError if the items' combined revenue can't absorb
+        the full amount — that should never reach this helper because
+        validation catches it earlier, but a defensive check keeps the
+        write transactional.
+        """
+        remaining = amount
+        out: List[Tuple[str, int]] = []
+        for upc in items_in_order:
+            rev = int(item_revenue_by_upc.get(upc) or 0)
+            take = min(rev, remaining)
+            out.append((upc, take))
+            remaining -= take
+            if remaining == 0:
+                break
+        if remaining > 0:
+            raise ValueError(
+                f'amount {amount:,} exceeds combined revenue of selected items'
+            )
+        return out
+
+    def _load_reconciliation_items_for_payments(
+        self, payment_doc_sids: List[str],
+    ) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+        """CR #69: load per-item assignment rows joined to their parent
+        reconciliation, keyed by (payment_doc_sid, bill_sid).
+
+        Each value is a list of `{upc, order_index, amount_assigned}` in
+        order_index sequence. Empty dict on connection failure — callers
+        treat missing keys as proportional mode (existing behaviour).
+        """
+        if not payment_doc_sids:
+            return {}
+        conn = get_postgres_connection()
+        if conn is None:
+            return {}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT r.payment_doc_sid, r.bill_sid,
+                           i.upc, i.order_index, i.amount_assigned
+                    FROM payable_reconciliations r
+                    JOIN payable_reconciliation_items i
+                         ON i.reconciliation_id = r.id
+                    WHERE r.payment_doc_sid = ANY(%s)
+                    ORDER BY r.payment_doc_sid, r.bill_sid, i.order_index
+                ''', (list(payment_doc_sids),))
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f'[WARN] AP _load_reconciliation_items_for_payments failed: {e}')
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        out: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for r in rows:
+            key = (r[0], r[1])
+            out.setdefault(key, []).append({
+                'upc':             r[2],
+                'order_index':     int(r[3]),
+                'amount_assigned': int(r[4]),
+            })
+        return out
 
     def _load_manual_allocations(self) -> Dict[str, List[Dict[str, Any]]]:
         """Map payment_doc_sid → list of its linkage rows from
@@ -676,35 +944,63 @@ class AccountPayableService:
         return out
 
     # Source-of-truth priority order for queue match_source (CR #62):
-    # if a payment's allocations span multiple sources (REF_SALE_SID
-    # for part, FIFO for the rest), the row reports the highest-priority
-    # source. ref_sale_sid > manual > fifo.
-    _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1, 'fifo': 2}
+    # if a payment's allocations span both sources, the row reports the
+    # highest-priority source. ref_sale_sid > manual. v2.0.0 removed FIFO
+    # so only these two sources exist.
+    _MATCH_SOURCE_PRIORITY = {'ref_sale_sid': 0, 'manual': 1}
+
+    # CR #67 state model — uniform across queue + reconcile responses.
+    # CR #70 adds `'remake'` — applied as an OVERRIDE in
+    # `_build_pending_payment_rows` (not via `_payment_status_for` since
+    # remake state lives in `payable_payment_remakes`, not in the
+    # payment/applied math). `is_overdue` continues to gate ONLY on
+    # `(unmatched AND past_month)` — remake is never overdue.
+    _ALLOWED_PAYMENT_STATUSES = (
+        'unmatched', 'matched_partially', 'matched_pending', 'released', 'remake',
+    )
+
+    @staticmethod
+    def _payment_status_for(
+        amount: int, applied: int, pay_month: str, current_month: str,
+    ) -> Tuple[str, bool]:
+        """CR #67 transition rule. Returns (status, is_overdue).
+
+            sum == 0                              → unmatched
+            0 < sum < payment.amount              → matched_partially
+            sum == payment.amount   AND   past    → released
+            sum == payment.amount   AND   current → matched_pending
+        """
+        is_past = pay_month < current_month
+        if applied <= 0:
+            return ('unmatched', is_past)
+        if applied < amount:
+            return ('matched_partially', False)
+        # applied >= amount; defensively the reconcile validator caps at amount.
+        if is_past:
+            return ('released', False)
+        return ('matched_pending', False)
 
     def get_pending_payments(self, status: Optional[str] = None) -> Dict[str, Any]:
-        """Payments queue (CR #62 — queue mirrors the ledger replay).
+        """Payments queue — surfaces every Charge payment with its CR #67
+        state. Released past-month payments stay in the queue so finance
+        can edit allocations after release.
 
-        Uses the EXACT replay output the bill view shows (FIFO inferences
-        included). Status logic per CR §"Behaviour matrix":
-
-        - Past-month payment with ANY application in the replay → released,
-          drops out of the queue. The applied portion is "released"; any
-          remainder is implicit deposit-on-account.
-        - Past-month payment with no application → `unmatched` + `is_overdue`.
-        - Current-month with application → `matched_pending` and
-          `match_source` is the highest-priority source in the allocations
-          (ref_sale_sid > manual > fifo).
-        - Current-month with no application → `unmatched` (not overdue).
+        Status logic — uniform rule, see `_payment_status_for`:
+        - applied = 0                          → `unmatched` (overdue if past)
+        - 0 < applied < amount                 → `matched_partially`
+        - applied = amount AND past month      → `released`
+        - applied = amount AND current month   → `matched_pending`
 
         Each row carries `suggested_bills` = the customer's open + partial
         bill list (oldest-first). Walk-in payments get `[]`.
 
         Returns ServiceResult<PendingPayment[]>, sorted by payment_date desc.
         """
-        if status and status not in ('unmatched', 'matched_pending'):
+        if status and status not in self._ALLOWED_PAYMENT_STATUSES:
+            allowed = ', '.join(repr(s) for s in self._ALLOWED_PAYMENT_STATUSES)
             return {
                 'success': False,
-                'error': f"status must be 'unmatched' or 'matched_pending' (got {status!r})",
+                'error': f"status must be one of {allowed} (got {status!r})",
             }
 
         payments = self.repository.get_charge_payments()
@@ -716,7 +1012,34 @@ class AccountPayableService:
         bills = self._load_bills()
         payment_allocations = self._transpose_to_payment_allocations(bills)
 
-        # Suggested_bills: precompute the customer → open+partial-bill list.
+        return {
+            'success': True,
+            'data': self._build_pending_payment_rows(
+                payments_meta=payments,
+                bills=bills,
+                payment_allocations=payment_allocations,
+                status_filter=status,
+            ),
+        }
+
+    def _build_pending_payment_rows(
+        self,
+        payments_meta: List[Dict[str, Any]],
+        bills: Dict[str, Dict[str, Any]],
+        payment_allocations: Dict[str, List[Dict[str, Any]]],
+        status_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Project `(payments, bills, allocations)` into PendingPayment rows.
+
+        Factored out of `get_pending_payments` so `reconcile` can build
+        the same shape for its embedded `ReconcileResult.payment` (CR #67).
+        Always sorted by payment_date descending.
+
+        CR #69: each `allocations[i]` is enriched with `items: string[] | null`
+        — the priority order stored at write time. Proportional rows
+        get `null`.
+        """
+        # Suggested_bills: precompute customer → open+partial-bill list.
         open_bills_by_customer: Dict[str, List[Dict[str, Any]]] = {}
         today = _today()
         for b_sid, b in bills.items():
@@ -735,61 +1058,94 @@ class AccountPayableService:
         for sugg in open_bills_by_customer.values():
             sugg.sort(key=lambda b: b['created_date'])
 
+        # CR #69: load per-item priority lists for all payments in scope,
+        # keyed by (payment_doc_sid, bill_sid). Empty when no priority rows
+        # exist — every allocation defaults to items=null (proportional).
+        per_item_for_pay_bill = self._load_reconciliation_items_for_payments(
+            [p['payment_doc_sid'] for p in payments_meta]
+        )
+        # CR #70: active remake tags override the computed status.
+        active_remakes = self._load_active_remakes()
+
         current_month = _current_month_str(today)
         out: List[Dict[str, Any]] = []
-        for p in payments:
+        for p in payments_meta:
             pay_month = p['payment_date'][:7]
-            is_past_month = pay_month < current_month
-
             allocs = payment_allocations.get(p['payment_doc_sid'], [])
             applied = sum(a['amount_applied'] for a in allocs)
 
-            # Past-month + ANY application = released → drop from queue.
-            # The applied portion has been auto-released; any unapplied
-            # remainder is implicit deposit-on-account.
-            if is_past_month and applied > 0:
+            remake_info = active_remakes.get(p['payment_doc_sid'])
+            if remake_info is not None:
+                # CR #70: remake override — payment is excluded from queue
+                # action ("settled"); allocations dropped from display;
+                # is_overdue cleared; surface tagged_at + tagged_by.
+                payment_status = 'remake'
+                is_overdue = False
+                allocs_for_display: List[Dict[str, Any]] = []
+                match_source = None
+                remake_tagged_at = remake_info['tagged_at']
+                remake_tagged_by = remake_info['tagged_by']
+            else:
+                payment_status, is_overdue = self._payment_status_for(
+                    amount=p['amount'], applied=applied,
+                    pay_month=pay_month, current_month=current_month,
+                )
+                allocs_for_display = allocs
+                match_source = None  # filled below if non-empty
+                remake_tagged_at = None
+                remake_tagged_by = None
+
+            if status_filter and status_filter != payment_status:
                 continue
 
-            if applied > 0:
-                payment_status = 'matched_pending'
+            if allocs_for_display:
                 # Highest-priority source across the allocations wins.
                 match_source = min(
-                    (a['source'] for a in allocs),
+                    (a['source'] for a in allocs_for_display),
                     key=lambda s: self._MATCH_SOURCE_PRIORITY.get(s, 99),
                 )
-                allocations_out = [{
-                    'bill_sid':       a['bill_sid'],
-                    'doc_no':         a['doc_no'],
-                    'amount_applied': a['amount_applied'],
-                } for a in allocs]
+                allocations_out = []
+                for a in allocs_for_display:
+                    # CR #69: surface stored priority UPCs, in order_index
+                    # sequence; null when the allocation is proportional.
+                    item_rows = per_item_for_pay_bill.get(
+                        (p['payment_doc_sid'], a['bill_sid'])
+                    )
+                    items_field: Optional[List[str]] = (
+                        [row['upc'] for row in item_rows] if item_rows else None
+                    )
+                    allocations_out.append({
+                        'bill_sid':       a['bill_sid'],
+                        'doc_no':         a['doc_no'],
+                        'amount_applied': a['amount_applied'],
+                        'items':          items_field,
+                    })
             else:
-                payment_status = 'unmatched'
-                match_source = None
                 allocations_out = []
 
-            if status and status != payment_status:
-                continue
-
             out.append({
-                'payment_doc_sid': p['payment_doc_sid'],
-                'payment_doc_no':  p['payment_doc_no'],
-                'payment_date':    p['payment_date'],
-                'doc_store_code':  p['doc_store_code'],
-                'customer_sid':    p['customer_sid'],
-                'customer_name':   p['customer_name'],
-                'amount':          p['amount'],
-                'notes_lostdoc':   p['notes_lostdoc'],
-                'status':          payment_status,
-                'match_source':    match_source,
-                'is_overdue':      payment_status == 'unmatched' and is_past_month,
-                'allocations':     allocations_out,
-                'suggested_bills': (
+                'payment_doc_sid':  p['payment_doc_sid'],
+                'payment_doc_no':   p['payment_doc_no'],
+                'payment_date':     p['payment_date'],
+                'doc_store_code':   p['doc_store_code'],
+                'customer_sid':     p['customer_sid'],
+                'customer_name':    p['customer_name'],
+                'amount':           p['amount'],
+                'notes_lostdoc':    p['notes_lostdoc'],
+                'status':           payment_status,
+                'match_source':     match_source,
+                'is_overdue':       is_overdue,
+                'allocations':      allocations_out,
+                'suggested_bills':  (
                     open_bills_by_customer.get(p['customer_sid'], [])
-                    if p['customer_sid'] else []
+                    if (p['customer_sid'] and payment_status != 'remake') else []
                 ),
+                # CR #70: audit fields. Both null when status ≠ 'remake'.
+                'remake_tagged_at': remake_tagged_at,
+                'remake_tagged_by': remake_tagged_by,
             })
         out.sort(key=lambda r: r['payment_date'], reverse=True)
-        return {'success': True, 'data': out}
+        return out
 
     # ------------------------------------------------------------------
     # Classifier — bucket-only port of CommissionService._classify_item_rate
@@ -860,32 +1216,47 @@ class AccountPayableService:
 
         Validations:
         - payment_doc_sid is a digit string; the payment exists in Oracle.
-        - allocations is non-empty; each has bill_sid (digit) + amount (positive int).
-        - `SUM(allocations.amount) == payment.amount` (no partial confirms in v1).
+        - allocations is a list (may be empty — CR #67: clears all linkages).
+        - Each allocation: bill_sid (digit) + amount (positive int).
+        - `SUM(allocations.amount) <= payment.amount` (CR #67: partial
+          and empty allocations supported; only overflow rejected).
         - For each allocation: existing reconciliations' sum + new amount
-          ≤ bill.original_charge (cumulative cap).
+          ≤ bill.original_charge - total_voided (cumulative cap; CR #68).
+        - CR #69: optional `items: string[]` per allocation. When provided:
+          UPCs must belong to the bill, no duplicates, and the sum of those
+          items' revenue must be ≥ the allocation amount. Empty list /
+          missing / null all normalize to proportional mode (no per-item
+          rows written).
 
         Behavior:
         - First reconcile for the payment → INSERT rows.
-        - Existing rows with identical shape → no-op (200, idempotent).
-        - Existing rows with different shape → edit (DELETE + INSERT in one tx).
+        - Existing rows with identical shape (incl. items lists) → no-op
+          (200, idempotent).
+        - Existing rows with different shape → edit (DELETE + INSERT in
+          one tx). The CASCADE FK on `payable_reconciliation_items`
+          drops the old per-item rows automatically.
+        - Empty allocations + existing rows → clear all linkages (DELETE).
         - Concurrent edit (row count changed mid-tx) → 409.
 
         Returns ServiceResult<ReconcileResult>:
-        - outcome: 'released' when the payment's calendar month is past,
-          'matched_pending' when it's the current month.
-        - affected_months: the distinct YYYY-MM of all touched payments
-          (just one in v1 — single payment per request).
-        - For released outcome, also computes affected_employee_count +
-          total_release_amount so the frontend toast can summarize.
-        - payment: null in v1 (full PendingPayment shape lands with Phase C-5).
+        - outcome: one of `unmatched | matched_partially | matched_pending |
+          released` (CR #67) — computed per the same uniform rule the
+          queue endpoint uses.
+        - affected_months: distinct YYYY-MM of touched payments (one in v1).
+        - For `released` and past-month `matched_partially` outcomes:
+          affected_employee_count + total_release_amount so the frontend
+          toast can summarize.
+        - payment: full PendingPayment shape post-write (CR #67); items[]
+          per allocation reflects what was just written (CR #69).
         """
-        # ── 1. Validate inputs ────────────────────────────────────────
+        # ── 1. Validate inputs (CR #69 adds items[] per allocation) ──
         if not str(payment_doc_sid).isdigit():
             return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
-        if not allocations:
-            return {'success': False, 'error': 'allocations must be non-empty'}
-        validated: List[tuple] = []  # (bill_sid_str, amount_int)
+        if not isinstance(allocations, list):
+            return {'success': False, 'error': 'allocations must be a list'}
+        # Each entry: (bill_sid_str, amount_int, items_list_or_None).
+        # `items_list_or_None` is None for proportional, list[str] (≥1 UPC) for priority.
+        validated: List[Tuple[str, int, Optional[List[str]]]] = []
         for a in allocations:
             b_sid = str(a.get('bill_sid') or '')
             if not b_sid.isdigit():
@@ -893,8 +1264,28 @@ class AccountPayableService:
             amt = a.get('amount')
             if not isinstance(amt, int) or amt <= 0:
                 return {'success': False, 'error': f'allocation.amount must be a positive int; got {amt!r}'}
-            validated.append((b_sid, amt))
-        total_alloc = sum(a for _, a in validated)
+            # CR #69: optional items[]. Empty list / missing / null →
+            # proportional mode (stored as None internally).
+            raw_items = a.get('items')
+            if raw_items in (None, []):
+                items_list = None
+            elif isinstance(raw_items, list):
+                if not all(isinstance(u, str) and u.strip() for u in raw_items):
+                    return {'success': False, 'error': 'allocation.items must be a list of non-empty UPC strings'}
+                # Dedup check — per CR #69 spec, same UPC twice is a 400.
+                seen = set()
+                for u in raw_items:
+                    if u in seen:
+                        return {
+                            'success': False,
+                            'error': f'allocation.items contains duplicate UPC {u!r}',
+                        }
+                    seen.add(u)
+                items_list = list(raw_items)   # preserve order — that's the priority sequence
+            else:
+                return {'success': False, 'error': 'allocation.items must be a list or null'}
+            validated.append((b_sid, amt, items_list))
+        total_alloc = sum(amt for _, amt, _ in validated)
 
         # ── 2. Fetch payment from Oracle ──────────────────────────────
         payment = self.repository.get_payment_meta(payment_doc_sid)
@@ -904,18 +1295,18 @@ class AccountPayableService:
                 'error': f'Payment {payment_doc_sid} not found or not a Charge receipt',
                 'not_found': True,
             }
-        if total_alloc != payment['amount']:
+        if total_alloc > payment['amount']:
             return {
                 'success': False,
                 'error': (
-                    f'allocations sum ({total_alloc:,}) must equal '
-                    f'payment amount ({payment["amount"]:,}) — partial confirms unsupported'
+                    f'allocations sum ({total_alloc:,}) must not exceed '
+                    f'payment amount ({payment["amount"]:,})'
                 ),
             }
 
         # ── 3. Bill lookups (single ledger replay) ────────────────────
         bills = self._load_bills()
-        for b_sid, amt in validated:
+        for b_sid, amt, _items in validated:
             if b_sid not in bills:
                 return {
                     'success': False,
@@ -923,13 +1314,45 @@ class AccountPayableService:
                     'not_found': True,
                 }
 
+        # ── 3b. CR #69: validate priority items against the bill ──────
+        # Per-bill item-revenue map for any allocation that has items[].
+        priority_bill_sids = [b for b, _, items in validated if items]
+        item_rev_by_bill: Dict[str, Dict[str, int]] = {}
+        if priority_bill_sids:
+            bill_item_rows = self.repository.get_bill_items(priority_bill_sids)
+            for r in bill_item_rows:
+                item_rev_by_bill.setdefault(r['bill_sid'], {})[r['upc']] = int(r['revenue_with_vat'] or 0)
+            for b_sid, amt, items in validated:
+                if not items:
+                    continue
+                bill_items = item_rev_by_bill.get(b_sid, {})
+                for upc in items:
+                    if upc not in bill_items:
+                        return {
+                            'success': False,
+                            'error': (
+                                f'UPC {upc!r} is not part of bill '
+                                f'#{bills[b_sid]["doc_no"]}'
+                            ),
+                        }
+                sum_rev = sum(bill_items[upc] for upc in items)
+                if amt > sum_rev:
+                    return {
+                        'success': False,
+                        'error': (
+                            f'allocation for bill #{bills[b_sid]["doc_no"]}: '
+                            f'amount ({amt:,}) exceeds combined revenue '
+                            f'({sum_rev:,}) of selected items'
+                        ),
+                    }
+
         # ── 4. Transaction: read existing, enforce cap, write ────────
         conn = get_postgres_connection()
         if conn is None:
             return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
         try:
             with conn.cursor() as cur:
-                # Existing linkages for THIS payment.
+                # Existing parent linkages for THIS payment.
                 cur.execute('''
                     SELECT bill_sid, amount_applied
                     FROM payable_reconciliations
@@ -937,23 +1360,45 @@ class AccountPayableService:
                     ORDER BY bill_sid
                 ''', (str(payment_doc_sid),))
                 existing = [(r[0], int(r[1])) for r in cur.fetchall()]
-                existing_sorted = sorted(existing)
-                requested_sorted = sorted(validated)
-                if existing_sorted == requested_sorted:
-                    # Idempotent — nothing to write.
+
+                # CR #69: existing per-item rows for the idempotency check.
+                cur.execute('''
+                    SELECT r.bill_sid, i.upc, i.order_index
+                    FROM payable_reconciliations r
+                    JOIN payable_reconciliation_items i ON i.reconciliation_id = r.id
+                    WHERE r.payment_doc_sid = %s
+                    ORDER BY r.bill_sid, i.order_index
+                ''', (str(payment_doc_sid),))
+                existing_items_by_bill: Dict[str, List[str]] = {}
+                for r in cur.fetchall():
+                    existing_items_by_bill.setdefault(r[0], []).append(r[1])
+
+                def _full_shape(allocs_with_items, items_by_bill):
+                    return sorted(
+                        (b, amt, tuple(items if items else items_by_bill.get(b, [])))
+                        for b, amt, items in allocs_with_items
+                    )
+
+                # Recast existing rows into the same shape for comparison.
+                existing_full = sorted(
+                    (b, amt, tuple(existing_items_by_bill.get(b, [])))
+                    for b, amt in existing
+                )
+                requested_full = sorted(
+                    (b, amt, tuple(items or []))
+                    for b, amt, items in validated
+                )
+                if existing_full == requested_full:
                     conn.commit()
                     return self._reconcile_response(
                         payment=payment, allocations=validated, bills=bills,
                     )
 
-                # Cumulative cap: SUM(existing amount for bill X across ALL payments)
-                # excluding our own existing rows + new amount ≤ original_charge.
-                # If we're editing, our own rows are about to be deleted, so
-                # subtract them from the cap baseline.
+                # Cumulative cap (CR #68 void-aware).
                 own_by_bill: Dict[str, int] = {}
                 for b_sid, amt in existing:
                     own_by_bill[b_sid] = own_by_bill.get(b_sid, 0) + amt
-                for b_sid, new_amt in validated:
+                for b_sid, new_amt, _items in validated:
                     cur.execute('''
                         SELECT COALESCE(SUM(amount_applied), 0)
                         FROM payable_reconciliations
@@ -961,41 +1406,71 @@ class AccountPayableService:
                     ''', (b_sid,))
                     other_total = int(cur.fetchone()[0]) - own_by_bill.get(b_sid, 0)
                     bill = bills[b_sid]
-                    cap = bill['original_charge']
+                    cap = int(bill['original_charge']) - int(bill.get('total_voided', 0))
                     if other_total + new_amt > cap:
                         conn.rollback()
                         overflow = other_total + new_amt - cap
                         return {
                             'success': False,
                             'error': (
-                                f'Bill #{bill["doc_no"]} would exceed its original '
-                                f'charge by {overflow:,} VND'
+                                f'Bill #{bill["doc_no"]} would exceed its '
+                                f'available cap by {overflow:,} VND'
                             ),
                         }
 
-                # Replace: DELETE then INSERT in the same tx.
+                # Replace: DELETE parent rows (CASCADE drops item rows),
+                # then INSERT new parents, then SELECT IDs, then INSERT items.
                 if existing:
                     cur.execute(
                         'DELETE FROM payable_reconciliations WHERE payment_doc_sid = %s',
                         (str(payment_doc_sid),),
                     )
                     if cur.rowcount != len(existing):
-                        # Another session changed the row count between our
-                        # SELECT and our DELETE → 409 + rollback.
                         conn.rollback()
                         return {
                             'success': False,
                             'error': 'Payment was reconciled by another user — refresh required',
                             'conflict': True,
                         }
-                cur.executemany('''
-                    INSERT INTO payable_reconciliations
-                        (payment_doc_sid, bill_sid, amount_applied, created_by)
-                    VALUES (%s, %s, %s, %s)
-                ''', [
-                    (str(payment_doc_sid), b_sid, amt, created_by_user_sid)
-                    for b_sid, amt in validated
-                ])
+                if validated:
+                    cur.executemany('''
+                        INSERT INTO payable_reconciliations
+                            (payment_doc_sid, bill_sid, amount_applied, created_by)
+                        VALUES (%s, %s, %s, %s)
+                    ''', [
+                        (str(payment_doc_sid), b_sid, amt, created_by_user_sid)
+                        for b_sid, amt, _items in validated
+                    ])
+
+                    # CR #69: write per-item rows for priority allocations.
+                    if any(items for _, _, items in validated):
+                        cur.execute('''
+                            SELECT id, bill_sid
+                            FROM payable_reconciliations
+                            WHERE payment_doc_sid = %s
+                        ''', (str(payment_doc_sid),))
+                        id_by_bill = {r[1]: r[0] for r in cur.fetchall()}
+
+                        item_rows: List[Tuple[int, str, int, int]] = []
+                        for b_sid, amt, items in validated:
+                            if not items:
+                                continue
+                            assignments = self._assign_per_item(
+                                items_in_order=items,
+                                item_revenue_by_upc=item_rev_by_bill[b_sid],
+                                amount=amt,
+                            )
+                            recon_id = id_by_bill[b_sid]
+                            for order_index, (upc, assigned) in enumerate(assignments):
+                                item_rows.append(
+                                    (recon_id, upc, order_index, assigned)
+                                )
+                        if item_rows:
+                            cur.executemany('''
+                                INSERT INTO payable_reconciliation_items
+                                    (reconciliation_id, upc, order_index, amount_assigned)
+                                VALUES (%s, %s, %s, %s)
+                            ''', item_rows)
                 conn.commit()
         except Exception as e:
             try:
@@ -1014,37 +1489,70 @@ class AccountPayableService:
         )
 
     def _reconcile_response(
-        self, *, payment: Dict[str, Any], allocations: List[tuple],
+        self, *, payment: Dict[str, Any],
+        allocations: List[Tuple[str, int, Optional[List[str]]]],
         bills: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Build the ReconcileResult: outcome + affected_months + (for released)
-        the employee/release totals."""
+        """Build the ReconcileResult (CR #67; CR #69 priority-aware):
+        - `outcome` ∈ {unmatched, matched_partially, matched_pending, released}
+          computed via the uniform `_payment_status_for` rule.
+        - `affected_months`: distinct YYYY-MM of touched payments (one in v1).
+        - `affected_employee_count` + `total_release_amount`: computed for
+          past-month outcomes. CR #69: priority allocations release per
+          item's `amount_assigned`; proportional uses the per-bill share
+          ratio (existing math).
+        - `payment`: full PendingPayment shape post-write (CR #67); items[]
+          per allocation reflects what was just stored.
+        """
         today = _today()
         pay_month = payment['payment_date'][:7]
         cur_month = _current_month_str(today)
-        outcome = 'released' if pay_month < cur_month else 'matched_pending'
+        total_alloc = sum(amt for _, amt, _ in allocations)
+        outcome, _is_overdue = self._payment_status_for(
+            amount=payment['amount'], applied=total_alloc,
+            pay_month=pay_month, current_month=cur_month,
+        )
 
         result: Dict[str, Any] = {
             'outcome':         outcome,
-            # `payment` shape is the queue PendingPayment (Phase C-5).
-            # Until that lands, return null and let the frontend refetch.
-            'payment':         None,
             'affected_months': [pay_month],
         }
-        if outcome == 'released':
-            # Compute release totals: revenue × effective_rate × (amount / original_charge)
-            # per item on each allocated bill, then aggregate by employee.
-            alloc_bill_sids = [b_sid for b_sid, _ in allocations]
+
+        # Release totals: computed for past-month allocations with money on them.
+        is_past = pay_month < cur_month
+        if is_past and total_alloc > 0:
+            alloc_bill_sids = [b_sid for b_sid, _, _ in allocations]
             items = self.repository.get_bill_items(alloc_bill_sids)
             auto = self._load_auto_rates(alloc_bill_sids)
             custom = self._load_custom_rates(alloc_bill_sids)
             by_emp: Dict[str, int] = {}
             total_release = 0
-            for b_sid, amt in allocations:
+            for b_sid, amt, priority_items in allocations:
                 bill = bills[b_sid]
                 if bill['original_charge'] <= 0:
                     continue
-                share_ratio = amt / bill['original_charge']
+                # CR #69: per-item factor map for this (bill, allocation).
+                # Proportional → all items share `amt / original_charge`.
+                # Priority    → each listed item gets `amt_assigned / item.revenue`;
+                #               others get 0 (excluded from release).
+                if priority_items:
+                    # Recompute the priority-fill assignments locally — the
+                    # transaction already committed; we need the same numbers
+                    # for the toast. Cheaper than re-querying the join table.
+                    rev_by_upc = {
+                        it['upc']: int(it['revenue_with_vat'] or 0)
+                        for it in items if it['bill_sid'] == b_sid
+                    }
+                    try:
+                        assignments = self._assign_per_item(
+                            items_in_order=priority_items,
+                            item_revenue_by_upc=rev_by_upc,
+                            amount=amt,
+                        )
+                    except ValueError:
+                        # Should never happen — validation rejects this earlier.
+                        assignments = []
+                    assigned_by_upc = {upc: assigned for upc, assigned in assignments}
                 for it in items:
                     if it['bill_sid'] != b_sid:
                         continue
@@ -1053,7 +1561,17 @@ class AccountPayableService:
                     effective = c if c is not None else (
                         a['effective_rate'] if (a and a['effective_rate'] is not None) else 0.0
                     )
-                    released = int(round((it['revenue_with_vat'] or 0) * effective * share_ratio))
+                    rev_with_vat = int(it['revenue_with_vat'] or 0)
+                    if priority_items:
+                        # Priority mode — only listed items contribute.
+                        amt_for_item = assigned_by_upc.get(it['upc'], 0)
+                        if amt_for_item == 0 or rev_with_vat == 0:
+                            continue
+                        share_ratio = amt_for_item / rev_with_vat
+                        released = int(round(rev_with_vat * effective * share_ratio))
+                    else:
+                        share_ratio = amt / bill['original_charge']
+                        released = int(round(rev_with_vat * effective * share_ratio))
                     if released == 0:
                         continue
                     code = it.get('employee_code') or '__unknown__'
@@ -1061,17 +1579,51 @@ class AccountPayableService:
                     total_release += released
             result['affected_employee_count'] = len(by_emp)
             result['total_release_amount'] = total_release
+        else:
+            result['affected_employee_count'] = 0
+            result['total_release_amount'] = 0
+
+        # CR #67: embed the post-write PendingPayment. Re-run the replay
+        # so the response reflects the just-committed state. Cost is one
+        # extra Oracle round-trip per reconcile; commission's own queue
+        # uses the same path on every read.
+        result['payment'] = self._pending_payment_for(payment_doc_sid=str(payment['doc_sid']))
         return {'success': True, 'data': result}
+
+    def _pending_payment_for(
+        self, payment_doc_sid: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Reload + project a single payment as a PendingPayment row.
+
+        Used by `reconcile` to embed the post-write payment in its
+        response (CR #67). Returns `None` if the payment isn't in the
+        active Charge window.
+        """
+        all_meta = self.repository.get_charge_payments()
+        match = next(
+            (p for p in all_meta if p['payment_doc_sid'] == payment_doc_sid),
+            None,
+        )
+        if match is None:
+            return None
+        bills = self._load_bills()
+        payment_allocations = self._transpose_to_payment_allocations(bills)
+        rows = self._build_pending_payment_rows(
+            payments_meta=[match],
+            bills=bills,
+            payment_allocations=payment_allocations,
+        )
+        return rows[0] if rows else None
 
     def unmatch(self, payment_doc_sid: str) -> Dict[str, Any]:
         """Remove every Postgres `payable_reconciliations` row for the payment.
 
-        CR #62: FIFO-sourced matches cannot be unmatched directly — they
-        are derived from the ledger replay, not stored. If no manual row
-        exists for this payment, return 400 with guidance to manually
-        reconcile against the desired bill(s) instead (which displaces
-        FIFO on the next read via the priority order). Frontend chose
-        option A — reject — over option B (insert a suppression flag).
+        CR #62: REF_SALE_SID-sourced matches cannot be unmatched here —
+        they come from Oracle's `DOCUMENT.REF_SALE_SID` column. If no manual
+        row exists, return 400 with guidance to override the REF link by
+        inserting a manual reconciliation against the desired bill(s).
+        Frontend chose option A — reject — over option B (insert a
+        suppression flag).
 
         Returns `{success, data: {payment_doc_sid, deleted_count}}` on success.
         """
@@ -1093,9 +1645,9 @@ class AccountPayableService:
                         'success': False,
                         'error': (
                             'Payment has no manual linkage to remove. '
-                            'If it was matched via FIFO or REF_SALE_SID, '
-                            'reconcile manually against the desired bill(s) '
-                            'to override the inference.'
+                            'If it was matched via REF_SALE_SID, reconcile '
+                            'manually against the desired bill(s) to override '
+                            'the auto-link.'
                         ),
                         'not_found': True,
                     }
@@ -1118,6 +1670,274 @@ class AccountPayableService:
                 'deleted_count':   deleted,
             },
         }
+
+    def void_remaining(
+        self,
+        bill_sid: str,
+        amount: int,
+        reason: Optional[str],
+        voided_by: str,
+    ) -> Dict[str, Any]:
+        """CR #68: write off part (or all) of a bill's remaining balance.
+
+        Terminal — voids in v1 cannot be reversed (operator creates a
+        manual payment / credit adjustment instead). The void amount is
+        excluded from commission release: it never enters `amount_applied`,
+        and the release math in `compute_released_for_month` (CR #66) uses
+        `amount_applied / original_charge`, so 0 release on voided VND
+        falls out automatically.
+
+        Validations:
+        - `bill_sid` is a digit string; the bill exists in the active
+          AP ledger.
+        - `amount` is a positive int and `<= bill.remaining_unpaid` (the
+          post-void formula, so prior voids are already subtracted).
+        - `reason` is an optional string (nullable).
+        - `voided_by` is the authenticated user's identifier (typically
+          email) — resolved at the route layer from Flask `g`.
+
+        Returns ServiceResult<{ bill: BillDetail, void_id: str }>. On the
+        same request after writing the void, re-loads the bill via
+        `get_bill_detail` so the response reflects the new
+        `total_voided` / `remaining_unpaid` / `status`.
+        """
+        # ── 1. Validate inputs ────────────────────────────────────────
+        if not str(bill_sid).isdigit():
+            return {'success': False, 'error': 'bill_sid must be a numeric string'}
+        if not isinstance(amount, int) or amount <= 0:
+            return {'success': False, 'error': 'amount must be a positive int'}
+        if reason is not None and not isinstance(reason, str):
+            return {'success': False, 'error': 'reason must be a string or null'}
+        if not isinstance(voided_by, str) or not voided_by.strip():
+            return {'success': False, 'error': 'voided_by must be a non-empty string'}
+
+        # ── 2. Load bills, find target, check the new amount fits ────
+        bills = self._load_bills()
+        bill = bills.get(str(bill_sid))
+        if bill is None:
+            return {
+                'success': False,
+                'error': f'Bill {bill_sid} not found in active AP ledger',
+                'not_found': True,
+            }
+        # `remaining_unpaid` already factors in any prior voids via the
+        # `_apply_voids_to_bills` pass.
+        remaining = int(bill['remaining_unpaid'])
+        if remaining <= 0:
+            return {
+                'success': False,
+                'error': (
+                    f'Bill #{bill["doc_no"]} has no remaining balance to void '
+                    f'(already fully settled by payments or prior voids)'
+                ),
+            }
+        if amount > remaining:
+            return {
+                'success': False,
+                'error': (
+                    f'amount ({amount:,}) exceeds bill remaining '
+                    f'({remaining:,})'
+                ),
+            }
+
+        # ── 3. INSERT void row ───────────────────────────────────────
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    INSERT INTO payable_bill_voids
+                        (bill_sid, amount, reason, voided_by)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING void_id
+                ''', (str(bill_sid), amount, reason, voided_by))
+                void_id = cur.fetchone()[0]
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'void failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # ── 4. Build response: refetched BillDetail + new void_id ────
+        detail = self.get_bill_detail(str(bill_sid))
+        if not detail.get('success'):
+            # Highly unlikely (the bill was found above), but surface a
+            # clean error rather than dropping the just-inserted void.
+            return detail
+        return {
+            'success': True,
+            'data': {
+                'bill':    detail['data'],
+                'void_id': str(void_id),
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # CR #70 — tag / untag remake (corrective payment)
+    # ------------------------------------------------------------------
+
+    def tag_remake(
+        self, payment_doc_sid: str, tagged_by: str,
+    ) -> Dict[str, Any]:
+        """CR #70: tag an unmatched / matched_partially payment as a
+        remake (corrective doc — no real outstanding bill behind it).
+
+        Validations:
+        - `payment_doc_sid` is a digit string.
+        - Payment exists in the active Charge window (else 404).
+        - Current status is `unmatched` or `matched_partially`; reject
+          `matched_pending` / `released` (operator must unmatch first).
+        - No allocation source is `ref_sale_sid` — Oracle-auto-linked
+          payments must be fixed at the source bill in Oracle.
+        - If already tagged → 200 no-op (idempotent per spec).
+        - `tagged_by` is non-empty (typically user email from g.email).
+
+        Side effects (when not a no-op):
+        - DELETE any rows in `payable_reconciliations` for this payment
+          (per spec: "drops any existing allocations"). CASCADE FK drops
+          the per-item rows automatically.
+        - INSERT a new active row into `payable_payment_remakes`.
+
+        Returns ServiceResult<PendingPayment> with the updated state
+        (status='remake', allocations=[], remake_tagged_at + _by populated).
+        """
+        if not str(payment_doc_sid).isdigit():
+            return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
+        if not isinstance(tagged_by, str) or not tagged_by.strip():
+            return {'success': False, 'error': 'tagged_by must be a non-empty string'}
+
+        # Quick existence check via the queue's projection — gives us both
+        # the existence guarantee and the computed status in one call.
+        existing = self._pending_payment_for(str(payment_doc_sid))
+        if existing is None:
+            return {
+                'success': False,
+                'error': f'Payment {payment_doc_sid} not found in active Charge ledger',
+                'not_found': True,
+            }
+
+        current_status = existing['status']
+        # Idempotent: already tagged → return current state.
+        if current_status == 'remake':
+            return {'success': True, 'data': existing}
+
+        # Reject if the payment is bound to a real bill linkage.
+        if current_status in ('matched_pending', 'released'):
+            return {
+                'success': False,
+                'error': (
+                    f'Payment {payment_doc_sid} is in state {current_status!r}; '
+                    'unmatch first before tagging as remake'
+                ),
+            }
+        if existing.get('match_source') == 'ref_sale_sid':
+            return {
+                'success': False,
+                'error': (
+                    f'Payment {payment_doc_sid} is auto-linked via '
+                    'REF_SALE_SID; remake tag must be made at the source '
+                    'bill in Oracle'
+                ),
+            }
+
+        # Write: drop any manual reconciliations + INSERT remake row.
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'DELETE FROM payable_reconciliations WHERE payment_doc_sid = %s',
+                    (str(payment_doc_sid),),
+                )
+                cur.execute('''
+                    INSERT INTO payable_payment_remakes
+                        (payment_doc_sid, tagged_by)
+                    VALUES (%s, %s)
+                ''', (str(payment_doc_sid), tagged_by))
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'tag-remake failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # Re-project the payment so the response reflects the post-tag
+        # state (status='remake', allocations=[], audit fields set).
+        updated = self._pending_payment_for(str(payment_doc_sid))
+        return {'success': True, 'data': updated}
+
+    def untag_remake(
+        self, payment_doc_sid: str, untagged_by: str,
+    ) -> Dict[str, Any]:
+        """CR #70: reverse a remake tag — the payment returns to the
+        unmatched queue (with `is_overdue` recomputed from its date).
+
+        Validations:
+        - `payment_doc_sid` is a digit string.
+        - Payment is currently tagged as remake (else 400).
+        - `untagged_by` is non-empty.
+
+        Side effect: UPDATE the active remake row, setting `untagged_at`
+        + `untagged_by`. Keeps a history row for finance audit.
+        """
+        if not str(payment_doc_sid).isdigit():
+            return {'success': False, 'error': 'payment_doc_sid must be a numeric string'}
+        if not isinstance(untagged_by, str) or not untagged_by.strip():
+            return {'success': False, 'error': 'untagged_by must be a non-empty string'}
+
+        conn = get_postgres_connection()
+        if conn is None:
+            return {'success': False, 'error': 'Failed to connect to PostgreSQL'}
+        try:
+            with conn.cursor() as cur:
+                # UPDATE the active row (untagged_at IS NULL). If no
+                # active row exists, the rowcount tells us this payment
+                # isn't tagged → reject.
+                cur.execute('''
+                    UPDATE payable_payment_remakes
+                    SET untagged_at = NOW(), untagged_by = %s
+                    WHERE payment_doc_sid = %s
+                      AND untagged_at IS NULL
+                ''', (untagged_by, str(payment_doc_sid)))
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return {
+                        'success': False,
+                        'error': (
+                            f'Payment {payment_doc_sid} is not currently '
+                            'tagged as remake'
+                        ),
+                    }
+                conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {'success': False, 'error': f'untag-remake failed: {e}'}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        updated = self._pending_payment_for(str(payment_doc_sid))
+        return {'success': True, 'data': updated}
 
     def set_item_custom_rate(
         self,

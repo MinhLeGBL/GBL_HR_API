@@ -68,82 +68,158 @@ class TestReplayChronology:
         assert bills['B1']['payments_chrono'][0]['amount_applied'] == 400_000
         assert bills['B1']['payments_chrono'][0]['source'] == 'ref_sale_sid'
 
-    def test_fifo_pays_oldest_first(self):
-        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology([
-            _evt('B1', 500_000, '2026-04-01'),
-            _evt('B2', 700_000, '2026-04-02'),
-            _evt('PAY1', -900_000, '2026-04-10'),   # no ref → FIFO
-        ])
-        # 900k consumes all of B1 (500k) then 400k of B2 (700k)
-        assert bills['B1']['remaining'] == 0
-        assert bills['B2']['remaining'] == 300_000
-        assert bills['B1']['payments_chrono'][0]['amount_applied'] == 500_000
-        assert bills['B1']['payments_chrono'][0]['source'] == 'fifo'
-        assert bills['B2']['payments_chrono'][0]['amount_applied'] == 400_000
-        assert bills['B2']['payments_chrono'][0]['source'] == 'fifo'
+    def test_ref_payment_exceeding_bill_leaves_payment_remainder_unmatched(self):
+        """v2.0.0: when a REF_SALE_SID payment's magnitude exceeds the
+        referenced bill's remaining balance, the bill is fully cleared
+        and the payment's leftover stays UNMATCHED — it does NOT spill
+        over to other open bills (that would be FIFO, which we removed).
 
-    def test_ref_payment_wins_over_fifo_even_if_later(self):
-        """A REF_SALE_SID payment goes to its target even if a later
-        FIFO payment could have settled the same bill."""
+        Mirrors the real bill 2978 scenario: a "Payment on Account →
+        Charge" entry intended to clear bill 2767 (71.2M) and partially
+        bill 2797 (the second part was never auto-linked because
+        REF_SALE_SID only points at one target).
+        """
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology([
+            _evt('B1', 300_000, '2026-04-01'),     # small target
+            _evt('B2', 500_000, '2026-04-02'),     # another open bill — must NOT auto-fill
+            _evt('PAY1', -800_000, '2026-04-10', ref='B1'),  # 500k leftover after B1
+        ])
+        # B1 fully paid by the REF payment.
+        assert bills['B1']['remaining'] == 0
+        assert bills['B1']['payments_chrono'][0]['source'] == 'ref_sale_sid'
+        assert bills['B1']['payments_chrono'][0]['amount_applied'] == 300_000
+        # B2 stays open — leftover does NOT spill via FIFO.
+        assert bills['B2']['remaining'] == 500_000
+        assert bills['B2']['payments_chrono'] == []
+        # Payment side: 500k of the original 800k stays unmatched.
+        pay = next(p for p in payments if p['doc_sid'] == 'PAY1')
+        assert pay['amount'] == 800_000
+        assert pay['remaining'] == 500_000
+
+    def test_payments_list_tracks_remaining_across_mixed_allocations(self):
+        """v2.0.0 contract on the returned `payments` list: every payment
+        event appears with its `remaining` reflecting the unallocated
+        portion, regardless of whether the allocation came from REF,
+        manual, or stayed empty.
+
+        Same customer ledger covering three payment fates in one replay.
+        """
+        events = [
+            _evt('B1', 1_000_000, '2026-04-01'),
+            _evt('B2',   500_000, '2026-04-02'),
+            _evt('B3',   400_000, '2026-04-03'),
+            # PAY1 fully consumed by REF on B1.
+            _evt('PAY1', -1_000_000, '2026-04-05', ref='B1'),
+            # PAY2 fully consumed by manual on B2.
+            _evt('PAY2',   -500_000, '2026-04-10'),
+            # PAY3 unreferenced and not in manual map → stays fully unmatched.
+            _evt('PAY3',   -400_000, '2026-04-12'),
+        ]
+        manual = {'PAY2': [{'bill_sid': 'B2', 'amount_applied': 500_000}]}
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # Bill side
+        assert bills['B1']['remaining'] == 0      # paid by PAY1 (ref)
+        assert bills['B2']['remaining'] == 0      # paid by PAY2 (manual)
+        assert bills['B3']['remaining'] == 400_000  # untouched — no FIFO
+        # Payment-side `remaining` for each: 0 / 0 / full magnitude.
+        by_doc = {p['doc_sid']: p for p in payments}
+        assert by_doc['PAY1']['amount'] == 1_000_000
+        assert by_doc['PAY1']['remaining'] == 0
+        assert by_doc['PAY2']['amount'] == 500_000
+        assert by_doc['PAY2']['remaining'] == 0
+        assert by_doc['PAY3']['amount'] == 400_000
+        assert by_doc['PAY3']['remaining'] == 400_000
+        # And — crucially — every payment event is in the returned list,
+        # even the unmatched one (this is the queue endpoint's input).
+        assert {p['doc_sid'] for p in payments} == {'PAY1', 'PAY2', 'PAY3'}
+
+    def test_unreferenced_payments_stay_unmatched(self):
+        """v2.0.0: payments without REF_SALE_SID or manual allocation
+        leave every bill open (no FIFO fallback). Their full magnitude
+        stays in the returned `payments` list as `remaining`."""
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology([
+            _evt('B1', 500_000, '2026-04-01'),
+            _evt('B2', 700_000, '2026-04-02'),
+            _evt('PAY1', -900_000, '2026-04-10'),   # no ref, no manual → stays unmatched
+        ])
+        # Neither bill receives any allocation.
+        assert bills['B1']['remaining'] == 500_000
+        assert bills['B2']['remaining'] == 700_000
+        assert bills['B1']['payments_chrono'] == []
+        assert bills['B2']['payments_chrono'] == []
+        # The full 900k stays unmatched on the payment side.
+        assert any(p['doc_sid'] == 'PAY1' and p['remaining'] == 900_000 for p in payments)
+
+    def test_ref_payment_applies_unreferenced_stays_unmatched(self):
+        """v2.0.0: a REF_SALE_SID payment goes to its target; a separate
+        unreferenced payment for a different bill is NOT auto-allocated."""
         bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology([
             _evt('B1', 500_000, '2026-04-01'),
             _evt('B2', 700_000, '2026-04-02'),
-            _evt('PAY1', -300_000, '2026-04-10'),               # FIFO → B1
+            _evt('PAY1', -300_000, '2026-04-10'),               # no ref → stays unmatched
             _evt('PAY2', -700_000, '2026-04-15', ref='B2'),    # ref → B2
         ])
-        # B1 takes the FIFO 300k → 200k remaining
-        # B2 takes the ref 700k → fully paid
-        assert bills['B1']['remaining'] == 200_000
+        # B1 unaffected (no FIFO).
+        assert bills['B1']['remaining'] == 500_000
+        assert bills['B1']['payments_chrono'] == []
+        # B2 fully paid via ref.
         assert bills['B2']['remaining'] == 0
-        # B1 has the FIFO payment; B2 has the ref payment
-        assert bills['B1']['payments_chrono'][0]['source'] == 'fifo'
         assert bills['B2']['payments_chrono'][0]['source'] == 'ref_sale_sid'
 
     def test_chronology_sorted_by_date_within_bill(self):
-        """Pass 1 (ref) then Pass 2 (fifo) can append out of date order;
+        """Pass 1 (ref) and Pass 2 (manual) can append out of date order;
         the per-bill chronology must come back sorted by payment_date."""
-        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology([
+        events = [
             _evt('B1', 1_000_000, '2026-04-01'),
-            _evt('PAY1', -300_000, '2026-04-15'),              # FIFO → B1 (300k)
+            _evt('PAY1', -300_000, '2026-04-15'),              # manual → B1 (300k), later date
             _evt('PAY2', -200_000, '2026-04-10', ref='B1'),    # ref → B1 (200k), earlier date
-        ])
-        # Pass 1 runs ref first (Apr-10), pass 2 then FIFO (Apr-15).
+        ]
+        manual = {'PAY1': [{'bill_sid': 'B1', 'amount_applied': 300_000}]}
+        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
+            events, manual_allocations_by_payment=manual,
+        )
+        # Pass 1 runs ref first (Apr-10), Pass 2 then manual (Apr-15).
         # Algorithm appends pass-1 first, but sort restores chronology.
         dates = [p['payment_date'] for p in bills['B1']['payments_chrono']]
         assert dates == sorted(dates)
         assert dates == ['2026-04-10', '2026-04-15']
 
-    def test_orphan_ref_sale_sid_falls_through_to_fifo(self):
-        """A payment with a REF_SALE_SID that doesn't match any bill in
-        the customer's ledger should fall through to FIFO (commission's
-        algorithm — orphan refs are not silently discarded)."""
-        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology([
+    def test_orphan_ref_sale_sid_stays_unmatched(self):
+        """v2.0.0: a payment with a REF_SALE_SID pointing at no known bill
+        does NOT fall through to FIFO — it stays unmatched until a manual
+        reconciliation is added."""
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology([
             _evt('B1', 500_000, '2026-04-01'),
             _evt('PAY1', -500_000, '2026-04-10', ref='NONEXISTENT'),
         ])
-        assert bills['B1']['remaining'] == 0
-        assert bills['B1']['payments_chrono'][0]['source'] == 'fifo'
+        # B1 untouched.
+        assert bills['B1']['remaining'] == 500_000
+        assert bills['B1']['payments_chrono'] == []
+        # Payment full magnitude stays unallocated.
+        assert any(p['doc_sid'] == 'PAY1' and p['remaining'] == 500_000 for p in payments)
 
     def test_empty_events_yield_no_bills(self):
         bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology([])
         assert bills == {}
         assert payments == []
 
-    # ----------------------- CR #62: Pass 1.5 (manual) -----------------------
+    # ----------------------- CR #62: Pass 2 (manual) -----------------------
 
-    def test_manual_pass_displaces_fifo(self):
-        """Manual allocation routes the payment to the targeted bill
-        even when FIFO would have picked a different (older) bill."""
+    def test_manual_pass_routes_payment_to_targeted_bill(self):
+        """Manual allocation routes the payment to the targeted bill —
+        the only auto allocation path besides REF_SALE_SID (v2.0.0)."""
         events = [
             _evt('B1', 500_000, '2026-04-01'),
             _evt('B2', 500_000, '2026-04-02'),
-            _evt('PAY1', -500_000, '2026-04-10'),   # no ref, FIFO default would target B1
+            _evt('PAY1', -500_000, '2026-04-10'),   # no ref, no manual default
         ]
         manual = {'PAY1': [{'bill_sid': 'B2', 'amount_applied': 500_000}]}
         bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
             events, manual_allocations_by_payment=manual,
         )
-        # Manual sent it to B2, not B1.
+        # Manual sent it to B2; B1 stays open (no FIFO).
         assert bills['B1']['remaining'] == 500_000
         assert bills['B2']['remaining'] == 0
         assert bills['B2']['payments_chrono'][0]['source'] == 'manual'
@@ -171,19 +247,22 @@ class TestReplayChronology:
         assert manual_entry['amount_applied'] == 200_000
 
     def test_manual_pass_skips_unknown_bill(self):
-        """A manual row referencing a bill from a different customer's
-        ledger silently falls through to FIFO instead of crashing."""
+        """v2.0.0: a manual row referencing a bill from a different
+        customer's ledger silently skips here — the row will fire in
+        that customer's replay. With no FIFO fallback, the payment stays
+        unmatched in this customer's slice."""
         events = [
             _evt('B1', 500_000, '2026-04-01'),
             _evt('PAY1', -500_000, '2026-04-10'),
         ]
         manual = {'PAY1': [{'bill_sid': 'B_OTHER_CUSTOMER', 'amount_applied': 500_000}]}
-        bills, _ = AccountPayableRepository._replay_charge_ledger_with_chronology(
+        bills, payments = AccountPayableRepository._replay_charge_ledger_with_chronology(
             events, manual_allocations_by_payment=manual,
         )
-        # B1 absorbs the payment via FIFO since manual's target wasn't found.
-        assert bills['B1']['remaining'] == 0
-        assert bills['B1']['payments_chrono'][0]['source'] == 'fifo'
+        # B1 stays open — manual's target wasn't in this customer's ledger.
+        assert bills['B1']['remaining'] == 500_000
+        assert bills['B1']['payments_chrono'] == []
+        assert any(p['doc_sid'] == 'PAY1' and p['remaining'] == 500_000 for p in payments)
 
     def test_manual_allocation_caps_at_bill_remaining(self):
         """Manual amount > bill.remaining only applies the bill's remaining capacity."""
@@ -226,8 +305,8 @@ class TestGetAllBillsSmoke:
 
     @patch('app.modules.account_payable.repository.get_oracle_connection')
     def test_classifies_status_correctly(self, mock_get_conn):
-        # Build a fake Oracle response: 3 customers worth of events.
-        # - Cust 1001: B1=1M open + B2=500k partial(200k paid) + B3=300k fully paid
+        # v2.0.0: only REF_SALE_SID is auto-applied (no FIFO).
+        # - Cust 1001: B1=1M open + B2=500k open + B3=300k fully paid via REF
         rows = [
             # Customer 1001
             ('1001', 'Customer A', 'B1', 'D-1', 'HBT', 1_000_000,
@@ -236,10 +315,10 @@ class TestGetAllBillsSmoke:
              None,   500_000, None, '2026-04-02', '2026-04'),
             ('1001', 'Customer A', 'B3', 'D-3', 'HBT',   300_000,
              None,   300_000, None, '2026-04-03', '2026-04'),
-            # 500k payment with ref to B3 (fully pays it)
+            # 300k payment with ref to B3 (fully pays it)
             ('1001', 'Customer A', 'P1', 'D-P1', 'HBT', -300_000,
              'B3',         0, None, '2026-04-10', '2026-04'),
-            # 200k FIFO payment → goes to B1 (oldest open)
+            # 200k payment with no ref — stays unmatched (was FIFO pre-v2.0.0)
             ('1001', 'Customer A', 'P2', 'D-P2', 'HBT', -200_000,
              None,         0, None, '2026-04-15', '2026-04'),
         ]
@@ -257,17 +336,19 @@ class TestGetAllBillsSmoke:
 
         result = AccountPayableRepository().get_all_bills()
 
-        assert result['B1']['status'] == 'partial'
-        assert result['B1']['remaining_unpaid'] == 800_000      # 1M - 200k FIFO
-        assert result['B1']['total_paid'] == 200_000
+        # B1 stays open — no REF, no manual → no auto allocation.
+        assert result['B1']['status'] == 'open'
+        assert result['B1']['remaining_unpaid'] == 1_000_000
+        assert result['B1']['total_paid'] == 0
+        assert result['B1']['payments'] == []
+        # B2 stays open.
         assert result['B2']['status'] == 'open'
         assert result['B2']['remaining_unpaid'] == 500_000
+        # B3 fully paid via REF.
         assert result['B3']['status'] == 'fully_paid'
         assert result['B3']['remaining_unpaid'] == 0
         assert result['B3']['total_paid'] == 300_000
-        # B3 has one ref-source payment; B1 has one fifo-source payment
         assert result['B3']['payments'][0]['source'] == 'ref_sale_sid'
-        assert result['B1']['payments'][0]['source'] == 'fifo'
 
     @patch('app.modules.account_payable.repository.get_oracle_connection')
     def test_connection_failure_returns_empty(self, mock_get_conn):

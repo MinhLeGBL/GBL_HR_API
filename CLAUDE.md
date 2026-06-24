@@ -20,6 +20,7 @@ app/
     health/                # Health check endpoints
     bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
     crm/                   # Customer RFM segmentation (luxury hybrid approach)
+    handcarry/             # Hand-carry UPC list management (sub-feature of commission)
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -44,6 +45,7 @@ tests/                     # Mirrors module structure
 | `modules/health` | `health_bp` | `/api/v1/health` | — | API + database health checks |
 | `modules/bathroom` | `bathroom_bp` | `/api/v1/bathroom` | `BathroomService` | Product catalog, price data import (Dolomite, Valsir, Paffoni) |
 | `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
+| `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
 | `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
 
 ## Import Rules
@@ -165,60 +167,103 @@ FLASK_ENV=testing python -c "from app.main import app; print('OK')"
 python scripts/database/init_db.py
 ```
 
-## Frontend CR Documentation (API Change Requests)
+## CR System (API Change Requests) — symmetric model (CR #74)
 
-The frontend project (`GBL_HR_Frontend`) uses per-feature CR files to communicate API requirements:
+The two repos exchange change requests symmetrically. Each repo's `docs/cr/`
+holds its **outgoing** asks; the fulfiller reads the requester's repo.
 
 ```
-GBL_HR_Frontend/docs/
-├── API_REFERENCE.md          # Slim index: architecture, endpoint tables, change log
-└── cr/
-    ├── commission.md          # Commission feature
-    ├── employees.md           # Employee management
-    ├── permissions.md         # Permissions & access
-    └── users.md               # User management & auth
+GBL_HR_API/                              GBL_MASTER_FRONTEND/
+├── docs/cr/<feature>.md                 ├── docs/cr/<feature>.md
+│   (backend → frontend outgoing,        │   (frontend → backend outgoing,
+│    pending only; feature branch only)  │    pending only; feature branch only)
+└── app/modules/<x>/CHANGELOG.md         └── docs/changes/<feature>.md
+    (backend's own change log)               (frontend's own change log)
 ```
 
-### CR file structure
+### Branch isolation
 
-Each CR file has two sections separated by `# ═══ Completed CRs (Archive) ═══`:
+- **CR files** (`docs/cr/*`) exist on their **own feature branch only**.
+- **Auto-strip on push to staging** — [.github/workflows/docs-janitor.yml](.github/workflows/docs-janitor.yml)
+  removes any `docs/cr/*` files that slip onto staging via PR merges and commits
+  the cleanup automatically (`docs(janitor): strip docs/cr from staging [skip ci]`).
+- **Strip at deploy** — [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
+  removes `docs/cr/` server-side alongside `tests/` and `document/`. Belt-and-braces.
+- **Local sync helper** — after merging staging into your feature branch, run
+  [scripts/sync-from-staging.sh](scripts/sync-from-staging.sh) (or `.ps1` on
+  Windows) to drop any foreign features' `docs/cr/*` that the merge pulled in.
+  Computes feature key from the branch name (`feature/handcarry-cr-65` → `handcarry`)
+  and keeps only `docs/cr/<key>.md`.
+- **Backend's CHANGELOG.md per module** persists on every branch and into deployment.
 
-1. **Pending section** (top) — active specs, ⏳ items, current endpoint docs
-2. **Completed section** (bottom) — archived summaries of done CRs
+### Feature-to-file mapping
 
-### Branch-sensitive CR checking
-
-CR files are feature-scoped. Only read/update the CR file matching the current branch:
-
-| Branch pattern | CR file |
-|----------------|---------|
+| Branch pattern | Incoming CR file (frontend repo) |
+|----------------|---------------------------------|
 | `feature/commission*` | `cr/commission.md` |
 | `feature/employee*` | `cr/employees.md` |
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
 | `feature/bathroom*` | `cr/bathroom-price-check.md` |
 | `feature/crm*` | `cr/crm.md` |
+| `feature/handcarry*` | `cr/handcarry.md` |
 | `feature/account-payable*` | `cr/account-payable.md` |
+
+Same key for backend's outgoing CRs in this repo's `docs/cr/<feature>.md`.
+
+### CR file structure
+
+After CR #74 migration, each `docs/cr/<feature>.md` holds **only pending/active
+requests**. Completed CRs move out:
+- Frontend → `docs/changes/<feature>.md`
+- Backend → its module's `CHANGELOG.md` + `__version__` bump
+
+During the transition some files may still carry the legacy
+`# ═══ Completed CRs (Archive) ═══` separator. The skills handle both
+shapes transparently — see `.claude/skills/checkcr/SKILL.md`.
 
 ### Status markers
 
 | Marker | Meaning |
 |--------|---------|
-| ⏳ | Requested by frontend — pending backend implementation |
+| ⏳ | Pending the recipient's implementation |
 | Done | Implemented and confirmed |
 
-### When implementing a CR
+### When to raise a CR vs ship independently
 
-1. **Respond in the pending section** of `docs/cr/<feature>.md` — add actual response shapes, implementation notes, mark ⏳ → Done
-2. **Do NOT move CRs to the archive section** — the frontend team handles confirmation and archival
-3. **Update `docs/API_REFERENCE.md`** — add endpoint to tables, update change log ⏳ → Done
-4. **Never remove frontend-written sections** — only annotate with actual implementation details
-5. **Document deviations** — if actual implementation differs from the request (field names, types, extra fields)
+Not every backend change needs a CR. Decide by whether the frontend has to do
+something:
+
+- **Frontend has to react** (new endpoint, contract change, response-shape
+  delta, deprecation) → raise an outgoing CR (see below) or wait for the
+  frontend's incoming CR and implement it.
+- **Pure backend** (refactor, internal query change, bug fix that preserves
+  the response shape, perf improvement) → no CR file. Bump the module's
+  `__version__` and add a `CHANGELOG.md` entry. Done.
+
+### When implementing an incoming CR (frontend → backend)
+
+1. **Respond in the pending section** of the frontend's `docs/cr/<feature>.md` —
+   add actual response shapes, implementation notes, mark ⏳ → Done
+2. **Do NOT move CRs to the archive section** if one is still present — the
+   frontend team handles confirmation and migration to `docs/changes/`
+3. **Update the module CHANGELOG.md** + bump `__version__` to record the change
+4. **Never remove frontend-written sections** — only annotate with actual details
+5. **Document deviations** — different field names, extra fields, changed auth, etc.
+
+### When raising an outgoing CR (backend → frontend)
+
+1. Write the request in this repo's `docs/cr/<feature>.md` on the relevant
+   feature branch. Mark ⏳.
+2. Frontend reads cross-repo, responds inline in the same file, then logs the
+   resulting frontend change in their `docs/changes/<feature>.md`.
+3. Once green, delete the entry from this repo's `docs/cr/<feature>.md` — the
+   record now lives in the receiver's change log.
 
 ### Skills
 
-- `/checkcr` — Reads the CR file for the current branch, checks pending items against backend code
-- `/responsecr` — Updates the CR file for the current branch to reflect backend implementation status
+- `/checkcr` — Reads the frontend's CR file for the current branch, checks pending items against backend code
+- `/responsecr` — Updates the frontend's CR file for the current branch with backend implementation status
 - `/importbathroom` — Check bathroom data import status, then prompt for next action (import collection, update prices, reimport from source)
 
 ## Running the API Locally (dev/staging/feature branches)

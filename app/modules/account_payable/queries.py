@@ -1,11 +1,13 @@
 """
 Oracle + PostgreSQL SQL queries for the account_payable module (CR #60).
 
-The Oracle side reuses the same Charge-tender ledger algorithm that
-`CommissionRepository.get_unpaid_bill_amounts` walks — REF_SALE_SID first,
-then FIFO across remaining open bills — but unscoped (running balance,
-not month-scoped) and with extra columns the AP UI needs (`doc_store_code`,
-`notes_lostdoc`, joined `customer_name`).
+The Oracle side reuses the Charge-tender ledger pull from
+`CommissionRepository.get_unpaid_bill_amounts` but unscoped (running
+balance, not month-scoped) and with extra columns the AP UI needs
+(`doc_store_code`, `notes_lostdoc`, joined `customer_name`). The
+allocation logic itself only auto-applies REF_SALE_SID matches and
+manual `payable_reconciliations` rows — FIFO was removed in v2.0.0
+after evidence of mis-allocation against payment notes.
 
 The PostgreSQL side reads/writes:
 - `payable_reconciliations` — manual payment→bill linkages
@@ -41,6 +43,58 @@ class AccountPayableQueries:
     CREATE_RECONCILIATIONS_PAYMENT_INDEX = """
         CREATE INDEX IF NOT EXISTS idx_payable_recon_payment
             ON payable_reconciliations(payment_doc_sid)
+    """
+
+    # CR #70 — `payable_payment_remakes` history table. Each tag inserts a
+    # new row with `untagged_at NULL`; untag UPDATEs the active row to set
+    # `untagged_at` so the tag's history is preserved for finance audit.
+    #
+    # Active tag for a payment = the most-recent row where
+    # `untagged_at IS NULL`. The partial index speeds up active-tag lookups
+    # (the common read path); full table scans only happen for audit
+    # queries that want the full history.
+    CREATE_PAYMENT_REMAKES_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_payment_remakes (
+            id              BIGSERIAL    PRIMARY KEY,
+            payment_doc_sid VARCHAR(40)  NOT NULL,
+            tagged_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            tagged_by       VARCHAR(255) NOT NULL,
+            untagged_at     TIMESTAMPTZ  NULL,
+            untagged_by     VARCHAR(255) NULL
+        )
+    """
+    CREATE_PAYMENT_REMAKES_ACTIVE_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_payable_payment_remakes_active
+            ON payable_payment_remakes(payment_doc_sid)
+            WHERE untagged_at IS NULL
+    """
+
+    # CR #69 — per-item allocation rows. Each reconciliation may have zero
+    # rows (proportional mode — split paid amount across bill items by
+    # revenue weight) or one+ rows (priority mode — assign to specific
+    # items in click order). `amount_assigned` is the result of the
+    # priority-fill algorithm computed at write time so commission release
+    # doesn't need to recompute.
+    #
+    # `reconciliation_id` FKs `payable_reconciliations.id` (the field is
+    # named `id` historically, not `reconciliation_id` as the CR spec
+    # writes — the FK works either way).
+    # ON DELETE CASCADE: when the parent reconciliation is dropped (via
+    # reconcile's "edit" path or an unmatch), item rows go with it.
+    CREATE_RECONCILIATION_ITEMS_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_reconciliation_items (
+            reconciliation_id BIGINT       NOT NULL
+                              REFERENCES payable_reconciliations(id)
+                              ON DELETE CASCADE,
+            upc               VARCHAR(50)  NOT NULL,
+            order_index       INTEGER      NOT NULL,
+            amount_assigned   BIGINT       NOT NULL CHECK (amount_assigned >= 0),
+            PRIMARY KEY (reconciliation_id, upc)
+        )
+    """
+    CREATE_RECONCILIATION_ITEMS_UPC_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_payable_reco_items_upc
+            ON payable_reconciliation_items(upc)
     """
 
     # ────────────────────────────────────────────────────────────────────
@@ -221,6 +275,31 @@ class AccountPayableQueries:
           AND d.SID = :payment_doc_sid
         GROUP BY d.SID, d.DOC_NO, d.STORE_CODE, d.BT_CUID, c.FIRST_NAME,
                  d.NOTES_LOSTDOC, d.REF_SALE_SID, d.invc_post_date
+    """
+
+    # Postgres DDL — bill voids (CR #68). History-preserving write-off log:
+    # the operator records that a portion of a bill's remaining balance has
+    # been forgiven (gift / VIP discount / negotiated settlement). The
+    # voided amount NEVER enters `amount_applied` so commission release
+    # (CR #66) correctly excludes it via the existing paid-ratio math.
+    #
+    # Bill SIDs are stringified Oracle 18-digit values — VARCHAR(40) matches
+    # `payable_reconciliations` / `payable_bill_rates`. `voided_by` stores
+    # the user's email (resolved at write time) so reads don't need to
+    # join `users`. v1: no UPDATE / DELETE — voids are terminal.
+    CREATE_BILL_VOIDS_TABLE = """
+        CREATE TABLE IF NOT EXISTS payable_bill_voids (
+            void_id     BIGSERIAL    PRIMARY KEY,
+            bill_sid    VARCHAR(40)  NOT NULL,
+            amount      BIGINT       NOT NULL CHECK (amount > 0),
+            reason      TEXT,
+            voided_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            voided_by   VARCHAR(255) NOT NULL
+        )
+    """
+    CREATE_BILL_VOIDS_BILL_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_payable_bill_voids_bill_sid
+            ON payable_bill_voids(bill_sid)
     """
 
     # Postgres DDL — per-item user-set release-rate overrides.
