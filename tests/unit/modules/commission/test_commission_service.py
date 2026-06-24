@@ -1414,6 +1414,32 @@ class TestCalculatePersonalCommissions:
         assert row['released'] == 0
         assert row['released_by_category'] == {}
 
+    def test_suitcase_withholding_counts_units(self, service, mock_repo):
+        """Suitcase WITHHELD must match suitcase PAID per unit: a TVL line with
+        qty 2 on a fully-unpaid bill withholds 2 * 500k (not 1 * 500k). Regression
+        for the per-line vs per-unit mismatch."""
+        sales_df = self._make_sales_df([
+            [1, 'UPC001', 'BILL1', 'HBT', '2025-01-15', '10:00:00',
+             None, 'SID1', 'user1', 'HBT', 'TVL', 0, 'LUGGAGE', 'ACC', 0.0, 18_900_000, 17_181_818],
+        ])
+        sales_df.loc[sales_df['vendor_code'] == 'TVL', 'qty_sold'] = 2  # one line, two pieces
+        mock_repo.get_all_sales_data.return_value = sales_df
+        mock_repo.get_hand_carry_upcs.return_value = []
+        mock_repo.get_unpaid_bill_amounts.return_value = {
+            'BILL_SID_BILL1': {
+                'doc_no': 'BILL1', 'customer_sid': '999', 'original_charge': 18_900_000,
+                'remaining_unpaid': 18_900_000, 'sale_total_amt': 18_900_000, 'unpaid_ratio': 1.0,
+            },
+        }
+        employees = [{'employee_code': 'EMP001', 'employee_username': 'user1',
+                      'personal_target': 1_000_000_000, 'full_name': 'Test', 'store_code': 'HBT'}]
+
+        row = service.calculate_personal_commissions(month=1, year=2025, employees=employees).iloc[0]
+
+        assert row['commission_suitcase'] == 2 * 500_000           # paid: 2 units
+        assert row['withheld_by_category'].get('suitcase') == 2 * 500_000  # withheld: 2 units (fully unpaid)
+        assert row['payout'] == row['total'] - row['withheld']
+
     def test_no_withholding_when_no_unpaid_bills(self, service, mock_repo):
         """When all bills are paid (empty unpaid_bills_map), withholding is
         zero across all categories and payout equals total."""

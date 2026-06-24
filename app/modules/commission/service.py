@@ -846,10 +846,17 @@ class CommissionService:
                     hc_total += weighted_rev * HC_RATE_1PCT
             result['hand_carry'] = hc_total
 
-        # ── Suitcase (flat per item × unpaid_ratio) ─────────────────────
+        # ── Suitcase (flat per UNIT × unpaid_ratio) ─────────────────────
+        # Mirror _calculate_suitcase_commission: 500k per unit (qty_sold), not
+        # per line — otherwise a qty>1 suitcase line on an unpaid bill would be
+        # under-withheld and over-released.
         if len(suitcase_df) > 0:
+            if 'qty_sold' in suitcase_df.columns:
+                units = suitcase_df['qty_sold'].fillna(1)
+            else:
+                units = 1
             result['suitcase'] = float(
-                (suitcase_df['unpaid_ratio'] * SUITCASE_FLAT_AMOUNT).sum()
+                (units * suitcase_df['unpaid_ratio'] * SUITCASE_FLAT_AMOUNT).sum()
             )
 
         # ── Home decor (flat 1% on revenue_before_vat) ──────────────────
