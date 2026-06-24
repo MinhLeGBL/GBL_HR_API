@@ -355,143 +355,75 @@ class TestUpdateRevenueAdjustments:
 # POST /api/v1/commission/calculate
 # ===========================================================================
 
+
 class TestCalculateCommission:
+    """POST /commission/calculate is DB-authoritative: body is {month, year}.
+    A legacy `stores` array is accepted but ignored."""
     URL = '/api/v1/commission/calculate'
-
-    def _valid_store(self):
-        return {
-            'store_code': 'RWR',
-            'store_target': 11000000000,
-            'fp_ratio_target': 60,
-            'store_total': 6800000000,
-            'store_fp_total': 4300000000,
-            'store_achievement': 61.8,
-            'store_fp_ratio': 63.2,
-            'store_eligible': True,
-            'employees': [{
-                'employee_code': 'GL013',
-                'is_manager': True,
-                'contract': 'permanent',
-                'personal_target': 650000000,
-                'personal_total': 680000000,
-                'personal_achievement': 104.6,
-                'personal_eligible': True,
-                'revenue': [{
-                    'revenue_type': 'fashion',
-                    'fp_base': 400000000,
-                    'fp_adjustment': 50000000,
-                    'md_base': 80000000,
-                    'md_adjustment': 0
-                }]
-            }]
-        }
-
-    def _valid_body(self, **overrides):
-        body = {'month': 3, 'year': 2026, 'stores': [self._valid_store()]}
-        body.update(overrides)
-        return body
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     @patch('app.modules.commission.routes.CommissionService')
     def test_success(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_v2.return_value = {
-            'success': True,
-            'month': 3,
-            'year': 2026,
-            'stores': [],
+        MockService.return_value.calculate_commissions.return_value = {
+            'success': True, 'month': 5, 'year': 2026, 'stores': [],
         }
 
-        resp = client.post(self.URL, json=self._valid_body(), headers=_auth_headers())
+        resp = client.post(self.URL, json={'month': 5, 'year': 2026}, headers=_auth_headers())
 
         assert resp.status_code == 200
         data = resp.get_json()
         assert data['success'] is True
-        assert data['month'] == 3
+        assert data['month'] == 5
+        MockService.return_value.calculate_commissions.assert_called_once_with(month=5, year=2026)
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.commission.routes.CommissionService')
+    def test_legacy_stores_payload_is_ignored(self, MockService, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        MockService.return_value.calculate_commissions.return_value = {
+            'success': True, 'month': 5, 'year': 2026, 'stores': [],
+        }
+
+        # Backward-compat: an old CR #29 payload still works; stores is ignored.
+        resp = client.post(
+            self.URL,
+            json={'month': 5, 'year': 2026, 'stores': [{'store_code': 'RWT', 'employees': []}]},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        MockService.return_value.calculate_commissions.assert_called_once_with(month=5, year=2026)
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     def test_missing_month(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-
-        resp = client.post(self.URL, json={'year': 2026, 'stores': []}, headers=_auth_headers())
-
+        resp = client.post(self.URL, json={'year': 2026}, headers=_auth_headers())
         assert resp.status_code == 400
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     def test_missing_year(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-
-        resp = client.post(self.URL, json={'month': 3, 'stores': []}, headers=_auth_headers())
-
+        resp = client.post(self.URL, json={'month': 5}, headers=_auth_headers())
         assert resp.status_code == 400
-
-    @patch('app.core.auth.middleware.auth_service.verify_token')
-    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    def test_missing_stores(self, mock_get_user, mock_verify, client):
-        _mock_auth(mock_verify, mock_get_user)
-
-        resp = client.post(self.URL, json={'month': 3, 'year': 2026}, headers=_auth_headers())
-
-        assert resp.status_code == 400
-        assert 'stores' in resp.get_json()['error']
-
-    @patch('app.core.auth.middleware.auth_service.verify_token')
-    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    def test_empty_stores(self, mock_get_user, mock_verify, client):
-        _mock_auth(mock_verify, mock_get_user)
-
-        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': []},
-                           headers=_auth_headers())
-
-        assert resp.status_code == 400
-
-    @patch('app.core.auth.middleware.auth_service.verify_token')
-    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    def test_store_missing_required_field(self, mock_get_user, mock_verify, client):
-        _mock_auth(mock_verify, mock_get_user)
-        store = self._valid_store()
-        del store['store_code']
-
-        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': [store]},
-                           headers=_auth_headers())
-
-        assert resp.status_code == 400
-        assert 'store_code' in resp.get_json()['error']
-
-    @patch('app.core.auth.middleware.auth_service.verify_token')
-    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
-    def test_employee_missing_required_field(self, mock_get_user, mock_verify, client):
-        _mock_auth(mock_verify, mock_get_user)
-        store = self._valid_store()
-        del store['employees'][0]['employee_code']
-
-        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': [store]},
-                           headers=_auth_headers())
-
-        assert resp.status_code == 400
-        assert 'employee_code' in resp.get_json()['error']
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     def test_invalid_month(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-
-        resp = client.post(self.URL, json={'month': 0, 'year': 2026, 'stores': [self._valid_store()]},
-                           headers=_auth_headers())
-
+        resp = client.post(self.URL, json={'month': 0, 'year': 2026}, headers=_auth_headers())
         assert resp.status_code == 400
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     def test_no_json_body(self, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-
         resp = client.post(self.URL, data='not json', headers=_auth_headers(),
                            content_type='text/plain')
-
         assert resp.status_code == 400
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
@@ -499,12 +431,10 @@ class TestCalculateCommission:
     @patch('app.modules.commission.routes.CommissionService')
     def test_service_error(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_v2.return_value = {
+        MockService.return_value.calculate_commissions.return_value = {
             'success': False, 'error': 'Calculation failed'
         }
-
-        resp = client.post(self.URL, json=self._valid_body(), headers=_auth_headers())
-
+        resp = client.post(self.URL, json={'month': 5, 'year': 2026}, headers=_auth_headers())
         assert resp.status_code == 500
 
     @patch('app.core.auth.middleware.auth_service.verify_token')
@@ -512,13 +442,12 @@ class TestCalculateCommission:
     @patch('app.modules.commission.routes.CommissionService')
     def test_exception_returns_500(self, MockService, mock_get_user, mock_verify, client):
         _mock_auth(mock_verify, mock_get_user)
-        MockService.return_value.calculate_commissions_v2.side_effect = Exception('boom')
-
-        resp = client.post(self.URL, json=self._valid_body(), headers=_auth_headers())
-
+        MockService.return_value.calculate_commissions.side_effect = Exception('boom')
+        resp = client.post(self.URL, json={'month': 5, 'year': 2026}, headers=_auth_headers())
         assert resp.status_code == 500
         assert 'boom' in resp.get_json()['error']
 
     def test_no_auth_returns_401(self, client):
-        resp = client.post(self.URL, json={'month': 3, 'year': 2026, 'stores': []})
+        resp = client.post(self.URL, json={'month': 5, 'year': 2026})
         assert resp.status_code == 401
+
