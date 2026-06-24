@@ -14,7 +14,7 @@ ALL_SALES_COLUMNS = [
     'sale_date', 'sale_time', 'customer_sid', 'employee_sid',
     'employee_username', 'store_code', 'vendor_code', 'is_jewelry',
     'category', 'department', 'discount_rate',
-    'revenue_with_vat', 'revenue_before_vat'
+    'revenue_with_vat', 'revenue_before_vat', 'qty_sold'
 ]
 
 
