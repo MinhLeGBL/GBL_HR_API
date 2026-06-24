@@ -147,7 +147,10 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             e.full_name,
             e.join_date,
             e.retailpro_username,
-            ct.code AS contract,
+            -- CR #75: contract resolves from the period's roster snapshot
+            -- (employee_status_history, carried forward from nearest period <= target);
+            -- the employees master is only the fallback when there is no history at all.
+            COALESCE(esh_ct.code, ct.code) AS contract,
             COALESCE(esh.is_manager, FALSE) AS is_manager,
             cs.personal_target,
             cs.working_day,
@@ -168,6 +171,8 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             ORDER BY esh.period_year DESC, esh.period_month DESC
             LIMIT 1
         ) esh ON TRUE
+        -- CR #75: resolve the history snapshot's contract code (period-accurate)
+        LEFT JOIN contract_types esh_ct ON esh_ct.id = esh.contract_type_id
         LEFT JOIN stores esh_store ON esh.store_id = esh_store.id
         LEFT JOIN commission_settings cs
             ON cs.employee_code = e.employee_code

@@ -3,6 +3,25 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [3.2.0] — 2026-06-24
+
+### Fixed — calculate uses the period's roster snapshot for `contract` (CR #75)
+
+`_query_store_employees` read `contract` from the **employees master**
+(`contract_types.code` via `employees.contract_type_id`) and ignored the period's
+`employee_status_history` snapshot — so a Step-1 roster contract edit (probation→permanent)
+did not affect Step-3 calculate (wrong tier / probation cap). Now `contract` resolves from the
+nearest `employee_status_history` row ≤ the calc period (the period's frozen snapshot, carried
+forward from the most recent earlier period), falling back to the master only when the employee
+has no history row at all: `COALESCE(esh_ct.code, ct.code)` via a `contract_types` join on the
+history row's `contract_type_id`.
+
+`is_manager` already resolved this way (`COALESCE(esh.is_manager, FALSE)`) — unchanged.
+`store_id` / `is_active` / `department_id` keep their period-based resolution. The fix lands in
+the one shared query, so `POST /commission/calculate`, `GET /commission/employees`,
+`/commission/revenue`, and `/commission/revenue/store-view` all agree. Read-path only; no schema
+change. Supersedes the manual "update stale probation contract" workaround (e.g. GL298).
+
 ## [3.1.0] — 2026-06-23
 
 ### Changed — probation employees: full store commission, no personal commission
