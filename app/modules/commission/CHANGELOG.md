@@ -3,6 +3,31 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [3.2.0] — 2026-06-25
+
+### Fixed — point-in-time `contract` / `is_manager` resolution (CR #75)
+
+`_query_store_employees` read `contract` from the **employees master** and ignored the period's
+`employee_status_history` snapshot — so a Step-1 roster contract edit (probation→permanent) did
+not affect Step-3 calculate (wrong tier). Now both `contract` and `is_manager` resolve
+**point-in-time per calc period** by the **later effective date** of two candidates:
+
+- **master** — effective = `employees.contract_changed_at` / `is_manager_changed_at` (new columns,
+  bumped only on an actual change; employees v1.0.0). Valid only if `<= as_of` (end of the calc
+  period) — a future-dated master edit does not retroactively apply.
+- **history** — the nearest `employee_status_history` snapshot ≤ the period, effective = its period
+  start `make_date(period_year, period_month, 1)`.
+
+Later effective wins; **ties → history** (so a same-period roster save wins over an older master);
+no history row → master. This means a roster edit for a period is used (carried forward to later
+un-rostered periods), while a master (Employee Management) edit made *after* that snapshot wins by
+recency. `store_id` / `is_active` / `department_id` keep their period-based resolution.
+
+The fix lands in the one shared query, so `POST /commission/calculate`, `GET /commission/employees`,
+`/commission/revenue`, and `/commission/revenue/store-view` all agree. Read-path only (response
+shapes unchanged). Requires the employees-module change-timestamp columns (v1.0.0). Supersedes the
+manual "update stale probation contract" workaround (e.g. GL298).
+
 ## [3.1.0] — 2026-06-23
 
 ### Changed — probation employees: full store commission, no personal commission
