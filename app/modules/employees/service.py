@@ -103,6 +103,15 @@ class HREmployeeService:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_employees_store ON employees(store_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_employees_type ON employees(employee_type_id)')
 
+            # ── CR #75: master is_manager + change-timestamps for point-in-time
+            # contract/is_manager resolution in commission. contract_changed_at /
+            # is_manager_changed_at bump ONLY when that field actually changes (set by
+            # the writers below), so the commission resolver can compare the master's
+            # change date against a history snapshot's period. Backfilled below. ──
+            cursor.execute('ALTER TABLE employees ADD COLUMN IF NOT EXISTS is_manager BOOLEAN NOT NULL DEFAULT FALSE')
+            cursor.execute('ALTER TABLE employees ADD COLUMN IF NOT EXISTS contract_changed_at TIMESTAMPTZ')
+            cursor.execute('ALTER TABLE employees ADD COLUMN IF NOT EXISTS is_manager_changed_at TIMESTAMPTZ')
+
             # ── History: is_manager status changes ──
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS employee_manager_history (
@@ -176,6 +185,41 @@ class HREmployeeService:
                     )
                 FROM employees e
                 ON CONFLICT (employee_sid, period_month, period_year) DO NOTHING
+            ''')
+
+            # ── CR #75 backfill: master is_manager + change-timestamps (idempotent;
+            # the nullable *_changed_at columns are the "already backfilled" markers).
+            # Each timestamp is set to "when the current master value started being
+            # true" — created_at, or the latest history period whose value matches the
+            # master — so the first post-deploy master edit (NOW()) correctly overrides. ──
+            cursor.execute('''
+                UPDATE employees e
+                SET is_manager = COALESCE(
+                    (SELECT h.is_manager FROM employee_status_history h
+                     WHERE h.employee_sid = e.sid
+                     ORDER BY h.period_year DESC, h.period_month DESC, h.id DESC
+                     LIMIT 1), FALSE)
+                WHERE e.is_manager_changed_at IS NULL
+            ''')
+            cursor.execute('''
+                UPDATE employees e
+                SET is_manager_changed_at = GREATEST(
+                    e.created_at,
+                    COALESCE((SELECT MAX(make_date(h.period_year, h.period_month, 1))
+                              FROM employee_status_history h
+                              WHERE h.employee_sid = e.sid AND h.is_manager = e.is_manager),
+                             e.created_at))
+                WHERE e.is_manager_changed_at IS NULL
+            ''')
+            cursor.execute('''
+                UPDATE employees e
+                SET contract_changed_at = GREATEST(
+                    e.created_at,
+                    COALESCE((SELECT MAX(make_date(h.period_year, h.period_month, 1))
+                              FROM employee_status_history h
+                              WHERE h.employee_sid = e.sid AND h.contract_type_id = e.contract_type_id),
+                             e.created_at))
+                WHERE e.contract_changed_at IS NULL
             ''')
 
             # ── Seed default employee if table is empty ──
@@ -476,13 +520,14 @@ class HREmployeeService:
 
             cursor = conn.cursor()
 
-            # Check if employee exists and fetch current store_id for history tracking
-            cursor.execute('SELECT sid, store_id FROM employees WHERE sid = %s', (sid,))
+            # Check if employee exists and fetch current store_id + contract for history tracking
+            cursor.execute('SELECT sid, store_id, contract_type_id FROM employees WHERE sid = %s', (sid,))
             existing = cursor.fetchone()
             if not existing:
                 cursor.close()
                 return {'success': False, 'error': 'Employee not found'}
             current_store_id = existing[1]
+            current_contract_type_id = existing[2]
 
             # Resolve code strings to FK IDs
             if 'employee_type' in updates:
@@ -512,6 +557,13 @@ class HREmployeeService:
 
             if not set_clauses:
                 return {'success': False, 'error': 'No valid fields to update'}
+
+            # CR #75: bump contract_changed_at ONLY when the contract actually changes,
+            # so unrelated edits (name/email/store) don't make the master win in the
+            # commission point-in-time resolver.
+            if ('contract_type_id' in updates
+                    and updates['contract_type_id'] != current_contract_type_id):
+                set_clauses.append('contract_changed_at = NOW()')
 
             # Add updated_at
             set_clauses.append('updated_at = CURRENT_TIMESTAMP')
@@ -677,6 +729,17 @@ class HREmployeeService:
                 cursor, sid, today.month, today.year,
                 emp[0], emp[1], emp[2], emp[3], is_manager
             )
+
+            # CR #75: Employee-Management is the master writer for is_manager — mirror
+            # the value onto employees and bump is_manager_changed_at only on an actual
+            # change, so the commission resolver can compare master recency vs history.
+            cursor.execute('''
+                UPDATE employees
+                SET is_manager = %s,
+                    is_manager_changed_at = CASE WHEN is_manager IS DISTINCT FROM %s
+                                                 THEN NOW() ELSE is_manager_changed_at END
+                WHERE sid = %s
+            ''', (is_manager, is_manager, sid))
 
             conn.commit()
             cursor.close()
