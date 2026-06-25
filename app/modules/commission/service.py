@@ -147,11 +147,30 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
             e.full_name,
             e.join_date,
             e.retailpro_username,
-            -- CR #75: contract resolves from the period's roster snapshot
-            -- (employee_status_history, carried forward from nearest period <= target);
-            -- the employees master is only the fallback when there is no history at all.
-            COALESCE(esh_ct.code, ct.code) AS contract,
-            COALESCE(esh.is_manager, FALSE) AS is_manager,
+            -- CR #75: point-in-time resolution of contract / is_manager. Candidates:
+            --  • master  — effective = employees.contract_changed_at / is_manager_changed_at
+            --              (bumped only on an actual change), valid only if <= as_of;
+            --  • history — the nearest snapshot <= the period (esh), effective = its
+            --              period start make_date(period_year, period_month, 1).
+            -- Latest effective wins; ties -> history (strict '>'); no history -> master.
+            CASE
+                WHEN esh.contract_type_id IS NULL THEN ct.code
+                WHEN e.contract_changed_at IS NOT NULL
+                     AND e.contract_changed_at::date <= %(as_of)s
+                     AND e.contract_changed_at::date
+                         > make_date(esh.period_year, esh.period_month, 1)
+                    THEN ct.code
+                ELSE esh_ct.code
+            END AS contract,
+            CASE
+                WHEN esh.contract_type_id IS NULL THEN COALESCE(e.is_manager, FALSE)
+                WHEN e.is_manager_changed_at IS NOT NULL
+                     AND e.is_manager_changed_at::date <= %(as_of)s
+                     AND e.is_manager_changed_at::date
+                         > make_date(esh.period_year, esh.period_month, 1)
+                    THEN COALESCE(e.is_manager, FALSE)
+                ELSE COALESCE(esh.is_manager, FALSE)
+            END AS is_manager,
             cs.personal_target,
             cs.working_day,
             COALESCE(cs.is_commission_active, esh.is_active, TRUE) AS is_commission_active,
@@ -163,7 +182,8 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
         -- Single LATERAL JOIN: employee status snapshot as of the requested period
         LEFT JOIN LATERAL (
             SELECT esh.is_active, esh.store_id, esh.department_id,
-                   esh.contract_type_id, esh.is_manager
+                   esh.contract_type_id, esh.is_manager,
+                   esh.period_year, esh.period_month
             FROM employee_status_history esh
             WHERE esh.employee_sid = e.sid
               AND (esh.period_year < %(year)s
@@ -183,7 +203,10 @@ def _query_store_employees(conn, month: int, year: int) -> List[Dict[str, Any]]:
         WHERE et.code = 'STORE'
           AND COALESCE(esh.store_id, e.store_id) IS NOT NULL
         ORDER BY COALESCE(override_store.store_code, esh_store.store_code, s.store_code), e.employee_code
-    ''', {'month': month, 'year': year})
+    ''', {'month': month, 'year': year,
+          # CR #75: end of the calc period — a master change after this does not
+          # retroactively apply (a future-dated master edit is not a candidate).
+          'as_of': date(year, month, calendar.monthrange(year, month)[1])})
 
     rows = cursor.fetchall()
     columns = [desc[0] for desc in cursor.description]
