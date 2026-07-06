@@ -23,11 +23,12 @@ class TestInitDatabase:
 
         assert result == {'success': True}
         # payable_reconciliations (1) + 2 indexes
+        # + CR #72 migration: ADD COLUMN + DROP old UNIQUE + ADD new UNIQUE (3)
         # + payable_reconciliation_items (1) + 1 index (CR #69)
         # + payable_payment_remakes (1) + 1 index (CR #70)
         # + payable_item_custom_rates (1)
-        # + payable_bill_voids (1) + 1 index (CR #68) = 10 execute calls
-        assert mock_cursor.execute.call_count == 10
+        # + payable_bill_voids (1) + 1 index (CR #68) = 13 execute calls
+        assert mock_cursor.execute.call_count == 13
         mock_conn.commit.assert_called_once()
 
         # Spot-check that every target table and key column appears in the executed SQL.
@@ -45,6 +46,9 @@ class TestInitDatabase:
         assert 'idx_payable_reco_items_upc' in executed_sql
         assert 'idx_payable_payment_remakes_active' in executed_sql
         assert 'idx_payable_bill_voids_bill_sid' in executed_sql
+        # CR #72: migration DDL appears in the executed batch.
+        assert 'tender_category' in executed_sql
+        assert 'payable_reconciliations_payment_bill_tender_key' in executed_sql
 
     @patch('app.modules.account_payable.service.get_postgres_connection')
     def test_connection_failure_returns_error(self, mock_get_conn):

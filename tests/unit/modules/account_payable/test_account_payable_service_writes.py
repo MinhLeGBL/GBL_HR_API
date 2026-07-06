@@ -230,7 +230,8 @@ class TestReconcileHappyPath:
         # per-item rows. Existing rows EXACTLY match the request; no
         # per-item rows on file (proportional historical state).
         cur.fetchall.side_effect = [
-            [('1001', 400_000), ('1002', 200_000)],  # existing parent rows
+            # CR #72: existing parent rows now include tender_category.
+            [('1001', 400_000, 'cash_card'), ('1002', 200_000, 'cash_card')],
             [],                                       # existing per-item rows
         ]
 
@@ -311,7 +312,7 @@ class TestReconcileEdgeCases:
         # Existing: a different allocation shape (one bill, 300k).
         # CR #69: two fetchalls — parents then per-item rows (empty here).
         cur.fetchall.side_effect = [
-            [('1001', 300_000)],   # existing parent rows
+            [('1001', 300_000, 'cash_card')],   # existing parent rows (CR #72)
             [],                    # existing per-item rows (none — historical proportional)
         ]
         # Other-payment baseline = 0 for all bills.
@@ -342,7 +343,7 @@ class TestReconcileEdgeCases:
         _, _, cur = mock_pg
         # CR #69: two fetchalls — parents then per-item rows (empty here).
         cur.fetchall.side_effect = [
-            [('1001', 300_000), ('1002', 300_000)],
+            [('1001', 300_000, 'cash_card'), ('1002', 300_000, 'cash_card')],
             [],
         ]
         cur.fetchone.return_value = (300_000,)
@@ -399,7 +400,8 @@ class TestReconcileCr67:
         _, _, cur = mock_pg
         # CR #69: two fetchalls — parents then per-item rows.
         cur.fetchall.side_effect = [
-            [('1001', 400_000), ('1002', 200_000)],
+            # CR #72: existing parent rows include tender_category.
+            [('1001', 400_000, 'cash_card'), ('1002', 200_000, 'cash_card')],
             [],
         ]
         cur.fetchone.return_value = (0,)
