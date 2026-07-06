@@ -1015,8 +1015,8 @@ class AccountPayableService:
     def _summarize_tender_breakdown(
         cls, legs: List[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], int, int]:
-        """CR #72: project raw `rps.tender` rows into the wire shape and
-        compute per-category amount totals.
+        """CR #72 / CR #76: project raw `rps.tender` rows into the wire
+        shape and compute the per-category split of the doc's AR reduction.
 
         Returns `(tender_breakdown, commission_releasing_amount,
         gift_certificate_amount)`:
@@ -1024,17 +1024,33 @@ class AccountPayableService:
           `is_commission_releasing`. Includes BOTH positive money-in
           legs AND the offsetting negative Charge legs (frontend wants
           the raw rps.tender view per the spec).
-        - `commission_releasing_amount`: sum of POSITIVE legs whose
-          tender_name is releasing (MC/Cash/etc., excludes Charge).
-        - `gift_certificate_amount`: sum of POSITIVE GC legs.
+        - `commission_releasing_amount`: the real-money (cash/card) slice
+          of the doc's AR reduction.
+        - `gift_certificate_amount`: the gift-certificate slice of the
+          doc's AR reduction.
 
-        Together these two totals equal `payment.amount` (the sum of
-        negative Charge magnitudes) — that's the Retail Pro tender-balance
-        invariant. Empty input → ([], 0, 0).
+        The two totals ALWAYS sum to the doc's AR reduction — the magnitude
+        of its net (negative) `Charge`, which equals `payment.amount` in the
+        replay. That is the Retail Pro tender-balance invariant.
+
+        CR #76 — sale-with-paydown docs: a doc can BOTH sell goods and pay
+        down AR (e.g. a customer settles an old bill with a gift certificate
+        while buying fresh goods paid by bank transfer; the GC overpays and
+        the excess posts as a negative `Charge` that clears the older bill).
+        There the raw money-in (bank transfer + GC) OVERSTATES the AR
+        reduction by `sale_total`. Summing all positive legs (the pre-CR#76
+        behavior) therefore broke the invariant and could mis-tag a fresh
+        sale's real-money tender as commission-releasing AR payment. We now
+        cap the totals to the actual AR reduction and attribute it
+        GIFT-FIRST: real money is presumed to fund the fresh goods, the
+        gift/overpayment funds the paydown. For a pure payment doc
+        (`sale_total = 0`) the money-in exactly funds the Charge, so this
+        reduces to the identity split. Empty input → ([], 0, 0).
         """
         wire_legs: List[Dict[str, Any]] = []
-        cash_card = 0
-        gift_cert = 0
+        raw_cash = 0
+        raw_gift = 0
+        charge_sum = 0
         for leg in legs:
             name = leg.get('tender_name')
             amt = int(leg.get('amount') or 0)
@@ -1053,19 +1069,27 @@ class AccountPayableService:
                 'amount':                  amt,
                 'is_commission_releasing': is_releasing,
             })
-            # Totals sum POSITIVE money-in legs by category. `Charge` is
-            # excluded explicitly (not classed as cash_card OR gift_cert
-            # — it's an AR-side leg, neither customer payment method nor
-            # discount). The check covers payment-doc Charge legs (always
-            # negative — already filtered by `amt <= 0`) AND sale-doc
-            # Charge legs (positive — would otherwise fall into gift_cert
-            # since `is_releasing=False` for Charge).
-            if amt <= 0 or (name or '') == 'Charge':
+            # Accumulate the net Charge separately — its magnitude is the
+            # doc's true AR reduction and the cap for the two totals below.
+            if (name or '') == 'Charge':
+                charge_sum += amt
+                continue
+            # Raw money-in by category, BEFORE the sale-portion cap.
+            if amt <= 0:
                 continue
             if is_releasing:
-                cash_card += amt
+                raw_cash += amt
             else:
-                gift_cert += amt
+                raw_gift += amt
+        # Cap the category totals to the actual AR reduction (magnitude of
+        # the net negative Charge), attributing it gift-first. On a pure
+        # payment doc `raw_cash + raw_gift` already equals this, so the caps
+        # are no-ops; on a sale-with-paydown doc they strip the sale portion
+        # (which the money-in also funded) out of the AR totals. A non-
+        # negative net Charge (a bill doc, no AR reduction) yields (0, 0).
+        ar_reduction = max(0, -charge_sum)
+        gift_cert = min(raw_gift, ar_reduction)
+        cash_card = ar_reduction - gift_cert
         return wire_legs, cash_card, gift_cert
 
     # CR #67 state model — uniform across queue + reconcile responses.

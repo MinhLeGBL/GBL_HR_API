@@ -81,23 +81,57 @@ class TestSummarizeTenderBreakdown:
         assert releasing == 100_000
         assert gift == 0
 
-    def test_positive_charge_leg_excluded_from_both_totals(self):
-        """Sale docs have POSITIVE Charge legs (customer-takes-on-debt).
-        Even though the function is currently called only for payment docs
-        (where Charge is negative), the totals must NOT classify a
-        positive Charge as gift_cert just because Charge carries
-        is_commission_releasing=False. Charge is its own AR-side leg —
-        neither cash_card nor gift_cert."""
+    def test_positive_charge_leg_yields_no_ar_reduction(self):
+        """A doc with a POSITIVE net Charge (customer-takes-on-debt) is a
+        BILL, not a payment — it has NO AR reduction, so both totals are 0
+        (CR #76). The old behavior summed the money-in leg into `releasing`,
+        which double-counted a fresh sale's tender as an AR payment; the
+        totals now track only the AR reduction (magnitude of the net
+        negative Charge, here none)."""
         raw = [
             {'tender_sid': 'T1', 'tender_name': 'Cash',   'amount':  100_000},
             # Sale-doc shape: customer also took on 50k of AR debt.
             {'tender_sid': 'T2', 'tender_name': 'Charge', 'amount':   50_000},
         ]
         legs, releasing, gift = AccountPayableService._summarize_tender_breakdown(raw)
-        assert releasing == 100_000
-        assert gift == 0, 'positive Charge must not bleed into gift_cert'
+        assert releasing == 0
+        assert gift == 0, 'a bill doc (positive net Charge) has no AR reduction'
         # Both legs still appear in the wire breakdown — totals just skip Charge.
         assert len(legs) == 2
+
+    def test_sale_with_gift_paydown_caps_to_ar_reduction(self):
+        """CR #76 — live bill #4067 (RHN): a customer buys 43,316,000 of
+        goods paid by Bank Transfer AND redeems a 10,292,000 Gift
+        Certificate that overpays; the excess posts as a −10,292,000 Charge
+        clearing an older bill. The AR reduction is ONLY 10,292,000 (the
+        gift), NOT the 53,608,000 raw money-in. The Bank Transfer funded the
+        fresh goods, so cash/card releasing = 0; the gift funds the paydown.
+        """
+        raw = [
+            {'tender_sid': 'T1', 'tender_name': 'Bank Transfer',    'amount':  43_316_000},
+            {'tender_sid': 'T2', 'tender_name': 'Gift Certificate', 'amount':  10_292_000},
+            {'tender_sid': 'T3', 'tender_name': 'Charge',           'amount': -10_292_000},
+        ]
+        legs, releasing, gift = AccountPayableService._summarize_tender_breakdown(raw)
+        assert releasing == 0, 'the bank transfer paid for goods, not AR'
+        assert gift == 10_292_000
+        # Invariant: totals sum to the AR reduction (= |net Charge| = payment.amount).
+        assert releasing + gift == 10_292_000
+        # All three legs still surface in the raw wire view.
+        assert len(legs) == 3
+
+    def test_sale_with_cash_paydown_attributes_to_cash(self):
+        """CR #76 — a sale-with-paydown funded entirely by real money (no
+        gift). Goods 40M paid by 50M cash; the 10M excess pays down AR. The
+        AR reduction (10M) is real money → all cash_card, no gift."""
+        raw = [
+            {'tender_sid': 'T1', 'tender_name': 'MC',     'amount':  50_000_000},
+            {'tender_sid': 'T2', 'tender_name': 'Charge', 'amount': -10_000_000},
+        ]
+        _, releasing, gift = AccountPayableService._summarize_tender_breakdown(raw)
+        assert releasing == 10_000_000
+        assert gift == 0
+        assert releasing + gift == 10_000_000
 
     def test_multiple_gc_legs_sum_to_gift_total(self):
         """Edge case: two GC legs combined on the same doc → summed in total."""
