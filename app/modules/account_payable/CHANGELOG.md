@@ -3,6 +3,47 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [2.5.1] — 2026-07-06
+
+### Fixed — CR #76: sale-with-paydown docs broke the tender-split invariant
+
+`_summarize_tender_breakdown` summed **all** positive money-in legs into
+`commission_releasing_amount` / `gift_certificate_amount`. That is correct
+for a *pure payment* doc (where the money-in exactly funds the negative
+`Charge`), but wrong for a doc that BOTH sells goods and pays down AR.
+
+**Live case — bill #4067 (RHN).** A customer bought 43,316,000 of goods
+paid by Bank Transfer AND redeemed a 10,292,000 Gift Certificate that
+overpaid; the excess posted as a −10,292,000 `Charge` clearing an older
+bill (#4059). The real AR reduction is only **10,292,000** (`payment.amount`
+= |net Charge|), but the panels reported `commission_releasing_amount =
+43,316,000` (the Bank Transfer, which actually paid for the fresh goods)
+plus `gift_certificate_amount = 10,292,000` → **53,608,000**, violating the
+documented invariant `commission_releasing_amount + gift_certificate_amount
+== amount`.
+
+Two concrete symptoms:
+- **Reconcile UI** surfaced a phantom 43,316,000 "customer payment" with no
+  valid bill to map it to (it wasn't an AR payment at all).
+- **`releasing_cap`** for the per-category reconcile guard was 43,316,000,
+  so an operator could allocate the 10,292,000 paydown as `cash_card` and
+  **wrongly release commission** on money that was really a gift certificate.
+
+#### What changed
+
+- The two totals are now capped to the doc's **actual AR reduction**
+  (`max(0, -Σ Charge legs)`) and attributed **gift-first**: real money is
+  presumed to fund the fresh goods, the gift/overpayment funds the paydown.
+  For #4067 → `commission_releasing_amount = 0`, `gift_certificate_amount =
+  10,292,000`. The invariant holds again for every doc class.
+- Pure payment docs (`sale_total = 0`) are unaffected — the caps are no-ops,
+  so the split is identical to 2.5.0.
+- A doc with a non-negative net `Charge` (a bill, no AR reduction) now
+  yields `(0, 0)` instead of leaking its sale tender into `releasing`.
+
+No wire-shape or endpoint changes — only the two computed totals are
+corrected. `tender_breakdown` (raw per-leg view) is unchanged.
+
 ## [2.5.0] — 2026-06-08
 
 ### Added — CR #72: split-tender reconciliation (Gift Certificate allocation separate from cash/card)
