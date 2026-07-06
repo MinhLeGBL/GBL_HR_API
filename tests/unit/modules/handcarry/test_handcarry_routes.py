@@ -78,7 +78,8 @@ class TestImport:
     @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
     @patch('app.modules.handcarry.routes.handcarry_service.import_upcs')
     def test_upcs_body_supported(self, mock_svc, mock_get_user, mock_verify, client):
-        _mock_auth(mock_verify, mock_get_user, role='manager')
+        # Staff role: import is gated by @token_required, not @manager_required
+        _mock_auth(mock_verify, mock_get_user, role='staff')
         mock_svc.return_value = {
             'success': True,
             'inserted': 2, 'skipped': 1, 'errors': [], 'total_received': 3,

@@ -5,10 +5,23 @@ description: Check the frontend API change request against the current backend i
 
 Read the frontend CR documentation and compare it against the current backend implementation.
 
-## CR file locations
+## CR system overview
 
-- Index: /Users/minhle/Desktop/GBL_HR_Frontend/docs/API_REFERENCE.md
-- Per-feature CRs: /Users/minhle/Desktop/GBL_HR_Frontend/docs/cr/*.md
+The two repos exchange change requests symmetrically. Each repo's `docs/cr/` holds
+its **outgoing** asks; the fulfiller reads the requester's repo.
+
+- **Incoming requests TO the backend** live in the frontend repo at
+  `GBL_MASTER_FRONTEND/docs/cr/<feature>.md`. This skill reads from there.
+- **Outgoing requests FROM the backend** live in this repo at
+  `docs/cr/<feature>.md` (feature branches only — stripped at deploy).
+
+Path resolution: the frontend repo is typically checked out as a sibling of this
+repo (`../GBL_MASTER_FRONTEND/`). Adjust if your local layout differs.
+
+## CR file locations (incoming)
+
+- Per-feature CRs: `../GBL_MASTER_FRONTEND/docs/cr/*.md`
+- Index (legacy): `../GBL_MASTER_FRONTEND/docs/API_REFERENCE.md`
 
 ### Feature-to-file mapping
 
@@ -19,6 +32,8 @@ Read the frontend CR documentation and compare it against the current backend im
 | `feature/permission*` | `cr/permissions.md` |
 | `feature/user*` or `feature/auth*` | `cr/users.md` |
 | `feature/bathroom*` | `cr/bathroom-price-check.md` |
+| `feature/crm*` | `cr/crm.md` |
+| `feature/handcarry*` | `cr/handcarry.md` |
 | `feature/account-payable*` | `cr/account-payable.md` |
 
 ## Branch-sensitive checking
@@ -29,23 +44,21 @@ Read the frontend CR documentation and compare it against the current backend im
 
 ## CR file structure
 
-CR files have two sections separated by a line containing `═══`:
+Per CR #74, frontend CR files are migrating away from the `═══ Completed CRs (Archive) ═══`
+split. Going forward, each file contains **only pending/active requests** — completed
+CRs move to `docs/changes/<feature>.md` on the frontend side.
 
-```
-[Pending CRs — active specs, ⏳ items, current endpoint docs]
+During the transition, files may still carry the archive section. Handle both:
 
-# ═══ Completed CRs (Archive) ═══
-
-[Completed CR summaries — only read if looking up a specific old CR]
-```
-
-**Only read down to the `═══` separator.** The completed section below it is an archive — skip it unless you need to look up a specific old CR by number.
+- **If `═══` is present:** read only up to the separator.
+- **If `═══` is absent:** read the entire file — it's all pending.
 
 ## What to check
 
-1. Read the matching CR file **up to the separator only**
+1. Read the matching CR file (pending portion only — see above)
 2. Look for any items marked with ⏳ (pending backend implementation)
-3. For each pending item and endpoint documented above the separator, verify against the actual backend routes and service code:
+3. For each pending item and endpoint documented in the pending section, verify against
+   the actual backend routes and service code:
    - Does the endpoint exist?
    - Do request/response field names and types match?
    - Do validation rules match?
