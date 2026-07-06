@@ -38,10 +38,12 @@ class TestFetchCustomerAggregates:
     @patch('app.modules.crm.repository.get_oracle_connection')
     def test_basic_transformation(self, mock_oracle):
         rows = [
+            # ...RFM cols..., last_purchase_date, fp_revenue, discounted_revenue,
+            # fp_units, discounted_units (CR #76)
             (12345, 'Nguyen Thi A', 'a@example.com', 30, 5, 100_000_000,
-             datetime(2026, 3, 1)),
+             datetime(2026, 3, 1), 70_000_000, 30_000_000, 40, 12),
             (67890, '  Trim Me  ', None, 200, 1, 5_000_000,
-             datetime(2025, 9, 15)),
+             datetime(2025, 9, 15), 5_000_000, 0, 3, 0),
         ]
         mock_oracle.return_value, _ = _make_conn(rows)
 
@@ -57,19 +59,30 @@ class TestFetchCustomerAggregates:
             'frequency': 5,
             'monetary': 100_000_000,
             'last_purchase_date': date(2026, 3, 1),
+            'fp_revenue': 70_000_000,
+            'discounted_revenue': 30_000_000,
+            'fp_units': 40,
+            'discounted_units': 12,
         }
+        # FP + MD revenue reconstructs monetary (binary per-line split).
+        assert (result[0]['fp_revenue'] + result[0]['discounted_revenue']
+                == result[0]['monetary'])
         # name is trimmed; email stays None
         assert result[1]['name'] == 'Trim Me'
         assert result[1]['email'] is None
 
     @patch('app.modules.crm.repository.get_oracle_connection')
     def test_handles_null_name_and_zero_monetary(self, mock_oracle):
-        rows = [(1, None, None, 50, 1, None, datetime(2026, 1, 1))]
+        rows = [(1, None, None, 50, 1, None, datetime(2026, 1, 1),
+                 None, None, None, None)]
         mock_oracle.return_value, _ = _make_conn(rows)
 
         result = CRMRepository().fetch_customer_aggregates()
         assert result[0]['name'] == ''
         assert result[0]['monetary'] == 0
+        # NULL FP/MD aggregates coalesce to 0.
+        assert result[0]['fp_revenue'] == 0
+        assert result[0]['discounted_units'] == 0
 
     @patch('app.modules.crm.repository.get_oracle_connection')
     def test_empty_result(self, mock_oracle):
@@ -134,13 +147,19 @@ class TestReplaceCustomerScores:
             {'customer_sid': 1, 'name': 'A', 'email': None, 'phone': '0909',
              'recency': 30, 'frequency': 5, 'monetary': 1000,
              'r_score': 5, 'f_score': 4, 'm_score': 3, 'weighted_score': 3.7,
+             'engagement_score': 3.5,
              'segment': 'Loyalist', 'top_brand': 'X', 'top_category': 'Y',
-             'category_breadth': 2, 'last_purchase_date': date(2026, 3, 1)},
+             'category_breadth': 2, 'last_purchase_date': date(2026, 3, 1),
+             'fp_revenue': 700, 'discounted_revenue': 300,
+             'fp_units': 4, 'discounted_units': 2},
             {'customer_sid': 2, 'name': 'B', 'email': None, 'phone': None,
              'recency': 100, 'frequency': 1, 'monetary': 50,
              'r_score': 4, 'f_score': 1, 'm_score': 1, 'weighted_score': 1.6,
+             'engagement_score': 1.2,
              'segment': 'Prospect', 'top_brand': None, 'top_category': None,
-             'category_breadth': 0, 'last_purchase_date': date(2026, 1, 5)},
+             'category_breadth': 0, 'last_purchase_date': date(2026, 1, 5),
+             'fp_revenue': 50, 'discounted_revenue': 0,
+             'fp_units': 1, 'discounted_units': 0},
         ]
         n = CRMRepository().replace_customer_scores(scored)
 

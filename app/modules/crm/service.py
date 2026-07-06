@@ -113,11 +113,18 @@ class CRMService:
                     'avg_recency':   round(float(r['avg_recency']), 1),
                     'avg_frequency': round(float(r['avg_frequency']), 1),
                     'avg_monetary':  int(r['avg_monetary']),
+                    # CR #76 (frontend): FP/MD split — revenue (VND) and units sold.
+                    'total_full_price':  int(r['total_full_price']),
+                    'total_discounted':  int(r['total_discounted']),
+                    'count_full_price':  int(r['count_full_price']),
+                    'count_discounted':  int(r['count_discounted']),
                 })
             else:
                 segments.append({
                     'segment': seg, 'count': 0, 'percentage': 0,
                     'revenue': 0, 'avg_recency': 0, 'avg_frequency': 0, 'avg_monetary': 0,
+                    'total_full_price': 0, 'total_discounted': 0,
+                    'count_full_price': 0, 'count_discounted': 0,
                 })
 
         return {'success': True, 'segments': segments}
@@ -261,9 +268,12 @@ class CRMService:
                     {'name': c['category_name'], 'monetary': c['revenue']}
                     for c in category_rows
                 ],
+                # CR #76 (frontend): FP/MD split — revenue (VND) + units sold.
                 'price_distribution': {
-                    'full_price': raw['totals']['fp_revenue'],
-                    'discounted': raw['totals']['discounted_revenue'],
+                    'full_price':       raw['totals']['fp_revenue'],
+                    'discounted':       raw['totals']['discounted_revenue'],
+                    'full_price_units': raw['totals']['fp_units'],
+                    'discounted_units': raw['totals']['discounted_units'],
                 },
             },
         }
@@ -424,6 +434,10 @@ class CRMService:
                     top_category       TEXT,
                     category_breadth   INTEGER NOT NULL DEFAULT 0,
                     last_purchase_date DATE,
+                    fp_revenue         BIGINT  NOT NULL DEFAULT 0,
+                    discounted_revenue BIGINT  NOT NULL DEFAULT 0,
+                    fp_units           INTEGER NOT NULL DEFAULT 0,
+                    discounted_units   INTEGER NOT NULL DEFAULT 0,
                     computed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
@@ -443,6 +457,14 @@ class CRMService:
             cursor.execute("""
                 ALTER TABLE crm_customer_scores
                 ADD COLUMN IF NOT EXISTS engagement_score NUMERIC(3,2) NOT NULL DEFAULT 0
+            """)
+            # CR #76 (frontend): FP/MD split columns for legacy tables.
+            cursor.execute("""
+                ALTER TABLE crm_customer_scores
+                ADD COLUMN IF NOT EXISTS fp_revenue         BIGINT  NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS discounted_revenue BIGINT  NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS fp_units           INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS discounted_units   INTEGER NOT NULL DEFAULT 0
             """)
 
             # Per-segment per-brand/category product analytics (CR #48,
