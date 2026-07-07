@@ -50,7 +50,32 @@ class CRMQueries:
             ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
                       * (1 - NVL(di.DISC_PERC, 0) / 100)
                       * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)               AS monetary,
-            MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                     AS last_purchase_date
+            MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                     AS last_purchase_date,
+            -- CR #76 (frontend): FP vs MD split. Binary per line item on the
+            -- COMBINED (item × document) discount rate: <= 30% kept-price
+            -- reduction is Full Price, > 30% is Markdown. Each line's whole
+            -- net revenue / unit count goes to exactly one bucket, so
+            -- fp + md == monetary and fp_units + md_units == total units.
+            ROUND(SUM(
+                CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) <= 0.30
+                     THEN (di.PRICE - NVL(di.TAX_AMT, 0))
+                          * (1 - NVL(di.DISC_PERC, 0) / 100)
+                          * (1 - NVL(d.DISC_PERC, 0) / 100)
+                     ELSE 0 END), 0)                                       AS fp_revenue,
+            ROUND(SUM(
+                CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) > 0.30
+                     THEN (di.PRICE - NVL(di.TAX_AMT, 0))
+                          * (1 - NVL(di.DISC_PERC, 0) / 100)
+                          * (1 - NVL(d.DISC_PERC, 0) / 100)
+                     ELSE 0 END), 0)                                       AS discounted_revenue,
+            SUM(CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) <= 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                       AS fp_units,
+            SUM(CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) > 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                       AS discounted_units
         FROM CUSTOMER c
         JOIN DOCUMENT d        ON d.BT_CUID = c.SID
         JOIN DOCUMENT_ITEM di  ON di.DOC_SID = d.SID
@@ -273,15 +298,14 @@ class CRMQueries:
     # Three small queries instead of one wide CTE — each is independently
     # readable, and the customer SID is bound once per query.
 
-    # 6a. Headline metrics: total monetary, total bills, FP/discounted split.
-    # Per-line proportional split: each line's net revenue is split by its
-    # kept-vs-discount ratio. For a line with combined kept_fraction k:
-    #   FP_per_line = net * k       = (PRICE-TAX) * k * k
-    #   MD_per_line = net * (1 - k) = (PRICE-TAX) * k * (1 - k)
-    # FP + MD = net, so FP + MD across all lines = total_monetary.
-    # Zero-discount lines collapse to FP = net, MD = 0.
-    # Example: PRICE-TAX = 100 with item disc 20% (k=0.8) → net=80,
-    #          FP=80*0.8=64, MD=80*0.2=16.
+    # 6a. Headline metrics: total monetary, total bills, FP/MD split
+    # (revenue + units sold). CR #76 (frontend): binary per-line rule on the
+    # COMBINED (item × document) discount rate — <= 30% reduction is Full
+    # Price, > 30% is Markdown. Each line's whole net revenue / unit count
+    # lands in exactly one bucket, so fp_revenue + discounted_revenue ==
+    # total_monetary and fp_units + discounted_units == total units. Uses the
+    # SAME rule as the segment summary so the drilldown and dashboard agree.
+    # (Supersedes the pre-CR#76 per-line proportional split.)
     CUSTOMER_DRILLDOWN_TOTALS = """
         SELECT
             ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
@@ -289,18 +313,27 @@ class CRMQueries:
                 * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS total_monetary,
             COUNT(DISTINCT d.SID)                                              AS total_bills,
             ROUND(SUM(
-                (di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)
+                CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) <= 0.30
+                     THEN (di.PRICE - NVL(di.TAX_AMT, 0))
+                          * (1 - NVL(di.DISC_PERC, 0) / 100)
+                          * (1 - NVL(d.DISC_PERC, 0) / 100)
+                     ELSE 0 END
             ), 0)                                                              AS fp_revenue,
             ROUND(SUM(
-                (di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)
-                * (1 - (1 - NVL(di.DISC_PERC, 0) / 100) * (1 - NVL(d.DISC_PERC, 0) / 100))
-            ), 0)                                                              AS discounted_revenue
+                CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) > 0.30
+                     THEN (di.PRICE - NVL(di.TAX_AMT, 0))
+                          * (1 - NVL(di.DISC_PERC, 0) / 100)
+                          * (1 - NVL(d.DISC_PERC, 0) / 100)
+                     ELSE 0 END
+            ), 0)                                                              AS discounted_revenue,
+            SUM(CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) <= 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                           AS fp_units,
+            SUM(CASE WHEN (1 - (1 - NVL(di.DISC_PERC, 0) / 100)
+                              * (1 - NVL(d.DISC_PERC, 0) / 100)) > 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                           AS discounted_units
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
         WHERE d.BT_CUID = :customer_sid

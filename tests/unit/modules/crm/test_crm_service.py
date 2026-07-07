@@ -57,6 +57,8 @@ class TestGetCustomers:
             'weighted_score': 5.0, 'engagement_score': 5.0, 'segment': 'VIC',
             'top_brand': 'AKRIS', 'top_category': 'WOMEN', 'category_breadth': 6,
             'last_purchase_date': date(2026, 3, 2),
+            'fp_revenue': 210_000_000, 'discounted_revenue': 40_000_000,
+            'fp_units': 18, 'discounted_units': 5,
         }]
 
         result = service.get_customers()
@@ -70,6 +72,29 @@ class TestGetCustomers:
         assert c['email'] == ''  # None → empty string
         assert c['weighted_score'] == 5.0
         assert c['engagement_score'] == 5.0
+        # CR #77: per-customer FP/MD split (revenue + units), names match
+        # SegmentSummary. FP + MD revenue reconstructs monetary.
+        assert c['total_full_price'] == 210_000_000
+        assert c['total_discounted'] == 40_000_000
+        assert c['count_full_price'] == 18
+        assert c['count_discounted'] == 5
+        assert c['total_full_price'] + c['total_discounted'] == c['monetary']
+
+    def test_fp_md_fields_default_zero_when_absent(self, service):
+        """Defensive: a legacy score row without FP/MD keys surfaces zeros
+        rather than raising (rollout window before the first recompute)."""
+        service.repo.count_scored_customers.return_value = 1
+        service.repo.list_customer_scores.return_value = [{
+            'customer_sid': 1, 'name': 'X', 'email': None, 'phone': None,
+            'recency': 0, 'frequency': 1, 'monetary': 0,
+            'r_score': 5, 'f_score': 1, 'm_score': 1,
+            'weighted_score': 1.8, 'engagement_score': 3.0, 'segment': 'Prospect',
+            'top_brand': None, 'top_category': None,
+            'category_breadth': 0, 'last_purchase_date': None,
+        }]
+        c = service.get_customers()['customers'][0]
+        assert c['total_full_price'] == 0
+        assert c['count_discounted'] == 0
 
     def test_passes_filters_to_repo(self, service):
         service.repo.count_scored_customers.return_value = 1
@@ -104,7 +129,9 @@ class TestGetSegmentsSummary:
         service.repo.count_scored_customers.return_value = 100
         service.repo.aggregate_segment_summary.return_value = [
             {'segment': 'VIC', 'count': 10, 'revenue': 1_000_000,
-             'avg_recency': 30.0, 'avg_frequency': 10.0, 'avg_monetary': 100_000},
+             'avg_recency': 30.0, 'avg_frequency': 10.0, 'avg_monetary': 100_000,
+             'total_full_price': 700_000, 'total_discounted': 300_000,
+             'count_full_price': 40, 'count_discounted': 12},
         ]
         result = service.get_segments_summary()
         assert result['success'] is True
@@ -117,6 +144,31 @@ class TestGetSegmentsSummary:
         lapsed = next(s for s in result['segments'] if s['segment'] == 'Lapsed')
         assert lapsed['count'] == 0
         assert lapsed['percentage'] == 0
+
+    def test_fp_md_split_surfaced_and_zero_filled(self, service):
+        """CR #76: FP/MD revenue + unit-count split per segment. Populated
+        segment carries the four fields; empty segments zero-fill them."""
+        service.repo.count_scored_customers.return_value = 100
+        service.repo.aggregate_segment_summary.return_value = [
+            {'segment': 'VIC', 'count': 10, 'revenue': 1_000_000,
+             'avg_recency': 30.0, 'avg_frequency': 10.0, 'avg_monetary': 100_000,
+             'total_full_price': 700_000, 'total_discounted': 300_000,
+             'count_full_price': 40, 'count_discounted': 12},
+        ]
+        result = service.get_segments_summary()
+        vic = next(s for s in result['segments'] if s['segment'] == 'VIC')
+        assert vic['total_full_price'] == 700_000
+        assert vic['total_discounted'] == 300_000
+        assert vic['count_full_price'] == 40
+        assert vic['count_discounted'] == 12
+        # Invariant the frontend relies on: FP + MD revenue == segment revenue.
+        assert vic['total_full_price'] + vic['total_discounted'] == vic['revenue']
+        # Zero-count segment zero-fills all four (no KeyError, no None).
+        lapsed = next(s for s in result['segments'] if s['segment'] == 'Lapsed')
+        assert lapsed['total_full_price'] == 0
+        assert lapsed['total_discounted'] == 0
+        assert lapsed['count_full_price'] == 0
+        assert lapsed['count_discounted'] == 0
 
     def test_preserves_segment_order(self, service):
         service.repo.count_scored_customers.return_value = 100
@@ -381,6 +433,8 @@ class TestGetCustomerDrilldown:
                 'total_bills':        23,
                 'fp_revenue':         8_000_000,
                 'discounted_revenue': 4_345_678,
+                'fp_units':           340,
+                'discounted_units':   95,
             },
             'brands': [
                 {'brand_name': 'GUCCI', 'revenue': 5_000_000, 'brand_recency_days': 10},
@@ -402,8 +456,10 @@ class TestGetCustomerDrilldown:
         assert d['brand_distribution'][0]['name'] == 'GUCCI'
         assert d['brand_distribution'][0]['monetary'] == 5_000_000
         assert d['category_distribution'][0]['name'] == 'BAG'
+        # CR #76: price_distribution carries revenue AND units sold.
         assert d['price_distribution'] == {
             'full_price': 8_000_000, 'discounted': 4_345_678,
+            'full_price_units': 340, 'discounted_units': 95,
         }
 
 
