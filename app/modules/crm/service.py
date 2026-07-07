@@ -86,6 +86,13 @@ class CRMService:
                 'top_brand':        r['top_brand'] or '',
                 'top_category':     r['top_category'] or '',
                 'category_breadth': r['category_breadth'],
+                # CR #77 (frontend): per-customer FP/MD split — revenue (VND)
+                # and units sold. Same binary <=30% rule as the segment
+                # summary; names match SegmentSummary (total_*/count_*).
+                'total_full_price': int(r.get('fp_revenue') or 0),
+                'total_discounted': int(r.get('discounted_revenue') or 0),
+                'count_full_price': int(r.get('fp_units') or 0),
+                'count_discounted': int(r.get('discounted_units') or 0),
             })
 
         return {'success': True, 'customers': customers, 'total': len(customers)}

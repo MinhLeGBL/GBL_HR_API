@@ -7,6 +7,41 @@ The CRM module predates per-module versioning (it shipped incrementally as
 CR #40–#53). Version tracking starts here at `1.0.0`; this entry records the
 first change made under the tracked scheme.
 
+## [1.1.0] — 2026-07-07
+
+### Added — CR #77 (frontend): per-customer FP/MD split on `GET /crm/customers`
+
+Continuation of CR #76. The FP-vs-MD-by-segment chart is gaining a
+click-to-drilldown that lists every customer in a segment with their FP/MD
+revenue and units. Fetching that via N `GET /crm/customers/<sid>` calls is
+prohibitive (a segment can hold 200+ customers), so the **customer list**
+endpoint now carries the split inline.
+
+#### `GET /crm/customers` — four new fields per `customers[]` element
+
+```jsonc
+{
+  "id": "...", "name": "...", "monetary": 12500000, "segment": "VIC",
+  "total_full_price": 10800000,   // FP revenue (VND)
+  "total_discounted":  1700000,   // MD revenue (VND)
+  "count_full_price":       12,   // FP units sold
+  "count_discounted":        3    // MD units sold
+}
+```
+
+Names match `SegmentSummary` (`total_*` / `count_*`), **not** the drilldown's
+`full_price_units` / `discounted_units` — matching the frontend request.
+Invariants per customer: `total_full_price + total_discounted == monetary`
+(to per-customer VND rounding, per [1.0.0]); `count_full_price +
+count_discounted == total units bought` (exact).
+
+#### No new storage / migration
+
+Pure surfacing change — reads the `fp_revenue` / `discounted_revenue` /
+`fp_units` / `discounted_units` columns added in [1.0.0]. Service coalesces
+missing values to `0`, so a legacy score row (before the first recompute)
+returns zeros rather than erroring.
+
 ## [1.0.0] — 2026-07-06
 
 ### Added — CR #76 (frontend): FP vs MD split per segment + per customer

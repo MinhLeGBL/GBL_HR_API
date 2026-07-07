@@ -589,7 +589,8 @@ class CRMRepository:
                    r_score, f_score, m_score,
                    weighted_score, engagement_score, segment,
                    top_brand, top_category, category_breadth,
-                   last_purchase_date
+                   last_purchase_date,
+                   fp_revenue, discounted_revenue, fp_units, discounted_units
             FROM crm_customer_scores
             {where}
             ORDER BY weighted_score DESC, customer_sid ASC

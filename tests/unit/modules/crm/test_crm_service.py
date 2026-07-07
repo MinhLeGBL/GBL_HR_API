@@ -57,6 +57,8 @@ class TestGetCustomers:
             'weighted_score': 5.0, 'engagement_score': 5.0, 'segment': 'VIC',
             'top_brand': 'AKRIS', 'top_category': 'WOMEN', 'category_breadth': 6,
             'last_purchase_date': date(2026, 3, 2),
+            'fp_revenue': 210_000_000, 'discounted_revenue': 40_000_000,
+            'fp_units': 18, 'discounted_units': 5,
         }]
 
         result = service.get_customers()
@@ -70,6 +72,29 @@ class TestGetCustomers:
         assert c['email'] == ''  # None → empty string
         assert c['weighted_score'] == 5.0
         assert c['engagement_score'] == 5.0
+        # CR #77: per-customer FP/MD split (revenue + units), names match
+        # SegmentSummary. FP + MD revenue reconstructs monetary.
+        assert c['total_full_price'] == 210_000_000
+        assert c['total_discounted'] == 40_000_000
+        assert c['count_full_price'] == 18
+        assert c['count_discounted'] == 5
+        assert c['total_full_price'] + c['total_discounted'] == c['monetary']
+
+    def test_fp_md_fields_default_zero_when_absent(self, service):
+        """Defensive: a legacy score row without FP/MD keys surfaces zeros
+        rather than raising (rollout window before the first recompute)."""
+        service.repo.count_scored_customers.return_value = 1
+        service.repo.list_customer_scores.return_value = [{
+            'customer_sid': 1, 'name': 'X', 'email': None, 'phone': None,
+            'recency': 0, 'frequency': 1, 'monetary': 0,
+            'r_score': 5, 'f_score': 1, 'm_score': 1,
+            'weighted_score': 1.8, 'engagement_score': 3.0, 'segment': 'Prospect',
+            'top_brand': None, 'top_category': None,
+            'category_breadth': 0, 'last_purchase_date': None,
+        }]
+        c = service.get_customers()['customers'][0]
+        assert c['total_full_price'] == 0
+        assert c['count_discounted'] == 0
 
     def test_passes_filters_to_repo(self, service):
         service.repo.count_scored_customers.return_value = 1
