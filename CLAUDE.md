@@ -47,6 +47,7 @@ tests/                     # Mirrors module structure
 | `modules/crm` | `crm_bp` | `/api/v1/crm` | `CRMService` | Customer RFM scoring + 7-segment classification (luxury hybrid) |
 | `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
 | `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
+| `modules/reports` | `reports_bp` | `/api/v1/reports` | `ReportsService` | Read-only Oracle reports — two-period sale comparison (revenue/bills/avg + new-vs-returning), CR #78 |
 
 ## Import Rules
 
@@ -208,6 +209,7 @@ GBL_HR_API/                              GBL_MASTER_FRONTEND/
 | `feature/crm*` | `cr/crm.md` |
 | `feature/handcarry*` | `cr/handcarry.md` |
 | `feature/account-payable*` | `cr/account-payable.md` |
+| `feature/live-comparison*` | `cr/live-comparison.md` |
 
 Same key for backend's outgoing CRs in this repo's `docs/cr/<feature>.md`.
 
