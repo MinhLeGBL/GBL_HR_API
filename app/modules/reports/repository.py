@@ -25,6 +25,11 @@ class ReportsRepository:
         """
         binds = {'from_date': from_date, 'to_exclusive': to_exclusive}
         conn = get_oracle_connection()
+        # get_oracle_connection() returns None on failure (not raise). Surface a
+        # clear error so the service maps it to SERVER_ERROR, and keep the
+        # finally safe (no None.close()).
+        if conn is None:
+            raise RuntimeError('Oracle connection unavailable')
         try:
             cur = conn.cursor()
 
