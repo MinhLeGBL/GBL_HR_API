@@ -21,6 +21,7 @@ jobs:
       handcarry: ${{ steps.changes.outputs.handcarry }}
       health: ${{ steps.changes.outputs.health }}
       permissions: ${{ steps.changes.outputs.permissions }}
+      reports: ${{ steps.changes.outputs.reports }}
       stores: ${{ steps.changes.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +68,9 @@ jobs:
             permissions:
               - 'app/modules/permissions/**'
               - 'tests/unit/modules/permissions/**'
+            reports:
+              - 'app/modules/reports/**'
+              - 'tests/unit/modules/reports/**'
             stores:
               - 'app/modules/stores/**'
               - 'tests/unit/modules/stores/**'
@@ -108,6 +112,7 @@ jobs:
           [ "${{ needs.detect.outputs.handcarry }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/handcarry"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
+          [ "${{ needs.detect.outputs.reports }}" = "true" ]     && PATHS="$PATHS tests/unit/modules/reports"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"
           if [ -n "$PATHS" ]; then
             echo "Running:$PATHS"

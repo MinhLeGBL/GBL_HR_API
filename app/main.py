@@ -15,6 +15,7 @@ from app.modules.bathroom.routes import bathroom_bp
 from app.modules.crm.routes import crm_bp
 from app.modules.handcarry.routes import handcarry_bp
 from app.modules.account_payable.routes import account_payable_bp
+from app.modules.reports.routes import reports_bp
 
 
 def create_app():
@@ -51,6 +52,7 @@ def create_app():
     app.register_blueprint(crm_bp)
     app.register_blueprint(handcarry_bp)
     app.register_blueprint(account_payable_bp)
+    app.register_blueprint(reports_bp)
 
     # Root endpoint
     @app.route('/')
