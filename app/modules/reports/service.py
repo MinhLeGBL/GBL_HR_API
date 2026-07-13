@@ -75,7 +75,10 @@ class ReportsService:
 
     @staticmethod
     def _parse_date(s: Optional[str]) -> Optional[date]:
-        if not s:
+        # Non-string input (a JSON number/bool/list in a PUT body) is not a
+        # valid date — treat as unparseable (→ 400) rather than letting
+        # `.strip()` raise AttributeError and escape as a 500.
+        if not s or not isinstance(s, str):
             return None
         try:
             return datetime.strptime(s.strip(), '%Y-%m-%d').date()

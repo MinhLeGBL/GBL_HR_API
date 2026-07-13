@@ -237,3 +237,14 @@ class TestSetPins:
         service.repo.upsert_pins.side_effect = RuntimeError('pg down')
         res = service.set_pins(user_id=7, body={'period_a': None, 'period_b': None})
         assert res['success'] is False and res['code'] == 'SERVER_ERROR'
+
+    def test_non_string_date_is_400_not_500(self, service):
+        """A JSON number/bool for `from`/`to` must be rejected as INVALID_INPUT
+        (400), not raise AttributeError from .strip() → 500."""
+        for bad in (20260601, True, ['2026-06-01'], {'x': 1}):
+            res = service.set_pins(user_id=7, body={
+                'period_a': {'from': bad, 'to': '2026-06-30'},
+                'period_b': None})
+            assert res['success'] is False, f'{bad!r} should be rejected'
+            assert res['code'] == 'INVALID_INPUT'
+        service.repo.upsert_pins.assert_not_called()
