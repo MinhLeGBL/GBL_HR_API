@@ -1,5 +1,5 @@
-"""Reports API routes (CR #78 — live sale comparison)."""
-from flask import Blueprint, jsonify, request
+"""Reports API routes (CR #78 sale comparison, CR #79 pinned periods)."""
+from flask import Blueprint, g, jsonify, request
 
 from app.core.auth.middleware import token_required
 from .service import ReportsService
@@ -39,4 +39,29 @@ def get_sale_comparison():
     if not result['success']:
         status = _ERROR_STATUS.get(result.get('code'), 400)
         return jsonify(result), status
+    return jsonify(result), 200
+
+
+# ----------------------------------------------------------------------
+# CR #79 — per-user pinned periods
+# ----------------------------------------------------------------------
+@reports_bp.route('/live-comparison/pins', methods=['GET'])
+@token_required
+def get_pins():
+    """The caller's pinned periods (200 always; unset → null)."""
+    result = reports_service.get_pins(user_id=g.sid)
+    if not result['success']:
+        return jsonify(result), _ERROR_STATUS.get(result.get('code'), 500)
+    return jsonify(result), 200
+
+
+@reports_bp.route('/live-comparison/pins', methods=['PUT'])
+@token_required
+def put_pins():
+    """Replace the caller's pins. Body: {period_a, period_b} — each a
+    {from, to} or null. Returns the persisted pins."""
+    body = request.get_json(silent=True)
+    result = reports_service.set_pins(user_id=g.sid, body=body)
+    if not result['success']:
+        return jsonify(result), _ERROR_STATUS.get(result.get('code'), 400)
     return jsonify(result), 200

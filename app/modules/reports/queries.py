@@ -13,14 +13,14 @@ Customer buckets (see CRM `EXCLUDED_CUSTOMER_NAMES`):
 - SYSADMIN            — system-internal account; NOT a real sale. Excluded
                         from every figure.
 - TOURIST / TOURIST.  — POS aggregation bucket for walk-in tourist sales
-                        (one synthetic record for thousands of anonymous
-                        walk-ins). Real revenue, so it stays in
-                        `total_revenue`, but it is NOT an identifiable
-                        individual, so it is excluded from the new/returning
-                        customer classification (its revenue folds into the
-                        "returning" bucket via `returning = total - new`).
-- NULL BT_CUID        — anonymous sale, no customer record. Same treatment as
-                        TOURIST: counted in revenue, not in customer counts.
+                        (one synthetic record for many anonymous walk-ins).
+                        Real revenue, so it stays in `total_revenue`, and NOT
+                        an identifiable individual, so it is excluded from the
+                        new/returning classification. CR #80 breaks it out as
+                        its own `tourist_*` bucket (counted as one-bill-one-
+                        tourist), removed from "returning".
+- NULL BT_CUID        — anonymous sale, no customer record. Folded into the
+                        tourist bucket (CR #80). None occur in current data.
 
 Date binds are Python `date` objects. `to` is inclusive of the whole day, so
 the service passes `to_exclusive = to + 1 day` and the range is
@@ -34,6 +34,17 @@ _NET_LINE = (
     "* (1 - NVL(d.DISC_PERC, 0) / 100)"
 )
 
+# CR #80: a bill belongs to the "tourist" bucket when its customer is the POS
+# walk-in TOURIST record OR there is no customer at all (anonymous NULL). Both
+# are one-time, no-identity walk-ins — the PO treats them as a distinct bucket,
+# not "returning". (Anonymous NULL bills don't occur in current data — every
+# walk-in is booked under TOURIST — so folding NULL here is future-proofing.)
+_IS_TOURIST = (
+    "(d.BT_CUID IS NULL OR d.BT_CUID IN ("
+    "SELECT SID FROM CUSTOMER "
+    "WHERE UPPER(TRIM(FIRST_NAME)) IN ('TOURIST', 'TOURIST.')))"
+)
+
 
 class ReportsQueries:
     """Oracle queries for the sale-comparison report."""
@@ -44,10 +55,18 @@ class ReportsQueries:
     # All in-range sales EXCEPT the SYSADMIN system account. Walk-in
     # (TOURIST) and anonymous (NULL BT_CUID) sales ARE included — they are
     # real revenue.
+    # CR #80: `tourist_customers` counts DISTINCT tourist bills (one bill = one
+    # tourist — the TOURIST record aggregates many physical walk-ins), and
+    # `tourist_customer_revenue` is their net revenue. The service subtracts the
+    # tourist slice out of "returning".
     PERIOD_TOTALS = f"""
         SELECT
             ROUND(NVL(SUM({_NET_LINE}), 0), 0)   AS total_revenue,
-            COUNT(DISTINCT d.SID)                AS bill_count
+            COUNT(DISTINCT d.SID)                AS bill_count,
+            COUNT(DISTINCT CASE WHEN {_IS_TOURIST} THEN d.SID END)
+                                                 AS tourist_customers,
+            ROUND(NVL(SUM(CASE WHEN {_IS_TOURIST} THEN {_NET_LINE} ELSE 0 END), 0), 0)
+                                                 AS tourist_customer_revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
         WHERE di.ITEM_TYPE = 1
