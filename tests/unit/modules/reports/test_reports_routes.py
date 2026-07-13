@@ -105,3 +105,62 @@ class TestSaleComparisonRoute:
         """No token → 401, and the endpoint is reachable (registered)."""
         resp = client.get(f'{URL}?{_VALID_QS}')
         assert resp.status_code == 401
+
+
+PINS_URL = '/api/v1/reports/live-comparison/pins'
+
+
+class TestPinsRoutes:
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE)
+    def test_get_200_and_user_from_jwt(
+            self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_pins.return_value = {
+            'success': True, 'period_a': None, 'period_b': None}
+        resp = client.get(PINS_URL, headers=_headers())
+        assert resp.status_code == 200
+        # user_id derived from JWT (g.sid = 1 per _mock_auth), not the URL.
+        mock_svc.get_pins.assert_called_once_with(user_id=1)
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE)
+    def test_put_200_passes_body_and_user(
+            self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.set_pins.return_value = {
+            'success': True, 'period_a': None, 'period_b': None}
+        body = {'period_a': {'from': '2026-06-01', 'to': '2026-06-30'},
+                'period_b': None}
+        resp = client.put(PINS_URL, json=body, headers=_headers())
+        assert resp.status_code == 200
+        mock_svc.set_pins.assert_called_once_with(user_id=1, body=body)
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE)
+    def test_put_invalid_input_is_400(
+            self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.set_pins.return_value = {
+            'success': False, 'error': 'bad', 'code': 'INVALID_INPUT'}
+        resp = client.put(PINS_URL, json={'period_a': None}, headers=_headers())
+        assert resp.status_code == 400
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE)
+    def test_get_server_error_is_500(
+            self, mock_svc, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_pins.return_value = {
+            'success': False, 'error': 'boom', 'code': 'SERVER_ERROR'}
+        resp = client.get(PINS_URL, headers=_headers())
+        assert resp.status_code == 500
+
+    def test_pins_require_auth(self, client):
+        assert client.get(PINS_URL).status_code == 401
+        assert client.put(PINS_URL, json={}).status_code == 401
