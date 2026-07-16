@@ -7,6 +7,40 @@ The CRM module predates per-module versioning (it shipped incrementally as
 CR #40–#53). Version tracking starts here at `1.0.0`; this entry records the
 first change made under the tracked scheme.
 
+## [1.2.0] — 2026-07-16
+
+### Fixed — revenue double-applied the item discount (RFM monetary undercounted)
+
+Same defect found and fixed in the `reports` module (v1.3.1): the net-revenue
+expression was `(PRICE − TAX) × (1 − item_disc) × (1 − doc_disc)`, but `di.PRICE`
+is **already the discounted unit selling price** (`ORIG_PRICE × (1 −
+di.DISC_PERC/100) == di.PRICE` on every live line). Re-applying `di.DISC_PERC`
+**double-discounted** every revenue figure, and — because `di.PRICE` is a **unit**
+price — the missing `× QTY` further undercounted multi-unit lines.
+
+**Corrected** net revenue (ex-tax), now a single shared fragment `_NET_REVENUE`:
+`(di.PRICE − NVL(di.TAX_AMT,0)) × NVL(di.QTY,0) × (1 − NVL(d.DISC_PERC,0)/100)`.
+Applied to every revenue SUM across the module — `monetary`, `fp_revenue` /
+`discounted_revenue`, the brand/category aggregates, and all customer/brand
+drilldown revenues. Verified live: a top customer's `monetary` rose from
+15.29B → 17.26B (query result == manual net-revenue formula, exact).
+
+**`di.DISC_PERC` is still used** — legitimately — in the Full-Price vs Markdown
+*classification* (`_COMBINED_DISC`, the combined item×doc discount **rate**, not
+revenue). That logic is unchanged; only revenue sums were corrected.
+
+**Response shape is unchanged** (same fields, corrected values) — pure backend
+fix, no frontend CR. **Impact to be aware of:** every customer's `monetary`
+increases (by a customer-specific factor that depends on their discount mix and
+multi-unit purchases), so **RFM monetary quintiles and the resulting segments
+will shift** on the next recompute. The FP/MD revenue split also rises with the
+same correction.
+
+> **Known pre-existing nit (not introduced here):** `fp_revenue` and
+> `discounted_revenue` are each `ROUND()`ed independently of `monetary`, so
+> `fp + md` can differ from `monetary` by ±1 VND. Structure is unchanged by this
+> fix; left as-is.
+
 ## [1.1.0] — 2026-07-07
 
 ### Added — CR #77 (frontend): per-customer FP/MD split on `GET /crm/customers`
