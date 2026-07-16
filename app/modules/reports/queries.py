@@ -1,11 +1,23 @@
 """
 Oracle SQL for the Reports module (CR #78 — live sale comparison).
 
-Read-only aggregation over Retail Pro `DOCUMENT` / `DOCUMENT_ITEM`. Mirrors
-the CRM revenue conventions so numbers reconcile across features:
+Read-only aggregation over Retail Pro `DOCUMENT` / `DOCUMENT_ITEM`:
 - one row per line item in `DOCUMENT_ITEM`, joined to its `DOCUMENT`;
 - `ITEM_TYPE = 1` (sales only — returns/exchanges excluded);
-- net line revenue = `(PRICE - TAX) × (1 - item_disc) × (1 - doc_disc)`.
+- net line revenue (ex-tax) = `(PRICE - TAX) × QTY × (1 - doc_disc)`.
+
+Revenue formula — verified against live data (see `_NET_LINE`):
+- `di.PRICE` is the actual UNIT selling price ALREADY net of the item-level
+  discount: `ORIG_PRICE × (1 - di.DISC_PERC/100) == di.PRICE` holds on every
+  line. Re-applying `di.DISC_PERC` therefore DOUBLE-discounts — the bug fixed
+  after CR #81 surfaced Diamond (RWD) reading ~⅓ of actual.
+- `di.TAX_AMT` is per-unit; subtracted for ex-tax revenue.
+- the DOCUMENT-level discount `d.DISC_PERC` is NOT baked into `di.PRICE`
+  (confirmed on doc-discount rows), so it is applied here.
+- `di.QTY` matters: `PRICE` is a unit price, so the line total is `PRICE × QTY`.
+
+NOTE: the CRM module's `monetary` uses the same (pre-fix) expression and has
+the same double-discount bug — to be corrected separately on its own branch.
 
 Column conventions: d = DOCUMENT, di = DOCUMENT_ITEM, c = CUSTOMER.
 
@@ -27,10 +39,13 @@ the service passes `to_exclusive = to + 1 day` and the range is
 `invc_post_date >= :from_date AND invc_post_date < :to_exclusive`.
 """
 
-# Net line revenue expression (shared by both queries).
+# Net line revenue (ex-tax), shared by both queries.
+# = (unit price ex-tax) × qty × (1 − document discount).
+# di.PRICE is ALREADY net of the item discount, so di.DISC_PERC is deliberately
+# NOT applied here (applying it double-discounts). See module docstring.
 _NET_LINE = (
     "(di.PRICE - NVL(di.TAX_AMT, 0)) "
-    "* (1 - NVL(di.DISC_PERC, 0) / 100) "
+    "* NVL(di.QTY, 0) "
     "* (1 - NVL(d.DISC_PERC, 0) / 100)"
 )
 

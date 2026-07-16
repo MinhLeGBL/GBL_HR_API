@@ -3,6 +3,38 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.3.1] — 2026-07-16
+
+### Fixed — revenue formula double-applied the item discount (undercount ~2.6×)
+
+Surfaced by CR #81: scoping to a single store (Runway Diamond / `RWD`) showed
+2026-07-15 revenue of ~166M when the real figure is ~432M. Response **shape is
+unchanged** — only the numbers are corrected — so this is a pure backend fix
+(no frontend CR); all `*_revenue` / `avg_bill` values on
+`GET /reports/sale-comparison` now read materially higher.
+
+**Root cause** (verified against live Oracle data): the net-line expression was
+`(PRICE − TAX) × (1 − item_disc) × (1 − doc_disc)`, but `di.PRICE` is **already
+the discounted unit selling price** — `ORIG_PRICE × (1 − di.DISC_PERC/100) ==
+di.PRICE` holds on every line. Re-applying `di.DISC_PERC` discounted a second
+time; with Diamond's ~69% average item discount that cut revenue to roughly a
+third. A secondary defect: `di.PRICE` is a **unit** price, so line totals were
+missing `× QTY` (masked at RWD 07-15 where every line was qty 1).
+
+**Corrected** `_NET_LINE` (ex-tax, preserves the CR #78 net intent):
+`(di.PRICE − NVL(di.TAX_AMT,0)) × NVL(di.QTY,0) × (1 − NVL(d.DISC_PERC,0)/100)`
+- item discount **removed** (already in `PRICE`);
+- `× QTY` **added** (`PRICE` is per-unit; `TAX_AMT` is per-unit too);
+- document-level discount **kept** — confirmed NOT baked into `PRICE`.
+
+Applies to every figure derived from `_NET_LINE`: `total_revenue`,
+`new_customer_revenue`, `tourist_customer_revenue`, and the derived
+`returning_customer_revenue` / `avg_bill`.
+
+> **Known follow-up:** `app/modules/crm` computes `monetary` with the identical
+> pre-fix expression and carries the same bug — to be corrected on the CRM
+> branch (RFM scores/segments will shift), tracked separately.
+
 ## [1.3.0] — 2026-07-16
 
 ### Added — CR #81: per-period store scope (multi-select)

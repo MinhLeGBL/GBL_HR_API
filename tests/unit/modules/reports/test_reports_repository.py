@@ -10,8 +10,31 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.queries import ReportsQueries
 
 CONN = 'app.modules.reports.repository.get_oracle_connection'
+
+
+class TestRevenueFormula:
+    """Guards the v1.3.1 fix: di.PRICE is already net of the item discount and
+    is a unit price. The net-line expression must NOT re-apply the item discount
+    (`di.DISC_PERC`), MUST multiply by `di.QTY`, and MUST keep the document
+    discount (`d.DISC_PERC`). Oracle math can't be unit-tested (it's mocked), so
+    we pin the SQL shape to prevent a silent regression."""
+
+    def _sql(self):
+        return (ReportsQueries.period_totals(ReportsQueries.store_filter(None)[0])
+                + ReportsQueries.new_vs_returning(ReportsQueries.store_filter(None)[0]))
+
+    def test_item_discount_not_reapplied(self):
+        assert 'di.DISC_PERC' not in self._sql(), (
+            'di.PRICE already includes the item discount — applying di.DISC_PERC '
+            'double-discounts (the 166M-vs-432M bug).')
+
+    def test_quantity_and_doc_discount_applied(self):
+        sql = self._sql()
+        assert 'NVL(di.QTY, 0)' in sql, 'PRICE is a unit price — line total needs × QTY'
+        assert 'd.DISC_PERC' in sql, 'document-level discount must still be applied'
 
 
 def _cursor(totals_row, split_row):
