@@ -407,8 +407,25 @@ cd /path/to/GBL_HR_API
 git pull origin deployment
 source .venv/bin/activate
 pip install -r requirements.txt
+python scripts/database/init_db.py     # REQUIRED on any release with a schema change
 sudo systemctl restart gbl-hr-api
 ```
+
+> **⚠️ Database migrations are NOT automatic.** `deploy.yml` does not run
+> `init_db.py`, so a release that adds a table or column (any change to
+> `scripts/database/init_db.py` or a module's `init_database()`) will leave the
+> live DB on the old schema. The new code then queries the missing column and
+> returns **500** — the exact cause of the CR #82 pins-don't-persist incident
+> (the CR #81 `period_*_store_ids` columns were never added).
+>
+> **Required migration checklist for every release:**
+> 1. Does the diff touch `init_db.py` or any `init_database()` / add a
+>    table/column? If unsure, run step 2 anyway — it's idempotent.
+> 2. After `git pull` and before/after restart, run
+>    `python scripts/database/init_db.py` (all `CREATE TABLE IF NOT EXISTS` /
+>    `ADD COLUMN IF NOT EXISTS` — safe to run every deploy).
+> 3. Smoke-test the changed endpoint against the live DB (a real round-trip),
+>    not just health — a missing migration only shows up on the data path.
 
 ### View Logs
 
