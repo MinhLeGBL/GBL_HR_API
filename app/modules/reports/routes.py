@@ -20,7 +20,9 @@ def get_sale_comparison():
     """Two independent date ranges → revenue / bill-count / avg-bill and the
     new-vs-returning customer breakdown for each period.
 
-    Query params (all required): from_a, to_a, from_b, to_b (YYYY-MM-DD).
+    Query params (required): from_a, to_a, from_b, to_b (YYYY-MM-DD).
+    Optional (CR #81): store_a, store_b — comma-separated `GET /stores` ids
+    scoping each period to a union of stores; omitted → all stores.
     """
     required = ('from_a', 'to_a', 'from_b', 'to_b')
     params = {k: request.args.get(k) for k in required}
@@ -35,6 +37,8 @@ def get_sale_comparison():
     result = reports_service.get_sale_comparison(
         from_a=params['from_a'], to_a=params['to_a'],
         from_b=params['from_b'], to_b=params['to_b'],
+        store_a=request.args.get('store_a'),
+        store_b=request.args.get('store_b'),
     )
     if not result['success']:
         status = _ERROR_STATUS.get(result.get('code'), 400)
@@ -59,7 +63,8 @@ def get_pins():
 @token_required
 def put_pins():
     """Replace the caller's pins. Body: {period_a, period_b} — each a
-    {from, to} or null. Returns the persisted pins."""
+    {from, to, store_ids?} or null (CR #81: store_ids is an optional int array,
+    []/omitted = all stores). Returns the persisted pins."""
     body = request.get_json(silent=True)
     result = reports_service.set_pins(user_id=g.sid, body=body)
     if not result['success']:

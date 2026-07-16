@@ -47,7 +47,35 @@ _IS_TOURIST = (
 
 
 class ReportsQueries:
-    """Oracle queries for the sale-comparison report."""
+    """Oracle queries for the sale-comparison report.
+
+    CR #81: each period may be scoped to one or more stores. The scope is a
+    union — `d.STORE_SID IN (:store_0, :store_1, …)` — injected via
+    `store_filter()` and applied to the *in-range* bill scans only. The
+    first-ever-purchase scan (`first_buy`) stays global so "new" keeps its
+    documented meaning (first purchase ever, anywhere), rather than "first
+    purchase at this store" — see CHANGELOG / CR #81 response.
+    """
+
+    # -----------------------------------------------------------------
+    # CR #81 — optional per-period store scope.
+    # -----------------------------------------------------------------
+    @staticmethod
+    def store_filter(store_sids):
+        """Build the `AND d.STORE_SID IN (...)` fragment + its Oracle binds.
+
+        Args:
+            store_sids: list of Oracle STORE.SID ints, or None/empty for no
+                scope (all stores).
+
+        Returns (sql_fragment, binds) — `('', {})` when unscoped.
+        """
+        if not store_sids:
+            return '', {}
+        names = [f'store_{i}' for i in range(len(store_sids))]
+        placeholders = ', '.join(f':{n}' for n in names)
+        binds = {n: sid for n, sid in zip(names, store_sids)}
+        return f'AND d.STORE_SID IN ({placeholders})', binds
 
     # -----------------------------------------------------------------
     # 1. Period totals: revenue + distinct bill count.
@@ -59,7 +87,10 @@ class ReportsQueries:
     # tourist — the TOURIST record aggregates many physical walk-ins), and
     # `tourist_customer_revenue` is their net revenue. The service subtracts the
     # tourist slice out of "returning".
-    PERIOD_TOTALS = f"""
+    # CR #81: `store_filter` scopes this whole scan to the selected store(s).
+    @staticmethod
+    def period_totals(store_filter=''):
+        return f"""
         SELECT
             ROUND(NVL(SUM({_NET_LINE}), 0), 0)   AS total_revenue,
             COUNT(DISTINCT d.SID)                AS bill_count,
@@ -72,6 +103,7 @@ class ReportsQueries:
         WHERE di.ITEM_TYPE = 1
           AND d.invc_post_date >= :from_date
           AND d.invc_post_date <  :to_exclusive
+          {store_filter}
           AND (
               d.BT_CUID IS NULL
               OR d.BT_CUID NOT IN (
@@ -94,7 +126,11 @@ class ReportsQueries:
     # `returning_customer_revenue = total_revenue - new_customer_revenue`, which
     # folds walk-in / anonymous revenue into "returning" and keeps the invariant
     # `new + returning == total_revenue` exact.
-    NEW_VS_RETURNING = f"""
+    # CR #81: `store_filter` scopes the in-range membership to the selected
+    # store(s); `first_buy` stays global (first purchase EVER, any store).
+    @staticmethod
+    def new_vs_returning(store_filter=''):
+        return f"""
         WITH in_range AS (
             SELECT d.BT_CUID AS cust,
                    SUM({_NET_LINE}) AS rev
@@ -103,6 +139,7 @@ class ReportsQueries:
             WHERE di.ITEM_TYPE = 1
               AND d.invc_post_date >= :from_date
               AND d.invc_post_date <  :to_exclusive
+              {store_filter}
               AND d.BT_CUID IS NOT NULL
               AND d.BT_CUID NOT IN (
                   SELECT SID FROM CUSTOMER

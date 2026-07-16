@@ -76,6 +76,43 @@ class TestFetchPeriodMetrics:
         assert out['tourist_customers'] == 0
         assert out['tourist_customer_revenue'] == 0
 
+    @patch(CONN)
+    def test_no_store_scope_binds_dates_only(self, mock_conn):
+        """CR #81: store_sids omitted → only the date binds, no store_* keys,
+        and no STORE_SID predicate in the SQL."""
+        cur = _cursor((1, 1, 0, 0), (1, 0, 1))
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        mock_conn.return_value = conn
+
+        ReportsRepository().fetch_period_metrics(date(2026, 6, 1), date(2026, 7, 1))
+        for call in cur.execute.call_args_list:
+            sql, binds = call.args
+            assert binds == {'from_date': date(2026, 6, 1),
+                             'to_exclusive': date(2026, 7, 1)}
+            assert 'STORE_SID' not in sql
+
+    @patch(CONN)
+    def test_store_scope_adds_in_predicate_and_binds(self, mock_conn):
+        """CR #81: store_sids → both queries get `STORE_SID IN (...)` and the
+        matching store_N binds alongside the dates."""
+        cur = _cursor((1, 1, 0, 0), (1, 0, 1))
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        mock_conn.return_value = conn
+
+        ReportsRepository().fetch_period_metrics(
+            date(2026, 6, 1), date(2026, 7, 1), store_sids=[501, 502])
+        assert cur.execute.call_count == 2
+        for call in cur.execute.call_args_list:
+            sql, binds = call.args
+            assert 'd.STORE_SID IN (:store_0, :store_1)' in sql
+            assert binds == {
+                'from_date': date(2026, 6, 1),
+                'to_exclusive': date(2026, 7, 1),
+                'store_0': 501, 'store_1': 502,
+            }
+
 
 PG = 'app.modules.reports.repository.get_postgres_connection'
 
@@ -109,13 +146,15 @@ class TestPins:
 
     @patch(PG)
     def test_get_pins_maps_row(self, mock_pg):
+        # CR #81: row is now 6 columns — dates + store arrays per side.
         conn, _ = _pg_cursor(
-            fetchone=(date(2026, 6, 1), date(2026, 6, 30), None, None))
+            fetchone=(date(2026, 6, 1), date(2026, 6, 30), [3, 7], None, None, None))
         mock_pg.return_value = conn
         out = ReportsRepository().get_pins(1)
         assert out == {
             'period_a_from': date(2026, 6, 1), 'period_a_to': date(2026, 6, 30),
-            'period_b_from': None, 'period_b_to': None,
+            'period_a_store_ids': [3, 7],
+            'period_b_from': None, 'period_b_to': None, 'period_b_store_ids': None,
         }
 
     @patch(PG)
@@ -123,10 +162,12 @@ class TestPins:
         conn, cur = _pg_cursor()
         mock_pg.return_value = conn
         ReportsRepository().upsert_pins(
-            7, date(2026, 6, 1), date(2026, 6, 30), None, None)
+            7, date(2026, 6, 1), date(2026, 6, 30), [3, 7], None, None, None)
         sql, params = cur.execute.call_args.args
         assert 'ON CONFLICT (user_id) DO UPDATE' in sql
-        assert params == (7, date(2026, 6, 1), date(2026, 6, 30), None, None)
+        assert 'period_a_store_ids' in sql
+        assert params == (
+            7, date(2026, 6, 1), date(2026, 6, 30), [3, 7], None, None, None)
         conn.commit.assert_called_once()
         conn.close.assert_called_once()
 
@@ -134,4 +175,43 @@ class TestPins:
     def test_upsert_pins_none_connection_raises(self, mock_pg):
         mock_pg.return_value = None
         with pytest.raises(RuntimeError, match='Postgres connection unavailable'):
-            ReportsRepository().upsert_pins(7, None, None, None, None)
+            ReportsRepository().upsert_pins(7, None, None, None, None, None, None)
+
+
+class TestGetStoreSids:
+    """CR #81: resolve Postgres stores.id → Oracle STORE.SID."""
+
+    @patch(PG)
+    def test_none_connection_raises(self, mock_pg):
+        mock_pg.return_value = None
+        with pytest.raises(RuntimeError, match='Postgres connection unavailable'):
+            ReportsRepository().get_store_sids([3])
+
+    @patch(PG)
+    def test_maps_id_to_int_sid(self, mock_pg):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchall.return_value = [(3, '501'), (7, '502')]
+        cm = MagicMock()
+        cm.__enter__.return_value = cur
+        cm.__exit__.return_value = False
+        conn.cursor.return_value = cm
+        mock_pg.return_value = conn
+        out = ReportsRepository().get_store_sids([3, 7])
+        assert out == {3: 501, 7: 502}
+        conn.close.assert_called_once()
+
+    @patch(PG)
+    def test_unmapped_or_null_rp_sid_omitted(self, mock_pg):
+        """A store with a null / blank / non-numeric rp_sid is unusable and is
+        left out of the result (→ caller rejects it as an invalid id)."""
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchall.return_value = [(3, '501'), (7, None), (9, '  '), (11, 'x')]
+        cm = MagicMock()
+        cm.__enter__.return_value = cur
+        cm.__exit__.return_value = False
+        conn.cursor.return_value = cm
+        mock_pg.return_value = conn
+        out = ReportsRepository().get_store_sids([3, 7, 9, 11])
+        assert out == {3: 501}

@@ -3,6 +3,52 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.3.0] — 2026-07-16
+
+### Added — CR #81: per-period store scope (multi-select)
+
+Each period on the Live Comparison page can now be scoped to one or more
+stores (union). Backward-compatible — omitting the scope keeps the aggregate
+all-stores behavior.
+
+#### `GET /reports/sale-comparison` — two new optional query params
+
+- `store_a`, `store_b` — comma-separated `GET /stores` ids (e.g. `3` or `3,7`).
+  Each side is independent; omitted/blank → all stores for that period.
+- Scope is a **union**: `store_a=3,7` → period A = stores 3 + 7 combined. All
+  `PeriodMetrics` fields (revenue, bills, new/returning/tourist) reflect it.
+- **Id resolution:** the params are Postgres `stores.id`; the backend resolves
+  each to its Oracle `STORE.SID` via `stores.store_rp_sid` and filters
+  `DOCUMENT.STORE_SID IN (...)`. Any **unknown or unmapped** id (no row, or a
+  null/blank `store_rp_sid`) → **`400 INVALID_INPUT`** (confirms the CR ask). A
+  non-integer token → `400`.
+- **"New vs returning" under a store scope:** the store filter narrows *which
+  in-range bills count*, but the first-ever-purchase scan stays **global**.
+  "New" therefore keeps its documented meaning — first purchase *ever, any
+  store* — so a long-time customer's first visit to a newly-scoped store is
+  still "returning", not "new". (Flagged to the frontend for confirmation.)
+
+#### Pins — `store_ids` array per side
+
+`GET` / `PUT /reports/live-comparison/pins` — each of `period_a` / `period_b`
+now carries `store_ids`:
+
+```jsonc
+{ "period_a": { "from": "2026-06-01", "to": "2026-06-30", "store_ids": [3, 7] },
+  "period_b": { "from": "2026-07-01", "to": "2026-07-31", "store_ids": [] } }
+```
+
+- `store_ids`: array of int store ids; `[]` / omitted → all stores (stored as
+  `NULL`, always read back as `[]`).
+- **Validation:** must be an array of ints (rejects non-list, non-int, bool,
+  `null` element → `400`). Pin ids are persisted **as-is** — not
+  existence-checked here; the check happens when they're later sent to
+  `sale-comparison`.
+- **Storage / migration:** two `BIGINT[]` columns
+  (`period_a_store_ids`, `period_b_store_ids`) added to `live_comparison_pins`
+  via `ADD COLUMN IF NOT EXISTS` in `init_database` — no migration break; pins
+  saved before this change read back as `[]`.
+
 ## [1.2.0] — 2026-07-13
 
 ### Changed — CR #80: break out TOURIST as a third customer bucket
