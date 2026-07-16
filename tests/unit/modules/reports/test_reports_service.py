@@ -187,13 +187,26 @@ class TestStoreScope:
         assert calls[1].args[2] is None          # period B all stores
 
     def test_unknown_store_id_is_400(self, service):
-        """Any id absent from the resolver map → INVALID_INPUT, no Oracle call."""
-        service.repo.get_store_sids.return_value = {3: 501}   # 7 missing
+        """An id with no row in the resolver map → INVALID_INPUT ('unknown'),
+        no Oracle call."""
+        service.repo.get_store_sids.return_value = {3: 501}   # 7 has no row
         res = service.get_sale_comparison(
             '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
             store_a='3,7')
         assert res['success'] is False and res['code'] == 'INVALID_INPUT'
-        assert '7' in res['error']
+        assert '7' in res['error'] and 'unknown' in res['error'].lower()
+        service.repo.fetch_period_metrics.assert_not_called()
+
+    def test_unmapped_store_id_is_400_distinct_message(self, service):
+        """A store that exists but has no Retail Pro mapping (sid None) → 400 with
+        a 'not linked' message, distinct from the 'unknown' case (finding #2)."""
+        service.repo.get_store_sids.return_value = {3: 501, 7: None}   # 7 unmapped
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='3,7')
+        assert res['success'] is False and res['code'] == 'INVALID_INPUT'
+        assert '7' in res['error'] and 'not linked' in res['error'].lower()
+        assert 'unknown' not in res['error'].lower()
         service.repo.fetch_period_metrics.assert_not_called()
 
     def test_non_integer_store_token_is_400(self, service):
@@ -311,6 +324,18 @@ class TestSetPins:
 
     def test_non_int_store_id_rejected(self, service):
         for bad in ('3', 3.5, True, None):
+            res = service.set_pins(user_id=7, body={
+                'period_a': {'from': '2026-06-01', 'to': '2026-06-30',
+                             'store_ids': [bad]},
+                'period_b': None})
+            assert res['success'] is False, f'{bad!r} should be rejected'
+            assert res['code'] == 'INVALID_INPUT'
+        service.repo.upsert_pins.assert_not_called()
+
+    def test_out_of_range_store_id_is_400_not_500(self, service):
+        """A store id beyond Postgres BIGINT range must be rejected as 400, not
+        escape as a 500 at INSERT (finding #3)."""
+        for bad in (2 ** 63, -(2 ** 63) - 1):
             res = service.set_pins(user_id=7, body={
                 'period_a': {'from': '2026-06-01', 'to': '2026-06-30',
                              'store_ids': [bad]},

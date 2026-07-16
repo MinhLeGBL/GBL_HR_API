@@ -37,6 +37,33 @@ class TestRevenueFormula:
         assert 'd.DISC_PERC' in sql, 'document-level discount must still be applied'
 
 
+class TestReturnsNettingShape:
+    """Guards the v1.4.0 returns netting: total_revenue must subtract returns
+    (ITEM_TYPE = 2) over the [from, returns_cutoff) tail while sale lines stay
+    bounded to the period. SQL math is mocked, so we pin the shape."""
+
+    def _totals(self):
+        return ReportsQueries.period_totals(ReportsQueries.store_filter(None)[0])
+
+    def test_returns_included_and_negated(self):
+        sql = self._totals()
+        assert 'di.ITEM_TYPE IN (1, 2)' in sql, 'return lines must be scanned'
+        assert ':returns_cutoff' in sql, 'returns use the +30d tail cutoff'
+        assert 'WHEN di.ITEM_TYPE = 2' in sql and '-1 *' in sql, (
+            'returns must be subtracted from total_revenue')
+
+    def test_sales_bounded_to_period(self):
+        sql = self._totals()
+        # bill_count / tourist aggregates and the sale side of total_revenue are
+        # gated to sales inside the period (< :to_exclusive), not the tail.
+        assert 'di.ITEM_TYPE = 1 AND d.invc_post_date < :to_exclusive' in sql
+
+    def test_new_vs_returning_is_sales_only(self):
+        # The customer split still only sees ITEM_TYPE = 1 (no returns netting).
+        nvr = ReportsQueries.new_vs_returning('')
+        assert 'ITEM_TYPE = 1' in nvr and 'ITEM_TYPE IN (1, 2)' not in nvr
+
+
 def _cursor(totals_row, split_row):
     cur = MagicMock()
     cur.fetchone.side_effect = [totals_row, split_row]
@@ -75,13 +102,20 @@ class TestFetchPeriodMetrics:
             'returning_customers':      890,
             'new_customer_revenue':     180_000_000,
         }
-        # Both queries run with identical date binds; conn is closed.
+        # Two queries; conn closed once. period_totals also binds the returns
+        # tail cutoff (to_exclusive + 30d); new_vs_returning does not.
         assert cur.execute.call_count == 2
-        for call in cur.execute.call_args_list:
-            assert call.args[1] == {
-                'from_date': date(2026, 6, 1),
-                'to_exclusive': date(2026, 7, 1),
-            }
+        totals_binds = cur.execute.call_args_list[0].args[1]
+        nvr_binds = cur.execute.call_args_list[1].args[1]
+        assert totals_binds == {
+            'from_date': date(2026, 6, 1),
+            'to_exclusive': date(2026, 7, 1),
+            'returns_cutoff': date(2026, 7, 31),   # 2026-07-01 + 30 days
+        }
+        assert nvr_binds == {
+            'from_date': date(2026, 6, 1),
+            'to_exclusive': date(2026, 7, 1),
+        }
         conn.close.assert_called_once()
 
     @patch(CONN)
@@ -111,9 +145,12 @@ class TestFetchPeriodMetrics:
         ReportsRepository().fetch_period_metrics(date(2026, 6, 1), date(2026, 7, 1))
         for call in cur.execute.call_args_list:
             sql, binds = call.args
-            assert binds == {'from_date': date(2026, 6, 1),
-                             'to_exclusive': date(2026, 7, 1)}
+            # No store_* keys and no STORE_SID predicate regardless of query.
+            assert 'store_0' not in binds
             assert 'STORE_SID' not in sql
+        # period_totals carries returns_cutoff; new_vs_returning does not.
+        assert 'returns_cutoff' in cur.execute.call_args_list[0].args[1]
+        assert 'returns_cutoff' not in cur.execute.call_args_list[1].args[1]
 
     @patch(CONN)
     def test_store_scope_adds_in_predicate_and_binds(self, mock_conn):
@@ -130,11 +167,12 @@ class TestFetchPeriodMetrics:
         for call in cur.execute.call_args_list:
             sql, binds = call.args
             assert 'd.STORE_SID IN (:store_0, :store_1)' in sql
-            assert binds == {
-                'from_date': date(2026, 6, 1),
-                'to_exclusive': date(2026, 7, 1),
-                'store_0': 501, 'store_1': 502,
-            }
+            assert binds['store_0'] == 501 and binds['store_1'] == 502
+            assert binds['from_date'] == date(2026, 6, 1)
+            assert binds['to_exclusive'] == date(2026, 7, 1)
+        # period_totals adds the returns cutoff bind; new_vs_returning omits it.
+        assert cur.execute.call_args_list[0].args[1]['returns_cutoff'] == date(2026, 7, 31)
+        assert 'returns_cutoff' not in cur.execute.call_args_list[1].args[1]
 
 
 PG = 'app.modules.reports.repository.get_postgres_connection'
@@ -225,9 +263,10 @@ class TestGetStoreSids:
         conn.close.assert_called_once()
 
     @patch(PG)
-    def test_unmapped_or_null_rp_sid_omitted(self, mock_pg):
-        """A store with a null / blank / non-numeric rp_sid is unusable and is
-        left out of the result (→ caller rejects it as an invalid id)."""
+    def test_unmapped_or_null_rp_sid_maps_to_none(self, mock_pg):
+        """A store that exists but has a null / blank / non-numeric rp_sid maps
+        to None (exists-but-unmapped), NOT omitted — so the service can tell an
+        unmapped store from an unknown id. An id with no row is simply absent."""
         conn = MagicMock()
         cur = MagicMock()
         cur.fetchall.return_value = [(3, '501'), (7, None), (9, '  '), (11, 'x')]
@@ -237,4 +276,4 @@ class TestGetStoreSids:
         conn.cursor.return_value = cm
         mock_pg.return_value = conn
         out = ReportsRepository().get_store_sids([3, 7, 9, 11])
-        assert out == {3: 501}
+        assert out == {3: 501, 7: None, 9: None, 11: None}

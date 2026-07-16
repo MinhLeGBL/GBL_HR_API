@@ -13,6 +13,11 @@ from .repository import ReportsRepository
 # (to - from).days + 1, so the cap on the raw delta is 365.
 _MAX_RANGE_DAYS = 366
 
+# Postgres BIGINT range — pin `store_ids` are stored in a BIGINT[] column, so an
+# out-of-range int must be rejected as 400 rather than blowing up at INSERT (500).
+_BIGINT_MIN = -(2 ** 63)
+_BIGINT_MAX = 2 ** 63 - 1
+
 
 class ReportsService:
     def __init__(self):
@@ -86,11 +91,20 @@ class ReportsService:
             )
 
         mapping = self.repo.get_store_sids(ids)
-        missing = [i for i in ids if i not in mapping]
-        if missing:
+        # An id absent from `mapping` does not exist; an id present with a None
+        # value exists but has no Retail Pro link. Report each distinctly so a
+        # store that's selectable in the UI but unmapped isn't called "unknown".
+        unknown = [i for i in ids if i not in mapping]
+        if unknown:
             return None, (
                 f'Period {label}: unknown store id(s): '
-                f'{", ".join(str(i) for i in missing)}'
+                f'{", ".join(str(i) for i in unknown)}'
+            )
+        unmapped = [i for i in ids if mapping[i] is None]
+        if unmapped:
+            return None, (
+                f'Period {label}: store id(s) not linked to a POS store '
+                f'(no Retail Pro mapping): {", ".join(str(i) for i in unmapped)}'
             )
 
         # Preserve request order, drop duplicate SIDs (two ids → same store).
@@ -229,7 +243,9 @@ class ReportsService:
 
     def set_pins(self, user_id: int, body: Any) -> Dict[str, Any]:
         """Replace the caller's pins. Body must carry both `period_a` and
-        `period_b`; each is either `null` (unpin) or `{from, to}`."""
+        `period_b`; each is either `null` (unpin) or `{from, to, store_ids?}`
+        (CR #81: `store_ids` is an optional int array, `[]`/omitted = all
+        stores)."""
         if not isinstance(body, dict) or 'period_a' not in body or 'period_b' not in body:
             return {
                 'success': False,
@@ -299,6 +315,12 @@ class ReportsService:
             if isinstance(v, bool) or not isinstance(v, int):
                 return None, (
                     f'Period {label}: `store_ids` must be an array of integer store ids'
+                )
+            # Guard the BIGINT[] column: an out-of-range int would raise at
+            # INSERT and escape as a 500 — reject it as 400 here instead.
+            if not (_BIGINT_MIN <= v <= _BIGINT_MAX):
+                return None, (
+                    f'Period {label}: `store_ids` contains an out-of-range store id'
                 )
             ids.append(v)
         return ids, None

@@ -1,9 +1,13 @@
 """Reports repository (CR #78 Oracle sale-comparison + CR #79 Postgres pins)."""
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, Optional
 
 from app.core.database import get_oracle_connection, get_postgres_connection
 from .queries import ReportsQueries
+
+# v1.4.0: returns posting within this many days after the period's last day are
+# netted out of total_revenue (flat window, no linkage to the original sale).
+_RETURNS_TAIL_DAYS = 30
 
 
 class ReportsRepository:
@@ -24,12 +28,25 @@ class ReportsRepository:
             store_sids: CR #81 — optional list of Oracle STORE.SID ints to scope
                 the period to (union). None/empty → all stores.
 
-        Returns a dict with keys: total_revenue, bill_count, new_customers,
-        returning_customers, new_customer_revenue. `returning_customer_revenue`
-        is derived by the service (total - new).
+        Returns a dict with keys: total_revenue (net of returns in the 30-day
+        tail), bill_count, tourist_customers, tourist_customer_revenue,
+        new_customers, returning_customers, new_customer_revenue.
+        `returning_customer_revenue` is derived by the service (total - new -
+        tourist) and so absorbs the return adjustment.
         """
         store_filter, store_binds = ReportsQueries.store_filter(store_sids)
-        binds = {'from_date': from_date, 'to_exclusive': to_exclusive, **store_binds}
+        # v1.4.0: returns nett out up to 30 days past the period's last day.
+        # to_exclusive is (last day + 1), so the tail cutoff is + 30 more days.
+        returns_cutoff = to_exclusive + timedelta(days=_RETURNS_TAIL_DAYS)
+        # Each statement is bound with exactly the placeholders it references —
+        # period_totals adds :returns_cutoff, new_vs_returning does not.
+        totals_binds = {
+            'from_date': from_date, 'to_exclusive': to_exclusive,
+            'returns_cutoff': returns_cutoff, **store_binds,
+        }
+        nvr_binds = {
+            'from_date': from_date, 'to_exclusive': to_exclusive, **store_binds,
+        }
         conn = get_oracle_connection()
         # get_oracle_connection() returns None on failure (not raise). Surface a
         # clear error so the service maps it to SERVER_ERROR, and keep the
@@ -39,14 +56,14 @@ class ReportsRepository:
         try:
             cur = conn.cursor()
 
-            cur.execute(ReportsQueries.period_totals(store_filter), binds)
+            cur.execute(ReportsQueries.period_totals(store_filter), totals_binds)
             row = cur.fetchone()
             total_revenue = int(row[0] or 0)
             bill_count = int(row[1] or 0)
             tourist_customers = int(row[2] or 0)
             tourist_customer_revenue = int(row[3] or 0)
 
-            cur.execute(ReportsQueries.new_vs_returning(store_filter), binds)
+            cur.execute(ReportsQueries.new_vs_returning(store_filter), nvr_binds)
             row = cur.fetchone()
             new_customers = int(row[0] or 0)
             returning_customers = int(row[1] or 0)
@@ -69,13 +86,14 @@ class ReportsRepository:
     # ------------------------------------------------------------------
     # CR #81 — resolve frontend store ids (Postgres stores.id) to Oracle SIDs
     # ------------------------------------------------------------------
-    def get_store_sids(self, store_ids: list) -> Dict[int, int]:
-        """Map `GET /stores` ids → Oracle STORE.SID ints.
+    def get_store_sids(self, store_ids: list) -> Dict[int, Optional[int]]:
+        """Map `GET /stores` ids → Oracle STORE.SID for every store that EXISTS.
 
-        Only stores that exist AND carry a usable `store_rp_sid` appear in the
-        result. An id the caller passed that is absent from the returned dict is
-        therefore either unknown or unmapped — the service treats both as an
-        invalid store id (400).
+        The value is the int SID when the store carries a usable `store_rp_sid`,
+        or `None` when the store exists but has no (or a non-numeric) Retail Pro
+        mapping. An id absent from the result does not exist at all. This lets
+        the service distinguish an *unknown* id from an *unmapped* one and
+        report each with the right error.
         """
         conn = get_postgres_connection()
         if conn is None:
@@ -89,14 +107,15 @@ class ReportsRepository:
                 rows = cur.fetchall()
         finally:
             conn.close()
-        out: Dict[int, int] = {}
+        out: Dict[int, Optional[int]] = {}
         for store_id, rp_sid in rows:
-            if rp_sid is None or str(rp_sid).strip() == '':
-                continue  # store exists but has no Retail Pro mapping — unusable
-            try:
-                out[int(store_id)] = int(rp_sid)
-            except (TypeError, ValueError):
-                continue  # non-numeric rp_sid — treat as unmapped
+            sid: Optional[int] = None
+            if rp_sid is not None and str(rp_sid).strip() != '':
+                try:
+                    sid = int(rp_sid)
+                except (TypeError, ValueError):
+                    sid = None  # non-numeric rp_sid — treat as unmapped
+            out[int(store_id)] = sid
         return out
 
     # ------------------------------------------------------------------

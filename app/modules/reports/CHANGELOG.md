@@ -3,6 +3,45 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.4.0] — 2026-07-16
+
+### Added — net returns into `total_revenue` (30-day tail window)
+
+`GET /reports/sale-comparison` now subtracts returns (`ITEM_TYPE = 2`) from
+`total_revenue`. A return is netted when it posts within a **flat 30 days after
+the period's last day** — window `[from, to + 30 days]` — regardless of whether
+its original sale fell in the period (deliberately simple: no linkage to
+`RETURNED_ITEM_INVOICE_SID`). Sale lines are still bounded to the period itself,
+so a sale in the tail is not counted. Response **shape unchanged**; no frontend
+CR. (Because the tail can extend past today, a recent period's figure keeps
+decreasing as late returns arrive — inherent to the rule.)
+
+**Scope of the netting (product decisions):**
+- **Only `total_revenue` nets returns.** `bill_count` stays the count of
+  distinct **sale** bills in `[from, to]` (so `avg_bill = net_revenue /
+  sale_bills`); `new_customers` / `returning_customers`, `new_customer_revenue`,
+  `tourist_customers`, and `tourist_customer_revenue` remain **sales-only**.
+- The service's residual `returning_customer_revenue = total − new − tourist`
+  therefore **absorbs** the return adjustment (it can go negative if returns
+  exceed identifiable-returning sales in the window). The invariant
+  `new + returning + tourist == total_revenue` still holds exactly.
+
+Implemented in `period_totals` via a broadened scan (`ITEM_TYPE IN (1,2)` up to
+`:returns_cutoff = to_exclusive + 30d`) with per-aggregate CASE gating; returns
+are also store-scoped by the CR #81 `store_filter`.
+
+### Fixed — review follow-ups (PR #46)
+
+- **Unmapped vs unknown store id** — a store that exists in `GET /stores` but has
+  no `store_rp_sid` now returns a distinct `... not linked to a POS store (no
+  Retail Pro mapping)` error instead of the misleading "unknown store id".
+  `get_store_sids` returns `{id: sid|None}` so the service can tell them apart.
+- **Out-of-range pin `store_ids` → 400** — an int outside Postgres BIGINT range
+  in a pin's `store_ids` is now rejected as `INVALID_INPUT` instead of raising
+  at INSERT and escaping as a 500.
+- **Docstrings** — `set_pins` / `fetch_period_metrics` updated to reflect
+  `store_ids` and the returns-netted `total_revenue`.
+
 ## [1.3.1] — 2026-07-16
 
 ### Fixed — revenue formula double-applied the item discount (undercount ~2.6×)

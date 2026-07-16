@@ -3,7 +3,9 @@ Oracle SQL for the Reports module (CR #78 — live sale comparison).
 
 Read-only aggregation over Retail Pro `DOCUMENT` / `DOCUMENT_ITEM`:
 - one row per line item in `DOCUMENT_ITEM`, joined to its `DOCUMENT`;
-- `ITEM_TYPE = 1` (sales only — returns/exchanges excluded);
+- sale lines are `ITEM_TYPE = 1`, bounded to the period `[from, to]`;
+- `total_revenue` also nets out return lines (`ITEM_TYPE = 2`) that post within
+  a flat 30-day tail after the period — window `[from, to + 30 days]` (v1.4.0);
 - net line revenue (ex-tax) = `(PRICE - TAX) × QTY × (1 - doc_disc)`.
 
 Revenue formula — verified against live data (see `_NET_LINE`):
@@ -96,7 +98,7 @@ class ReportsQueries:
         return f'AND d.STORE_SID IN ({placeholders})', binds
 
     # -----------------------------------------------------------------
-    # 1. Period totals: revenue + distinct bill count.
+    # 1. Period totals: net revenue + distinct sale-bill count.
     # -----------------------------------------------------------------
     # All in-range sales EXCEPT the SYSADMIN system account. Walk-in
     # (TOURIST) and anonymous (NULL BT_CUID) sales ARE included — they are
@@ -106,21 +108,44 @@ class ReportsQueries:
     # `tourist_customer_revenue` is their net revenue. The service subtracts the
     # tourist slice out of "returning".
     # CR #81: `store_filter` scopes this whole scan to the selected store(s).
+    #
+    # RETURNS NETTING (v1.4.0): `total_revenue` nets out returns (ITEM_TYPE = 2)
+    # that post within a flat 30-day tail after the period — window
+    # [from, to + 30 days], carried by :returns_cutoff = to_exclusive + 30d.
+    # A return is subtracted regardless of whether its original sale fell in the
+    # period ("easy calculation" — no linking to RETURNED_ITEM_INVOICE_SID).
+    # SALES (ITEM_TYPE = 1) are still bounded to the period itself
+    # (< :to_exclusive), so a sale in the tail is NOT counted. Per product
+    # decision, ONLY `total_revenue` nets returns; `bill_count`,
+    # `tourist_customers`, and `tourist_customer_revenue` remain sales-only
+    # (< :to_exclusive), and the service's residual `returning_customer_revenue`
+    # absorbs the return adjustment.
     @staticmethod
     def period_totals(store_filter=''):
+        # Sale lines counted only inside the period; return lines counted
+        # (negated) across the whole [from, returns_cutoff) window.
+        sale_in_period = "di.ITEM_TYPE = 1 AND d.invc_post_date < :to_exclusive"
         return f"""
         SELECT
-            ROUND(NVL(SUM({_NET_LINE}), 0), 0)   AS total_revenue,
-            COUNT(DISTINCT d.SID)                AS bill_count,
-            COUNT(DISTINCT CASE WHEN {_IS_TOURIST} THEN d.SID END)
+            ROUND(NVL(SUM(
+                CASE
+                    WHEN {sale_in_period}   THEN {_NET_LINE}
+                    WHEN di.ITEM_TYPE = 2   THEN -1 * ({_NET_LINE})
+                    ELSE 0
+                END
+            ), 0), 0)                            AS total_revenue,
+            COUNT(DISTINCT CASE WHEN {sale_in_period} THEN d.SID END)
+                                                 AS bill_count,
+            COUNT(DISTINCT CASE WHEN {sale_in_period} AND {_IS_TOURIST} THEN d.SID END)
                                                  AS tourist_customers,
-            ROUND(NVL(SUM(CASE WHEN {_IS_TOURIST} THEN {_NET_LINE} ELSE 0 END), 0), 0)
-                                                 AS tourist_customer_revenue
+            ROUND(NVL(SUM(
+                CASE WHEN {sale_in_period} AND {_IS_TOURIST} THEN {_NET_LINE} ELSE 0 END
+            ), 0), 0)                            AS tourist_customer_revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
-        WHERE di.ITEM_TYPE = 1
+        WHERE di.ITEM_TYPE IN (1, 2)
           AND d.invc_post_date >= :from_date
-          AND d.invc_post_date <  :to_exclusive
+          AND d.invc_post_date <  :returns_cutoff
           {store_filter}
           AND (
               d.BT_CUID IS NULL
