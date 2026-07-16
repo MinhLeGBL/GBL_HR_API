@@ -57,10 +57,29 @@ class TestSaleComparisonRoute:
         resp = client.get(f'{URL}?{_VALID_QS}', headers=_headers())
         assert resp.status_code == 200
         assert json.loads(resp.data)['success'] is True
-        # Params wired through as kwargs.
+        # Params wired through as kwargs; store scope defaults to None (all).
         mock_svc.get_sale_comparison.assert_called_once_with(
             from_a='2026-06-01', to_a='2026-06-30',
             from_b='2026-05-01', to_b='2026-05-31',
+            store_a=None, store_b=None,
+        )
+
+    @patch(VERIFY)
+    @patch(GET_USER)
+    @patch(SERVICE)
+    def test_store_params_wired_through(
+            self, mock_svc, mock_get_user, mock_verify, client):
+        """CR #81: store_a/store_b query params reach the service verbatim."""
+        _mock_auth(mock_verify, mock_get_user)
+        mock_svc.get_sale_comparison.return_value = {
+            'success': True, 'period_a': {}, 'period_b': {}}
+        resp = client.get(
+            f'{URL}?{_VALID_QS}&store_a=3,7&store_b=12', headers=_headers())
+        assert resp.status_code == 200
+        mock_svc.get_sale_comparison.assert_called_once_with(
+            from_a='2026-06-01', to_a='2026-06-30',
+            from_b='2026-05-01', to_b='2026-05-31',
+            store_a='3,7', store_b='12',
         )
 
     @patch(VERIFY)
