@@ -128,6 +128,17 @@ merging a feature branch — additive merges only.
 - `staging.yml` — runs full regression (all tests, every push to staging)
 - `deploy.yml` — no tests run; `tests/` removed from server after pull
 
+**Schema migrations are NOT automatic on deploy.** `deploy.yml` does **not** run
+`scripts/database/init_db.py`, so any release that adds a table or column (a
+change to `init_db.py` or a module's `init_database()`) leaves the live DB on the
+old schema — the new code then queries the missing column and returns 500. This
+caused the CR #82 pins incident (CR #81's `period_*_store_ids` columns were never
+added). **Required for any migration release:** after deploying, run
+`python scripts/database/init_db.py` on the server (idempotent —
+`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`, safe every deploy),
+then smoke-test the changed endpoint's data path, not just health. See
+[DEPLOYMENT.md → Maintenance → Update Application](DEPLOYMENT.md).
+
 ### Structure
 ```
 tests/
