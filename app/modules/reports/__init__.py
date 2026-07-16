@@ -1,4 +1,4 @@
-__version__ = '1.2.0'
+__version__ = '1.4.0'
 
 from .routes import reports_bp
 from .service import ReportsService

@@ -3,6 +3,130 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.4.0] — 2026-07-16
+
+### Added — net returns into `total_revenue` (30-day tail window)
+
+`GET /reports/sale-comparison` now subtracts returns (`ITEM_TYPE = 2`) from
+`total_revenue`. A return is netted when it posts within a **flat 30 days after
+the period's last day** — window `[from, to + 30 days]` — regardless of whether
+its original sale fell in the period (deliberately simple: no linkage to
+`RETURNED_ITEM_INVOICE_SID`). Sale lines are still bounded to the period itself,
+so a sale in the tail is not counted. Response **shape unchanged**; no frontend
+CR. (Because the tail can extend past today, a recent period's figure keeps
+decreasing as late returns arrive — inherent to the rule.)
+
+**Scope of the netting (product decisions):**
+- **Only `total_revenue` nets returns.** `bill_count` stays the count of
+  distinct **sale** bills in `[from, to]` (so `avg_bill = net_revenue /
+  sale_bills`); `new_customers` / `returning_customers`, `new_customer_revenue`,
+  `tourist_customers`, and `tourist_customer_revenue` remain **sales-only**.
+- The service's residual `returning_customer_revenue = total − new − tourist`
+  therefore **absorbs** the return adjustment (it can go negative if returns
+  exceed identifiable-returning sales in the window). The invariant
+  `new + returning + tourist == total_revenue` still holds exactly.
+
+Implemented in `period_totals` via a broadened scan (`ITEM_TYPE IN (1,2)` up to
+`:returns_cutoff = to_exclusive + 30d`) with per-aggregate CASE gating; returns
+are also store-scoped by the CR #81 `store_filter`.
+
+### Fixed — review follow-ups (PR #46)
+
+- **Unmapped vs unknown store id** — a store that exists in `GET /stores` but has
+  no `store_rp_sid` now returns a distinct `... not linked to a POS store (no
+  Retail Pro mapping)` error instead of the misleading "unknown store id".
+  `get_store_sids` returns `{id: sid|None}` so the service can tell them apart.
+- **Out-of-range pin `store_ids` → 400** — an int outside Postgres BIGINT range
+  in a pin's `store_ids` is now rejected as `INVALID_INPUT` instead of raising
+  at INSERT and escaping as a 500.
+- **Docstrings** — `set_pins` / `fetch_period_metrics` updated to reflect
+  `store_ids` and the returns-netted `total_revenue`.
+
+## [1.3.1] — 2026-07-16
+
+### Fixed — revenue formula double-applied the item discount (undercount ~2.6×)
+
+Surfaced by CR #81: scoping to a single store (Runway Diamond / `RWD`) showed
+2026-07-15 revenue of ~166M when the real figure is ~432M. Response **shape is
+unchanged** — only the numbers are corrected — so this is a pure backend fix
+(no frontend CR); all `*_revenue` / `avg_bill` values on
+`GET /reports/sale-comparison` now read materially higher.
+
+**Root cause** (verified against live Oracle data): the net-line expression was
+`(PRICE − TAX) × (1 − item_disc) × (1 − doc_disc)`, but `di.PRICE` is **already
+the discounted unit selling price** — `ORIG_PRICE × (1 − di.DISC_PERC/100) ==
+di.PRICE` holds on every line. Re-applying `di.DISC_PERC` discounted a second
+time; with Diamond's ~69% average item discount that cut revenue to roughly a
+third. A secondary defect: `di.PRICE` is a **unit** price, so line totals were
+missing `× QTY` (masked at RWD 07-15 where every line was qty 1).
+
+**Corrected** `_NET_LINE` (ex-tax, preserves the CR #78 net intent):
+`(di.PRICE − NVL(di.TAX_AMT,0)) × NVL(di.QTY,0) × (1 − NVL(d.DISC_PERC,0)/100)`
+- item discount **removed** (already in `PRICE`);
+- `× QTY` **added** (`PRICE` is per-unit; `TAX_AMT` is per-unit too);
+- document-level discount **kept** — confirmed NOT baked into `PRICE`.
+
+Tax basis: subtracts each item's **real** `di.TAX_AMT` (the data carries mixed
+8% / 10% VAT), NOT the fixed `price / 1.1` shortcut — that 10% rate exists only
+for the employee-commission calc and would over-strip tax on 8%-VAT lines.
+Reconciles with commission's ex-tax `TOTAL_SALES` to within 0.0035% over 6
+months (the residual is qty>1 / doc-discount lines where this formula handles
+per-unit tax more precisely).
+
+Applies to every figure derived from `_NET_LINE`: `total_revenue`,
+`new_customer_revenue`, `tourist_customer_revenue`, and the derived
+`returning_customer_revenue` / `avg_bill`.
+
+> **Known follow-up:** `app/modules/crm` computes `monetary` with the identical
+> pre-fix expression and carries the same bug — to be corrected on the CRM
+> branch (RFM scores/segments will shift), tracked separately.
+
+## [1.3.0] — 2026-07-16
+
+### Added — CR #81: per-period store scope (multi-select)
+
+Each period on the Live Comparison page can now be scoped to one or more
+stores (union). Backward-compatible — omitting the scope keeps the aggregate
+all-stores behavior.
+
+#### `GET /reports/sale-comparison` — two new optional query params
+
+- `store_a`, `store_b` — comma-separated `GET /stores` ids (e.g. `3` or `3,7`).
+  Each side is independent; omitted/blank → all stores for that period.
+- Scope is a **union**: `store_a=3,7` → period A = stores 3 + 7 combined. All
+  `PeriodMetrics` fields (revenue, bills, new/returning/tourist) reflect it.
+- **Id resolution:** the params are Postgres `stores.id`; the backend resolves
+  each to its Oracle `STORE.SID` via `stores.store_rp_sid` and filters
+  `DOCUMENT.STORE_SID IN (...)`. Any **unknown or unmapped** id (no row, or a
+  null/blank `store_rp_sid`) → **`400 INVALID_INPUT`** (confirms the CR ask). A
+  non-integer token → `400`.
+- **"New vs returning" under a store scope:** the store filter narrows *which
+  in-range bills count*, but the first-ever-purchase scan stays **global**.
+  "New" therefore keeps its documented meaning — first purchase *ever, any
+  store* — so a long-time customer's first visit to a newly-scoped store is
+  still "returning", not "new". (Flagged to the frontend for confirmation.)
+
+#### Pins — `store_ids` array per side
+
+`GET` / `PUT /reports/live-comparison/pins` — each of `period_a` / `period_b`
+now carries `store_ids`:
+
+```jsonc
+{ "period_a": { "from": "2026-06-01", "to": "2026-06-30", "store_ids": [3, 7] },
+  "period_b": { "from": "2026-07-01", "to": "2026-07-31", "store_ids": [] } }
+```
+
+- `store_ids`: array of int store ids; `[]` / omitted → all stores (stored as
+  `NULL`, always read back as `[]`).
+- **Validation:** must be an array of ints (rejects non-list, non-int, bool,
+  `null` element → `400`). Pin ids are persisted **as-is** — not
+  existence-checked here; the check happens when they're later sent to
+  `sale-comparison`.
+- **Storage / migration:** two `BIGINT[]` columns
+  (`period_a_store_ids`, `period_b_store_ids`) added to `live_comparison_pins`
+  via `ADD COLUMN IF NOT EXISTS` in `init_database` — no migration break; pins
+  saved before this change read back as `[]`.
+
 ## [1.2.0] — 2026-07-13
 
 ### Changed — CR #80: break out TOURIST as a third customer bucket

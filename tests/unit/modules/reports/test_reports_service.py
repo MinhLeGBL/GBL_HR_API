@@ -78,9 +78,10 @@ class TestGetSaleComparison:
         service.get_sale_comparison(
             '2026-06-01', '2026-06-30', '2026-01-01', '2026-01-31')
         first_call = service.repo.fetch_period_metrics.call_args_list[0]
-        from_d, to_exclusive = first_call.args
+        from_d, to_exclusive, store_sids = first_call.args
         assert from_d == date(2026, 6, 1)
         assert to_exclusive == date(2026, 7, 1)   # 2026-06-30 + 1 day
+        assert store_sids is None                 # no store scope by default
 
     def test_zero_bill_period_returns_null_avg(self, service):
         service.repo.fetch_period_metrics.side_effect = [
@@ -156,6 +157,97 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
+# CR #81 — per-period store scope on sale-comparison
+# ---------------------------------------------------------------------------
+
+class TestStoreScope:
+
+    def test_no_store_scope_passes_none(self, service):
+        """Omitted store params → each period built with store_sids=None."""
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(1, 1, 1, 0, 1), _metrics(1, 1, 1, 0, 1)]
+        service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        service.repo.get_store_sids.assert_not_called()
+        for call in service.repo.fetch_period_metrics.call_args_list:
+            assert call.args[2] is None   # store_sids
+
+    def test_resolves_and_scopes_per_side(self, service):
+        """store_a='3,7' → period A scoped to those stores' Oracle SIDs; B (no
+        param) stays all-stores."""
+        service.repo.get_store_sids.return_value = {3: 501, 7: 502}
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(1, 1, 1, 0, 1), _metrics(1, 1, 1, 0, 1)]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='3,7')
+        assert res['success'] is True
+        calls = service.repo.fetch_period_metrics.call_args_list
+        assert calls[0].args[2] == [501, 502]   # period A scoped
+        assert calls[1].args[2] is None          # period B all stores
+
+    def test_unknown_store_id_is_400(self, service):
+        """An id with no row in the resolver map → INVALID_INPUT ('unknown'),
+        no Oracle call."""
+        service.repo.get_store_sids.return_value = {3: 501}   # 7 has no row
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='3,7')
+        assert res['success'] is False and res['code'] == 'INVALID_INPUT'
+        assert '7' in res['error'] and 'unknown' in res['error'].lower()
+        service.repo.fetch_period_metrics.assert_not_called()
+
+    def test_unmapped_store_id_is_400_distinct_message(self, service):
+        """A store that exists but has no Retail Pro mapping (sid None) → 400 with
+        a 'not linked' message, distinct from the 'unknown' case (finding #2)."""
+        service.repo.get_store_sids.return_value = {3: 501, 7: None}   # 7 unmapped
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='3,7')
+        assert res['success'] is False and res['code'] == 'INVALID_INPUT'
+        assert '7' in res['error'] and 'not linked' in res['error'].lower()
+        assert 'unknown' not in res['error'].lower()
+        service.repo.fetch_period_metrics.assert_not_called()
+
+    def test_non_integer_store_token_is_400(self, service):
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_b='3,abc')
+        assert res['success'] is False and res['code'] == 'INVALID_INPUT'
+        service.repo.get_store_sids.assert_not_called()
+        service.repo.fetch_period_metrics.assert_not_called()
+
+    def test_blank_store_param_means_all_stores(self, service):
+        """A present-but-empty value (e.g. store_a=) → all stores, not an error."""
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(1, 1, 1, 0, 1), _metrics(1, 1, 1, 0, 1)]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='   ', store_b=',')
+        assert res['success'] is True
+        service.repo.get_store_sids.assert_not_called()
+        for call in service.repo.fetch_period_metrics.call_args_list:
+            assert call.args[2] is None
+
+    def test_duplicate_ids_deduped_to_distinct_sids(self, service):
+        service.repo.get_store_sids.return_value = {3: 501, 7: 501, 9: 502}
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(1, 1, 1, 0, 1), _metrics(1, 1, 1, 0, 1)]
+        service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='3,7,9')
+        # 3 and 7 both map to SID 501 → deduped, order preserved.
+        assert service.repo.fetch_period_metrics.call_args_list[0].args[2] == [501, 502]
+
+    def test_store_resolution_db_fault_is_500(self, service):
+        service.repo.get_store_sids.side_effect = RuntimeError('pg down')
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31',
+            store_a='3')
+        assert res['success'] is False and res['code'] == 'SERVER_ERROR'
+
+
+# ---------------------------------------------------------------------------
 # CR #79 — pins
 # ---------------------------------------------------------------------------
 
@@ -169,11 +261,25 @@ class TestGetPins:
     def test_row_maps_to_periods(self, service):
         service.repo.get_pins.return_value = {
             'period_a_from': date(2026, 6, 1), 'period_a_to': date(2026, 6, 30),
-            'period_b_from': None, 'period_b_to': None,
+            'period_a_store_ids': [3, 7],
+            'period_b_from': None, 'period_b_to': None, 'period_b_store_ids': None,
         }
         res = service.get_pins(user_id=42)
-        assert res['period_a'] == {'from': '2026-06-01', 'to': '2026-06-30'}
+        assert res['period_a'] == {
+            'from': '2026-06-01', 'to': '2026-06-30', 'store_ids': [3, 7]}
         assert res['period_b'] is None
+
+    def test_legacy_null_store_ids_read_as_empty(self, service):
+        """CR #81: a pin saved before store arrays existed reads back with
+        store_ids == [] (all stores), no migration break."""
+        service.repo.get_pins.return_value = {
+            'period_a_from': date(2026, 6, 1), 'period_a_to': date(2026, 6, 30),
+            'period_a_store_ids': None,
+            'period_b_from': None, 'period_b_to': None, 'period_b_store_ids': None,
+        }
+        res = service.get_pins(user_id=42)
+        assert res['period_a'] == {
+            'from': '2026-06-01', 'to': '2026-06-30', 'store_ids': []}
 
     def test_db_failure_is_server_error(self, service):
         service.repo.get_pins.side_effect = RuntimeError('pg down')
@@ -189,16 +295,61 @@ class TestSetPins:
             'period_b': None,
         })
         assert res['success'] is True
-        assert res['period_a'] == {'from': '2026-06-01', 'to': '2026-06-30'}
+        # store_ids omitted → [] echoed, None persisted (all stores).
+        assert res['period_a'] == {
+            'from': '2026-06-01', 'to': '2026-06-30', 'store_ids': []}
         assert res['period_b'] is None
         service.repo.upsert_pins.assert_called_once_with(
-            7, date(2026, 6, 1), date(2026, 6, 30), None, None)
+            7, date(2026, 6, 1), date(2026, 6, 30), None, None, None, None)
+
+    def test_persists_store_ids(self, service):
+        """CR #81: a store_ids array is validated, persisted, and echoed back."""
+        res = service.set_pins(user_id=7, body={
+            'period_a': {'from': '2026-06-01', 'to': '2026-06-30', 'store_ids': [3, 7]},
+            'period_b': {'from': '2026-07-01', 'to': '2026-07-31', 'store_ids': []},
+        })
+        assert res['success'] is True
+        assert res['period_a']['store_ids'] == [3, 7]
+        assert res['period_b']['store_ids'] == []   # [] → all stores
+        service.repo.upsert_pins.assert_called_once_with(
+            7, date(2026, 6, 1), date(2026, 6, 30), [3, 7],
+            date(2026, 7, 1), date(2026, 7, 31), None)
+
+    def test_non_list_store_ids_rejected(self, service):
+        res = service.set_pins(user_id=7, body={
+            'period_a': {'from': '2026-06-01', 'to': '2026-06-30', 'store_ids': 3},
+            'period_b': None})
+        assert res['success'] is False and res['code'] == 'INVALID_INPUT'
+        service.repo.upsert_pins.assert_not_called()
+
+    def test_non_int_store_id_rejected(self, service):
+        for bad in ('3', 3.5, True, None):
+            res = service.set_pins(user_id=7, body={
+                'period_a': {'from': '2026-06-01', 'to': '2026-06-30',
+                             'store_ids': [bad]},
+                'period_b': None})
+            assert res['success'] is False, f'{bad!r} should be rejected'
+            assert res['code'] == 'INVALID_INPUT'
+        service.repo.upsert_pins.assert_not_called()
+
+    def test_out_of_range_store_id_is_400_not_500(self, service):
+        """A store id beyond Postgres BIGINT range must be rejected as 400, not
+        escape as a 500 at INSERT (finding #3)."""
+        for bad in (2 ** 63, -(2 ** 63) - 1):
+            res = service.set_pins(user_id=7, body={
+                'period_a': {'from': '2026-06-01', 'to': '2026-06-30',
+                             'store_ids': [bad]},
+                'period_b': None})
+            assert res['success'] is False, f'{bad!r} should be rejected'
+            assert res['code'] == 'INVALID_INPUT'
+        service.repo.upsert_pins.assert_not_called()
 
     def test_clear_both_sides(self, service):
         res = service.set_pins(user_id=7, body={'period_a': None, 'period_b': None})
         assert res['success'] is True
         assert res['period_a'] is None and res['period_b'] is None
-        service.repo.upsert_pins.assert_called_once_with(7, None, None, None, None)
+        service.repo.upsert_pins.assert_called_once_with(
+            7, None, None, None, None, None, None)
 
     def test_missing_top_level_key_rejected(self, service):
         res = service.set_pins(user_id=7, body={'period_a': None})
