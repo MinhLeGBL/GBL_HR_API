@@ -27,6 +27,13 @@ missing `× QTY` (masked at RWD 07-15 where every line was qty 1).
 - `× QTY` **added** (`PRICE` is per-unit; `TAX_AMT` is per-unit too);
 - document-level discount **kept** — confirmed NOT baked into `PRICE`.
 
+Tax basis: subtracts each item's **real** `di.TAX_AMT` (the data carries mixed
+8% / 10% VAT), NOT the fixed `price / 1.1` shortcut — that 10% rate exists only
+for the employee-commission calc and would over-strip tax on 8%-VAT lines.
+Reconciles with commission's ex-tax `TOTAL_SALES` to within 0.0035% over 6
+months (the residual is qty>1 / doc-discount lines where this formula handles
+per-unit tax more precisely).
+
 Applies to every figure derived from `_NET_LINE`: `total_revenue`,
 `new_customer_revenue`, `tourist_customer_revenue`, and the derived
 `returning_customer_revenue` / `avg_bill`.

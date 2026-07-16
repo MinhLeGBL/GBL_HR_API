@@ -11,7 +11,10 @@ Revenue formula — verified against live data (see `_NET_LINE`):
   discount: `ORIG_PRICE × (1 - di.DISC_PERC/100) == di.PRICE` holds on every
   line. Re-applying `di.DISC_PERC` therefore DOUBLE-discounts — the bug fixed
   after CR #81 surfaced Diamond (RWD) reading ~⅓ of actual.
-- `di.TAX_AMT` is per-unit; subtracted for ex-tax revenue.
+- `di.TAX_AMT` is the item's REAL per-unit tax (data carries mixed 8% / 10%
+  VAT); subtracted directly for ex-tax revenue. We deliberately do NOT use the
+  fixed `price / 1.1` (10%) shortcut — that rate exists only for the employee
+  commission calc and would over-strip tax on the 8%-VAT lines.
 - the DOCUMENT-level discount `d.DISC_PERC` is NOT baked into `di.PRICE`
   (confirmed on doc-discount rows), so it is applied here.
 - `di.QTY` matters: `PRICE` is a unit price, so the line total is `PRICE × QTY`.
