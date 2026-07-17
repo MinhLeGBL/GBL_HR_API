@@ -78,10 +78,11 @@ class TestDiscountRateShape:
 
     def test_gross_uses_pre_discount_ex_tax_list_price(self):
         sql = self._totals()
-        assert 'di.ORIG_PRICE - NVL(di.ORIG_TAX_AMT, 0)' in sql, (
-            'gross must be the ex-tax ORIGINAL (pre-discount) price')
-        # gross must NOT carry the document discount (it is pre-discount).
-        assert '(di.ORIG_PRICE - NVL(di.ORIG_TAX_AMT, 0)) * NVL(di.QTY, 0)' in sql
+        # ex-tax ORIGINAL (pre-discount) list price × qty, with NVL(ORIG_PRICE,
+        # PRICE) hardening against a NULL list price (falls back to the selling
+        # price so gross ≥ net always). No discount factors — it is pre-discount.
+        assert ('(NVL(di.ORIG_PRICE, di.PRICE) - NVL(di.ORIG_TAX_AMT, 0)) '
+                '* NVL(di.QTY, 0)') in sql
 
 
 def _cursor(totals_row, split_row):

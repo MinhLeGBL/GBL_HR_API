@@ -59,10 +59,13 @@ _NET_LINE = (
 # document discount. di.ORIG_PRICE is the original UNIT list price (tax-incl,
 # = commission's FULL_PRICE_VAT); di.ORIG_TAX_AMT is its tax, so
 # (ORIG_PRICE − ORIG_TAX_AMT) is the ex-tax list price (commission's
-# FULL_PRICE). ORIG_PRICE ≥ PRICE always, so gross ≥ net. The value-weighted
-# average discount rate is 100 × (gross − net) / gross.
+# FULL_PRICE). ORIG_PRICE ≥ PRICE across all current data, so gross ≥ net.
+# NVL(ORIG_PRICE, PRICE) hardens against a future NULL list price: it falls
+# back to the selling price (0% discount for that line) so gross can never dip
+# below net → avg_discount_rate stays non-negative. The value-weighted average
+# discount rate is 100 × (gross − net) / gross.
 _GROSS_LINE = (
-    "(di.ORIG_PRICE - NVL(di.ORIG_TAX_AMT, 0)) "
+    "(NVL(di.ORIG_PRICE, di.PRICE) - NVL(di.ORIG_TAX_AMT, 0)) "
     "* NVL(di.QTY, 0)"
 )
 
