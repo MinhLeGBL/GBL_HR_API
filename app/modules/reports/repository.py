@@ -64,6 +64,7 @@ class ReportsRepository:
             tourist_customer_revenue = int(row[3] or 0)
             gross_sales_revenue = int(row[4] or 0)   # CR #83
             net_sales_revenue = int(row[5] or 0)     # CR #83
+            items_sold = int(row[6] or 0)            # CR #84
 
             cur.execute(ReportsQueries.new_vs_returning(store_filter), nvr_binds)
             row = cur.fetchone()
@@ -85,6 +86,7 @@ class ReportsRepository:
             'new_customer_revenue':     new_customer_revenue,
             'gross_sales_revenue':      gross_sales_revenue,   # CR #83
             'net_sales_revenue':        net_sales_revenue,     # CR #83
+            'items_sold':               items_sold,            # CR #84
         }
 
     # ------------------------------------------------------------------
