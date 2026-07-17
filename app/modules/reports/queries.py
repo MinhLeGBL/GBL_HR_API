@@ -164,7 +164,14 @@ class ReportsQueries:
             ), 0), 0)                            AS gross_sales_revenue,
             ROUND(NVL(SUM(
                 CASE WHEN {sale_in_period} THEN {_NET_LINE} ELSE 0 END
-            ), 0), 0)                            AS net_sales_revenue
+            ), 0), 0)                            AS net_sales_revenue,
+            -- CR #84: total units sold = Σ line quantity over the SAME sale-only
+            -- line set as the gross/net above (so the "items sold" and "avg
+            -- discount" cards reconcile). Returns are NOT netted — a returned
+            -- unit still counts as sold.
+            NVL(SUM(
+                CASE WHEN {sale_in_period} THEN NVL(di.QTY, 0) ELSE 0 END
+            ), 0)                                AS items_sold
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
         WHERE di.ITEM_TYPE IN (1, 2)

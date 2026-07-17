@@ -188,6 +188,8 @@ class ReportsService:
             'bill_count':                 bills,
             'avg_bill':                   avg_bill,
             'avg_discount_rate':          avg_discount_rate,
+            'items_sold':                 m['items_sold'],   # CR #84
+
             'new_customers':              m['new_customers'],
             'returning_customers':        m['returning_customers'],
             'tourist_customers':          m['tourist_customers'],
