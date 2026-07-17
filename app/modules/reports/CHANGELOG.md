@@ -3,6 +3,38 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.5.0] — 2026-07-17
+
+### Added — CR #83: `avg_discount_rate` per period on `GET /reports/sale-comparison`
+
+New field on each of `period_a` / `period_b`:
+
+- `avg_discount_rate` — **value-weighted** average discount rate over the
+  period's sale lines, as a **percent** rounded to 1 decimal (e.g. `73.5`).
+  `null` when the period has no gross sales.
+
+**Definition:** `100 × (gross − net) / gross`, where
+- `gross` = ex-tax **pre-discount** list value of sale lines =
+  `Σ (di.ORIG_PRICE − di.ORIG_TAX_AMT) × QTY` (commission's `FULL_PRICE`;
+  `ORIG_PRICE ≥ PRICE` so `gross ≥ net ≥ 0`), and
+- `net` = the existing ex-tax revenue `Σ _NET_LINE`. `gross − net` therefore
+  captures **both** discount layers (item discount baked into `di.PRICE`, and
+  the document-level `d.DISC_PERC`).
+
+**Scope decisions:**
+- **Sales only** — computed on `ITEM_TYPE = 1` lines inside the period. It does
+  **not** use the returns-netted `total_revenue` (a discount rate is a property
+  of the sale line), matching the FE's reading. So `avg_discount_rate` is
+  unaffected by the v1.4.0 returns tail.
+- Respects the CR #81 `store_a` / `store_b` store filter and the date range,
+  exactly like the other metrics.
+
+Implemented by adding two sale-only aggregates (`gross_sales_revenue`,
+`net_sales_revenue`) to `period_totals`; the service derives the rate.
+**Response shape gains one field** (additive, backward-compatible) — the FE
+treats it as optional. Verified live: RWD 2026-07-15 → gross 1.63B, net 432M,
+`avg_discount_rate = 73.5` (== manual SQL).
+
 ## [1.4.0] — 2026-07-16
 
 ### Added — net returns into `total_revenue` (30-day tail window)

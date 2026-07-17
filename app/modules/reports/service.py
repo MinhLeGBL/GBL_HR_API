@@ -170,6 +170,16 @@ class ReportsService:
         returning_revenue = (
             total - m['new_customer_revenue'] - m['tourist_customer_revenue']
         )
+        # CR #83: value-weighted average discount rate (percent) over the
+        # period's SALE lines — 100 × (gross − net) / gross. Computed on sales
+        # only (returns don't net in — a discount rate is a property of the sale
+        # line), and store-scoped like everything else. null when no gross.
+        gross_sales = m['gross_sales_revenue']
+        net_sales = m['net_sales_revenue']
+        avg_discount_rate = (
+            round(100 * (gross_sales - net_sales) / gross_sales, 1)
+            if gross_sales else None
+        )
 
         return {
             'from':                       from_d.isoformat(),
@@ -177,6 +187,7 @@ class ReportsService:
             'total_revenue':              total,
             'bill_count':                 bills,
             'avg_bill':                   avg_bill,
+            'avg_discount_rate':          avg_discount_rate,
             'new_customers':              m['new_customers'],
             'returning_customers':        m['returning_customers'],
             'tourist_customers':          m['tourist_customers'],
