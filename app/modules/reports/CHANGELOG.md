@@ -3,6 +3,29 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.6.0] — 2026-07-17
+
+### Added — CR #84: `items_sold` (total units) per period on `GET /reports/sale-comparison`
+
+New field on each of `period_a` / `period_b`:
+
+- `items_sold` — total **units** sold in the period = `Σ line quantity` over sale
+  lines (integer; `0` for an empty period, never null). A bill of 3 shirts + 2
+  hats contributes 5 (not line-row count, not distinct SKUs).
+
+**Scope:** computed on the **same sale-only line set** as CR #83's
+`avg_discount_rate` — `ITEM_TYPE = 1`, inside the period (`< :to_exclusive`), so
+the two cards reconcile. **Returns are NOT netted** (a returned unit still counts
+as sold — product-confirmed, and consistent with the discount-rate numerator,
+unlike the returns-netted `total_revenue`). Respects the CR #81 `store_a` /
+`store_b` filter and the date range.
+
+Implemented as one more aggregate on the existing `period_totals` scan
+(`SUM(CASE WHEN <sale_in_period> THEN NVL(di.QTY, 0) ELSE 0 END)`); the service
+passes it through. **Response gains one additive field** (backward-compatible;
+`avg_bill` stays in the response, just no longer shown by the frontend). Verified
+live: RWD 2026-07-15 → `items_sold = 88` (== manual `SUM(QTY)`).
+
 ## [1.5.0] — 2026-07-17
 
 ### Added — CR #83: `avg_discount_rate` per period on `GET /reports/sale-comparison`

@@ -16,7 +16,7 @@ from app.modules.reports.service import ReportsService
 def _metrics(total_revenue, bill_count, new_customers,
              returning_customers, new_customer_revenue,
              tourist_customers=0, tourist_customer_revenue=0,
-             gross_sales_revenue=0, net_sales_revenue=0):
+             gross_sales_revenue=0, net_sales_revenue=0, items_sold=0):
     return {
         'total_revenue':            total_revenue,
         'bill_count':               bill_count,
@@ -27,6 +27,7 @@ def _metrics(total_revenue, bill_count, new_customers,
         'new_customer_revenue':     new_customer_revenue,
         'gross_sales_revenue':      gross_sales_revenue,
         'net_sales_revenue':        net_sales_revenue,
+        'items_sold':               items_sold,
     }
 
 
@@ -452,3 +453,30 @@ class TestAvgDiscountRate:
         res = service.get_sale_comparison(
             '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
         assert res['period_a']['avg_discount_rate'] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# CR #84 — items_sold (total units)
+# ---------------------------------------------------------------------------
+
+class TestItemsSold:
+
+    def test_passed_through_per_period(self, service):
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(1_000, 2, 1, 1, 0, items_sold=15),
+            _metrics(500, 1, 1, 0, 0, items_sold=3),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        assert res['period_a']['items_sold'] == 15
+        assert res['period_b']['items_sold'] == 3
+
+    def test_zero_for_empty_period(self, service):
+        # Empty period -> 0 (integer), never null.
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(0, 0, 0, 0, 0, items_sold=0),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        assert res['period_a']['items_sold'] == 0
