@@ -15,7 +15,8 @@ from app.modules.reports.service import ReportsService
 
 def _metrics(total_revenue, bill_count, new_customers,
              returning_customers, new_customer_revenue,
-             tourist_customers=0, tourist_customer_revenue=0):
+             tourist_customers=0, tourist_customer_revenue=0,
+             gross_sales_revenue=0, net_sales_revenue=0):
     return {
         'total_revenue':            total_revenue,
         'bill_count':               bill_count,
@@ -24,6 +25,8 @@ def _metrics(total_revenue, bill_count, new_customers,
         'new_customers':            new_customers,
         'returning_customers':      returning_customers,
         'new_customer_revenue':     new_customer_revenue,
+        'gross_sales_revenue':      gross_sales_revenue,
+        'net_sales_revenue':        net_sales_revenue,
     }
 
 
@@ -399,3 +402,53 @@ class TestSetPins:
             assert res['success'] is False, f'{bad!r} should be rejected'
             assert res['code'] == 'INVALID_INPUT'
         service.repo.upsert_pins.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# CR #83 — avg_discount_rate (value-weighted, percent)
+# ---------------------------------------------------------------------------
+
+class TestAvgDiscountRate:
+
+    def test_value_weighted_rate(self, service):
+        # gross 250M, net 200M -> 100 * (250-200)/250 = 20.0 (worked example)
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(200_000_000, 10, 1, 9, 0,
+                     gross_sales_revenue=250_000_000, net_sales_revenue=200_000_000),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        assert res['period_a']['avg_discount_rate'] == 20.0
+
+    def test_rounds_to_one_decimal(self, service):
+        # gross 300M, net 200M -> 33.333... -> 33.3
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(200_000_000, 5, 1, 4, 0,
+                     gross_sales_revenue=300_000_000, net_sales_revenue=200_000_000),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        assert res['period_a']['avg_discount_rate'] == 33.3
+
+    def test_null_when_no_gross(self, service):
+        # Empty period (no gross) -> null, not a ZeroDivisionError.
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(0, 0, 0, 0, 0, gross_sales_revenue=0, net_sales_revenue=0),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        assert res['period_a']['avg_discount_rate'] is None
+
+    def test_zero_discount_period(self, service):
+        # Nothing discounted -> gross == net -> 0.0 (not null).
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(500_000, 3, 1, 2, 0,
+                     gross_sales_revenue=500_000, net_sales_revenue=500_000),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        assert res['period_a']['avg_discount_rate'] == 0.0

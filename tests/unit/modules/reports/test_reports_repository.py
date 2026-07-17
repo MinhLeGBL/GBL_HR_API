@@ -64,6 +64,27 @@ class TestReturnsNettingShape:
         assert 'ITEM_TYPE = 1' in nvr and 'ITEM_TYPE IN (1, 2)' not in nvr
 
 
+class TestDiscountRateShape:
+    """Guards CR #83: period_totals exposes sale-only gross + net so the service
+    can derive avg_discount_rate. Gross uses the ex-tax list price (ORIG_PRICE −
+    ORIG_TAX_AMT), before both discounts."""
+
+    def _totals(self):
+        return ReportsQueries.period_totals('')
+
+    def test_gross_and_net_sales_selected(self):
+        sql = self._totals()
+        assert 'AS gross_sales_revenue' in sql and 'AS net_sales_revenue' in sql
+
+    def test_gross_uses_pre_discount_ex_tax_list_price(self):
+        sql = self._totals()
+        # ex-tax ORIGINAL (pre-discount) list price × qty, with NVL(ORIG_PRICE,
+        # PRICE) hardening against a NULL list price (falls back to the selling
+        # price so gross ≥ net always). No discount factors — it is pre-discount.
+        assert ('(NVL(di.ORIG_PRICE, di.PRICE) - NVL(di.ORIG_TAX_AMT, 0)) '
+                '* NVL(di.QTY, 0)') in sql
+
+
 def _cursor(totals_row, split_row):
     cur = MagicMock()
     cur.fetchone.side_effect = [totals_row, split_row]
@@ -83,8 +104,9 @@ class TestFetchPeriodMetrics:
 
     @patch(CONN)
     def test_maps_rows_and_binds(self, mock_conn):
-        # PERIOD_TOTALS row: (total, bills, tourist_customers, tourist_revenue)
-        cur = _cursor((1_200_000_000, 3450, 45, 100_000_000),
+        # PERIOD_TOTALS row: (total, bills, tourist_customers, tourist_revenue,
+        #                     gross_sales, net_sales)  — CR #83 adds the last two.
+        cur = _cursor((1_200_000_000, 3450, 45, 100_000_000, 1_500_000_000, 1_200_000_000),
                       (120, 890, 180_000_000))
         conn = MagicMock()
         conn.cursor.return_value = cur
@@ -101,6 +123,8 @@ class TestFetchPeriodMetrics:
             'new_customers':            120,
             'returning_customers':      890,
             'new_customer_revenue':     180_000_000,
+            'gross_sales_revenue':      1_500_000_000,
+            'net_sales_revenue':        1_200_000_000,
         }
         # Two queries; conn closed once. period_totals also binds the returns
         # tail cutoff (to_exclusive + 30d); new_vs_returning does not.
@@ -121,7 +145,7 @@ class TestFetchPeriodMetrics:
     @patch(CONN)
     def test_null_aggregates_coalesce_to_zero(self, mock_conn):
         """Empty period → Oracle returns NULLs → repo coalesces to 0."""
-        cur = _cursor((None, 0, None, None), (0, 0, None))
+        cur = _cursor((None, 0, None, None, None, None), (0, 0, None))
         conn = MagicMock()
         conn.cursor.return_value = cur
         mock_conn.return_value = conn
@@ -137,7 +161,7 @@ class TestFetchPeriodMetrics:
     def test_no_store_scope_binds_dates_only(self, mock_conn):
         """CR #81: store_sids omitted → only the date binds, no store_* keys,
         and no STORE_SID predicate in the SQL."""
-        cur = _cursor((1, 1, 0, 0), (1, 0, 1))
+        cur = _cursor((1, 1, 0, 0, 1, 1), (1, 0, 1))
         conn = MagicMock()
         conn.cursor.return_value = cur
         mock_conn.return_value = conn
@@ -156,7 +180,7 @@ class TestFetchPeriodMetrics:
     def test_store_scope_adds_in_predicate_and_binds(self, mock_conn):
         """CR #81: store_sids → both queries get `STORE_SID IN (...)` and the
         matching store_N binds alongside the dates."""
-        cur = _cursor((1, 1, 0, 0), (1, 0, 1))
+        cur = _cursor((1, 1, 0, 0, 1, 1), (1, 0, 1))
         conn = MagicMock()
         conn.cursor.return_value = cur
         mock_conn.return_value = conn

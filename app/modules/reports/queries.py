@@ -54,6 +54,21 @@ _NET_LINE = (
     "* (1 - NVL(d.DISC_PERC, 0) / 100)"
 )
 
+# CR #83: gross line revenue (ex-tax), pre-discount — the counterpart of
+# `_NET_LINE` BEFORE both the item discount (baked into di.PRICE) and the
+# document discount. di.ORIG_PRICE is the original UNIT list price (tax-incl,
+# = commission's FULL_PRICE_VAT); di.ORIG_TAX_AMT is its tax, so
+# (ORIG_PRICE − ORIG_TAX_AMT) is the ex-tax list price (commission's
+# FULL_PRICE). ORIG_PRICE ≥ PRICE across all current data, so gross ≥ net.
+# NVL(ORIG_PRICE, PRICE) hardens against a future NULL list price: it falls
+# back to the selling price (0% discount for that line) so gross can never dip
+# below net → avg_discount_rate stays non-negative. The value-weighted average
+# discount rate is 100 × (gross − net) / gross.
+_GROSS_LINE = (
+    "(NVL(di.ORIG_PRICE, di.PRICE) - NVL(di.ORIG_TAX_AMT, 0)) "
+    "* NVL(di.QTY, 0)"
+)
+
 # CR #80: a bill belongs to the "tourist" bucket when its customer is the POS
 # walk-in TOURIST record OR there is no customer at all (anonymous NULL). Both
 # are one-time, no-identity walk-ins — the PO treats them as a distinct bucket,
@@ -140,7 +155,16 @@ class ReportsQueries:
                                                  AS tourist_customers,
             ROUND(NVL(SUM(
                 CASE WHEN {sale_in_period} AND {_IS_TOURIST} THEN {_NET_LINE} ELSE 0 END
-            ), 0), 0)                            AS tourist_customer_revenue
+            ), 0), 0)                            AS tourist_customer_revenue,
+            -- CR #83: sale-only (in-period) gross + net, for avg_discount_rate.
+            -- Both exclude returns (a discount rate is a property of sale lines),
+            -- so net_sales_revenue is the pre-returns-netting sale total.
+            ROUND(NVL(SUM(
+                CASE WHEN {sale_in_period} THEN {_GROSS_LINE} ELSE 0 END
+            ), 0), 0)                            AS gross_sales_revenue,
+            ROUND(NVL(SUM(
+                CASE WHEN {sale_in_period} THEN {_NET_LINE} ELSE 0 END
+            ), 0), 0)                            AS net_sales_revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
         WHERE di.ITEM_TYPE IN (1, 2)
