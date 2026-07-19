@@ -65,6 +65,8 @@ class ReportsRepository:
             gross_sales_revenue = int(row[4] or 0)   # CR #83
             net_sales_revenue = int(row[5] or 0)     # CR #83
             items_sold = int(row[6] or 0)            # CR #84
+            fp_items_sold = int(row[7] or 0)         # CR #85 (FP side; MD derived)
+            fp_revenue = int(row[8] or 0)            # CR #85
 
             cur.execute(ReportsQueries.new_vs_returning(store_filter), nvr_binds)
             row = cur.fetchone()
@@ -87,6 +89,8 @@ class ReportsRepository:
             'gross_sales_revenue':      gross_sales_revenue,   # CR #83
             'net_sales_revenue':        net_sales_revenue,     # CR #83
             'items_sold':               items_sold,            # CR #84
+            'fp_items_sold':            fp_items_sold,         # CR #85
+            'fp_revenue':               fp_revenue,            # CR #85
         }
 
     # ------------------------------------------------------------------

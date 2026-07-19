@@ -92,6 +92,17 @@ class TestDiscountRateShape:
         assert ('CASE WHEN di.ITEM_TYPE = 1 AND d.invc_post_date < :to_exclusive '
                 'THEN NVL(di.QTY, 0) ELSE 0 END') in sql
 
+    def test_fp_md_classification_is_item_discount_only(self):
+        # CR #85: only the FP side is selected (MD derived in the service). FP is
+        # item discount <= 30% -> PRICE >= 0.7 * ORIG_PRICE (item-only, NOT the
+        # combined item*doc rate the CRM module uses).
+        sql = self._totals()
+        assert 'AS fp_items_sold' in sql and 'AS fp_revenue' in sql
+        assert 'di.PRICE >= 0.7 * NVL(di.ORIG_PRICE, di.PRICE)' in sql
+        # Item-only: the combined-rate factor (1 - ...)*(1 - d.DISC_PERC ...) is
+        # NOT used to classify here.
+        assert 'AS md_items_sold' not in sql and 'AS md_revenue' not in sql
+
 
 def _cursor(totals_row, split_row):
     cur = MagicMock()
@@ -113,9 +124,10 @@ class TestFetchPeriodMetrics:
     @patch(CONN)
     def test_maps_rows_and_binds(self, mock_conn):
         # PERIOD_TOTALS row: (total, bills, tourist_customers, tourist_revenue,
-        #                     gross_sales, net_sales, items_sold)
-        #                     — CR #83 adds gross/net, CR #84 adds items_sold.
-        cur = _cursor((1_200_000_000, 3450, 45, 100_000_000, 1_500_000_000, 1_200_000_000, 4200),
+        #                     gross_sales, net_sales, items_sold, fp_items, fp_rev)
+        #   CR #83 gross/net, CR #84 items_sold, CR #85 fp_items_sold/fp_revenue.
+        cur = _cursor((1_200_000_000, 3450, 45, 100_000_000, 1_500_000_000,
+                       1_200_000_000, 4200, 3000, 900_000_000),
                       (120, 890, 180_000_000))
         conn = MagicMock()
         conn.cursor.return_value = cur
@@ -135,6 +147,8 @@ class TestFetchPeriodMetrics:
             'gross_sales_revenue':      1_500_000_000,
             'net_sales_revenue':        1_200_000_000,
             'items_sold':               4200,
+            'fp_items_sold':            3000,
+            'fp_revenue':               900_000_000,
         }
         # Two queries; conn closed once. period_totals also binds the returns
         # tail cutoff (to_exclusive + 30d); new_vs_returning does not.
@@ -155,7 +169,7 @@ class TestFetchPeriodMetrics:
     @patch(CONN)
     def test_null_aggregates_coalesce_to_zero(self, mock_conn):
         """Empty period → Oracle returns NULLs → repo coalesces to 0."""
-        cur = _cursor((None, 0, None, None, None, None, None), (0, 0, None))
+        cur = _cursor((None, 0, None, None, None, None, None, None, None), (0, 0, None))
         conn = MagicMock()
         conn.cursor.return_value = cur
         mock_conn.return_value = conn
@@ -171,7 +185,7 @@ class TestFetchPeriodMetrics:
     def test_no_store_scope_binds_dates_only(self, mock_conn):
         """CR #81: store_sids omitted → only the date binds, no store_* keys,
         and no STORE_SID predicate in the SQL."""
-        cur = _cursor((1, 1, 0, 0, 1, 1, 1), (1, 0, 1))
+        cur = _cursor((1, 1, 0, 0, 1, 1, 1, 1, 1), (1, 0, 1))
         conn = MagicMock()
         conn.cursor.return_value = cur
         mock_conn.return_value = conn
@@ -190,7 +204,7 @@ class TestFetchPeriodMetrics:
     def test_store_scope_adds_in_predicate_and_binds(self, mock_conn):
         """CR #81: store_sids → both queries get `STORE_SID IN (...)` and the
         matching store_N binds alongside the dates."""
-        cur = _cursor((1, 1, 0, 0, 1, 1, 1), (1, 0, 1))
+        cur = _cursor((1, 1, 0, 0, 1, 1, 1, 1, 1), (1, 0, 1))
         conn = MagicMock()
         conn.cursor.return_value = cur
         mock_conn.return_value = conn
