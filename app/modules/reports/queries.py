@@ -69,6 +69,16 @@ _GROSS_LINE = (
     "* NVL(di.QTY, 0)"
 )
 
+# CR #85: Full-Price vs Markdown classification on the ITEM discount only
+# (product-confirmed — "discount rate on item"), NOT the combined item×doc rate
+# the CRM module uses. A line is Markdown when its item discount rate
+# (ORIG_PRICE − PRICE) / ORIG_PRICE exceeds 30%, i.e. PRICE < 0.70 × ORIG_PRICE;
+# everything else (full-price + lightly-discounted ≤ 30%) is Full Price, and
+# exactly 30% is FP. NVL(ORIG_PRICE, PRICE) guards a NULL list price → FP.
+# We tag the FP side and derive MD as the residual in the service so the
+# fp+md == items_sold / net_sales invariants hold EXACTLY.
+_IS_FP = "di.PRICE >= 0.7 * NVL(di.ORIG_PRICE, di.PRICE)"
+
 # CR #80: a bill belongs to the "tourist" bucket when its customer is the POS
 # walk-in TOURIST record OR there is no customer at all (anonymous NULL). Both
 # are one-time, no-identity walk-ins — the PO treats them as a distinct bucket,
@@ -171,7 +181,16 @@ class ReportsQueries:
             -- unit still counts as sold.
             NVL(SUM(
                 CASE WHEN {sale_in_period} THEN NVL(di.QTY, 0) ELSE 0 END
-            ), 0)                                AS items_sold
+            ), 0)                                AS items_sold,
+            -- CR #85: Full-Price side only (units + net revenue). The service
+            -- derives the Markdown side as the residual (items_sold − fp,
+            -- net_sales_revenue − fp_revenue) so the split reconciles exactly.
+            NVL(SUM(
+                CASE WHEN {sale_in_period} AND {_IS_FP} THEN NVL(di.QTY, 0) ELSE 0 END
+            ), 0)                                AS fp_items_sold,
+            ROUND(NVL(SUM(
+                CASE WHEN {sale_in_period} AND {_IS_FP} THEN {_NET_LINE} ELSE 0 END
+            ), 0), 0)                            AS fp_revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
         WHERE di.ITEM_TYPE IN (1, 2)

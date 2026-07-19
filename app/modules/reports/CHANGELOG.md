@@ -3,6 +3,39 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.7.0] — 2026-07-19
+
+### Added — CR #85: full-price vs markdown (FP/MD) split per period
+
+Four new fields on each of `period_a` / `period_b`:
+
+- `fp_items_sold` / `md_items_sold` — units (`Σ qty`) on full-price / markdown lines
+- `fp_revenue` / `md_revenue` — net ex-tax revenue (VND) from FP / MD lines
+
+**MD rule (item-only, product-confirmed):** a sale line is **Markdown** when its
+**item** discount rate `(ORIG_PRICE − PRICE) / ORIG_PRICE` exceeds **30%** —
+implemented as `di.PRICE < 0.70 × NVL(di.ORIG_PRICE, di.PRICE)`; everything else
+(full-price + ≤ 30% lightly-discounted) is **Full Price**, and exactly 30% is FP.
+
+> **Deviation from the CRM module (intentional):** CRM (CR #76) classifies FP/MD
+> on the **combined** item×document discount rate. Per the product owner and the
+> CR #85 spec, reports uses the **item discount only** here. Since document-level
+> discounts are sparse in the data the two rarely disagree, but a doc-discounted
+> line can land in a different bucket than CRM would place it.
+
+**Scope:** same sale-only line set as `items_sold` / `avg_discount_rate`
+(`ITEM_TYPE = 1`, in-period, **returns NOT netted**), store-scoped (CR #81).
+
+**Exact reconciliation:** the query tags only the **Full-Price** side
+(`fp_items_sold`, `fp_revenue`); the service derives Markdown as the **residual**
+(`md_items_sold = items_sold − fp_items_sold`, `md_revenue = net_sales_revenue −
+fp_revenue`). So `fp + md == items_sold` and `fp + md == net_sales_revenue`
+(CR #83 `net`) hold **exactly** — no independent-rounding drift. Note this net is
+pre-returns, so it can differ from the returns-netted `total_revenue` (expected).
+
+Integers for counts; `0` for an empty period. Verified live: RWD 2026-07-15 →
+88 units = 9 FP + 79 MD; net 432,053,218 = 72,217,481 FP + 359,835,737 MD.
+
 ## [1.6.0] — 2026-07-17
 
 ### Added — CR #84: `items_sold` (total units) per period on `GET /reports/sale-comparison`
