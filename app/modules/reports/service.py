@@ -180,6 +180,15 @@ class ReportsService:
             round(100 * (gross_sales - net_sales) / gross_sales, 1)
             if gross_sales else None
         )
+        # CR #85: FP/MD split. The query tags the Full-Price side (item discount
+        # ≤ 30%); Markdown is the residual, which makes the split reconcile
+        # exactly: fp + md == items_sold (CR #84) and fp + md == net_sales
+        # (CR #83). Sale lines only, returns not netted, store-scoped.
+        items_sold = m['items_sold']
+        fp_items_sold = m['fp_items_sold']
+        fp_revenue = m['fp_revenue']
+        md_items_sold = items_sold - fp_items_sold
+        md_revenue = net_sales - fp_revenue
 
         return {
             'from':                       from_d.isoformat(),
@@ -188,7 +197,11 @@ class ReportsService:
             'bill_count':                 bills,
             'avg_bill':                   avg_bill,
             'avg_discount_rate':          avg_discount_rate,
-            'items_sold':                 m['items_sold'],   # CR #84
+            'items_sold':                 items_sold,        # CR #84
+            'fp_items_sold':              fp_items_sold,     # CR #85
+            'md_items_sold':              md_items_sold,     # CR #85
+            'fp_revenue':                 fp_revenue,        # CR #85
+            'md_revenue':                 md_revenue,        # CR #85
 
             'new_customers':              m['new_customers'],
             'returning_customers':        m['returning_customers'],

@@ -16,7 +16,8 @@ from app.modules.reports.service import ReportsService
 def _metrics(total_revenue, bill_count, new_customers,
              returning_customers, new_customer_revenue,
              tourist_customers=0, tourist_customer_revenue=0,
-             gross_sales_revenue=0, net_sales_revenue=0, items_sold=0):
+             gross_sales_revenue=0, net_sales_revenue=0, items_sold=0,
+             fp_items_sold=0, fp_revenue=0):
     return {
         'total_revenue':            total_revenue,
         'bill_count':               bill_count,
@@ -28,6 +29,8 @@ def _metrics(total_revenue, bill_count, new_customers,
         'gross_sales_revenue':      gross_sales_revenue,
         'net_sales_revenue':        net_sales_revenue,
         'items_sold':               items_sold,
+        'fp_items_sold':            fp_items_sold,
+        'fp_revenue':               fp_revenue,
     }
 
 
@@ -480,3 +483,51 @@ class TestItemsSold:
         res = service.get_sale_comparison(
             '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
         assert res['period_a']['items_sold'] == 0
+
+
+# ---------------------------------------------------------------------------
+# CR #85 — FP/MD split (Markdown derived as residual)
+# ---------------------------------------------------------------------------
+
+class TestFpMdSplit:
+
+    def test_md_derived_and_reconciles(self, service):
+        # items_sold=15 (fp 5), net_sales=200 (fp 150) -> md items 10, md rev 50.
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(200, 3, 1, 2, 0,
+                     net_sales_revenue=200, items_sold=15,
+                     fp_items_sold=5, fp_revenue=150),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        a = res['period_a']
+        assert a['fp_items_sold'] == 5 and a['md_items_sold'] == 10
+        assert a['fp_revenue'] == 150 and a['md_revenue'] == 50
+        # Invariants the FE relies on for the pies.
+        assert a['fp_items_sold'] + a['md_items_sold'] == a['items_sold']
+        assert a['fp_revenue'] + a['md_revenue'] == 200   # == net_sales_revenue
+
+    def test_all_full_price(self, service):
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(500, 2, 1, 1, 0,
+                     net_sales_revenue=500, items_sold=8,
+                     fp_items_sold=8, fp_revenue=500),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        a = res['period_a']
+        assert a['md_items_sold'] == 0 and a['md_revenue'] == 0
+
+    def test_empty_period_all_zero(self, service):
+        service.repo.fetch_period_metrics.side_effect = [
+            _metrics(0, 0, 0, 0, 0, net_sales_revenue=0, items_sold=0,
+                     fp_items_sold=0, fp_revenue=0),
+            _metrics(0, 0, 0, 0, 0),
+        ]
+        res = service.get_sale_comparison(
+            '2026-06-01', '2026-06-30', '2026-05-01', '2026-05-31')
+        a = res['period_a']
+        assert (a['fp_items_sold'], a['md_items_sold'],
+                a['fp_revenue'], a['md_revenue']) == (0, 0, 0, 0)
