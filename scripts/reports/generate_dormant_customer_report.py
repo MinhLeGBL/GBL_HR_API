@@ -25,11 +25,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.core.database import get_oracle_connection
 
 
+# Phone lives on rps.CUSTOMER_PHONE (one customer can have multiple). We pick
+# the PRIMARY_FLAG=1 row first, breaking ties by lowest SEQ_NO. Same CTE is
+# reused in both sheet queries via inline copy.
+_PRIMARY_PHONE_CTE = """
+    primary_phone AS (
+        SELECT cust_sid, phone_no,
+               ROW_NUMBER() OVER (
+                   PARTITION BY cust_sid
+                   ORDER BY PRIMARY_FLAG DESC, SEQ_NO ASC
+               ) AS rn
+        FROM CUSTOMER_PHONE
+        WHERE phone_no IS NOT NULL
+    )
+"""
+
 # Sheet 1 — customers with sales, but last sale strictly before :cutoff_date.
 # ROW_NUMBER over invc_post_date DESC picks the latest bill per customer; tied
 # bills broken by DOCUMENT.SID DESC for determinism. The outer WHERE then keeps
 # only customers whose latest sale is before the cutoff.
-QUERY_LAPSED = """
+QUERY_LAPSED = f"""
     WITH ranked_sales AS (
         SELECT
             d.BT_CUID         AS customer_sid,
@@ -43,14 +58,16 @@ QUERY_LAPSED = """
         WHERE d.STATUS = 4
           AND d.receipt_type IN (0, 1)
           AND d.BT_CUID IS NOT NULL
-    )
+    ),
+    {_PRIMARY_PHONE_CTE}
     SELECT
         TRIM(c.FIRST_NAME)         AS name,
-        c.PHONE_NO                 AS phone,
+        pp.phone_no                AS phone,
         TRUNC(rs.sale_date)        AS last_sale_date,
         rs.store_code              AS last_store
     FROM CUSTOMER c
     JOIN ranked_sales rs ON rs.customer_sid = c.SID AND rs.rn = 1
+    LEFT JOIN primary_phone pp ON pp.cust_sid = c.SID AND pp.rn = 1
     WHERE rs.sale_date < TO_DATE(:cutoff_date, 'YYYY-MM-DD')
       AND c.FIRST_NAME IS NOT NULL
       AND UPPER(TRIM(c.FIRST_NAME)) NOT IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
@@ -58,11 +75,13 @@ QUERY_LAPSED = """
 """
 
 # Sheet 2 — customers in CUSTOMER table with NO matching DOCUMENT row.
-QUERY_NEVER_PURCHASED = """
+QUERY_NEVER_PURCHASED = f"""
+    WITH {_PRIMARY_PHONE_CTE}
     SELECT
         TRIM(c.FIRST_NAME)  AS name,
-        c.PHONE_NO          AS phone
+        pp.phone_no         AS phone
     FROM CUSTOMER c
+    LEFT JOIN primary_phone pp ON pp.cust_sid = c.SID AND pp.rn = 1
     WHERE c.FIRST_NAME IS NOT NULL
       AND UPPER(TRIM(c.FIRST_NAME)) NOT IN ('SYSADMIN', 'TOURIST', 'TOURIST.')
       AND NOT EXISTS (
@@ -114,7 +133,7 @@ def fetch_never_purchased():
 
 
 def _coerce_date(value):
-    """Oracle DATE → datetime.date for clean Excel cell formatting."""
+    """Oracle DATE -> datetime.date for clean Excel cell formatting."""
     if value is None:
         return None
     if hasattr(value, 'date'):
@@ -190,7 +209,7 @@ def write_xlsx(lapsed_rows, never_rows, out_path: Path,
     meta.append(['lapsed_count', len(lapsed_rows)])
     meta.append(['never_purchased_count', len(never_rows)])
     meta.append(['name source', 'CUSTOMER.FIRST_NAME (Vietnamese full-name convention)'])
-    meta.append(['phone source', 'CUSTOMER.PHONE_NO (master table — works for both sheets)'])
+    meta.append(['phone source', 'CUSTOMER_PHONE — PRIMARY_FLAG=1 first, lowest SEQ_NO breaks ties'])
     meta.append(['excluded', 'NULL name, SYSADMIN, Tourist'])
     meta.column_dimensions['A'].width = 44
     meta.column_dimensions['B'].width = 60
@@ -212,11 +231,11 @@ def main():
 
     print(f'[1/3] Querying lapsed customers (last sale < {cutoff}) ...')
     lapsed = fetch_lapsed(cutoff)
-    print(f'      → {len(lapsed)} lapsed customers')
+    print(f'      -> {len(lapsed)} lapsed customers')
 
     print('[2/3] Querying never-purchased customers ...')
     never = fetch_never_purchased()
-    print(f'      → {len(never)} never-purchased customers')
+    print(f'      -> {len(never)} never-purchased customers')
 
     out_path = Path(args.out_dir) / f'dormant_customers_{cutoff}_{as_of.isoformat()}.xlsx'
     print(f'[3/3] Writing {out_path} ...')
