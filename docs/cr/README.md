@@ -1,16 +1,16 @@
 # Backend → Frontend Change Requests
 
 This directory is the **backend's** change-request store. It holds changes the
-**backend** has made (or needs) that the **frontend** (`GBL_HR_Frontend`) must act on —
+**backend** has made (or needs) that the **frontend** (`GBL_MASTER_FRONTEND`) must act on —
 new/changed/removed endpoints, request/response shape changes, and breaking changes.
 
-It is the mirror of the frontend's `GBL_HR_Frontend/docs/cr/`, which holds
+It is the mirror of the frontend's `GBL_MASTER_FRONTEND/docs/cr/`, which holds
 **frontend → backend** requests. Together they form a bidirectional CR system:
 
 | Direction | Lives in | Authored with | Read by | Responded in |
 |-----------|----------|---------------|---------|--------------|
-| frontend → backend | `GBL_HR_Frontend/docs/cr/` | frontend `/updatecr` | backend `/checkcr` | backend `/responsecr` (writes back into the frontend doc) |
-| backend → frontend | `GBL_HR_API/docs/cr/` (here) | backend `/updatecr` | frontend `/checkcr` | frontend `/responsecr` (writes back into this doc) |
+| frontend → backend | `GBL_MASTER_FRONTEND/docs/cr/` | frontend `/updatecr` | backend `/checkcr` | backend `/responsecr` (writes back into the frontend doc) |
+| backend → frontend | `GBL_MASTER_API/docs/cr/` (here) | backend `/updatecr` | frontend `/checkcr` | frontend `/responsecr` (writes back into this doc) |
 
 **Rule of thumb:** each repo owns the CR doc for requests it *receives the response to*.
 A request and its response live in the **same** file — the requester's file. `/checkcr`

@@ -1,6 +1,6 @@
-# GBL HR API - Commission Service
+# GBL Master API
 
-Production deployment of the GBL HR Commission Calculation API.
+Production deployment of the GBL Master API — company-wide tooling (commission, CRM, reports, hand-carry, account payable, HR).
 
 ## Overview
 

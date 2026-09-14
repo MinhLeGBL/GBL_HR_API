@@ -5,7 +5,7 @@ Endpoints under `/api/v1/account-payable/*` (URL prefix uses a hyphen
 to match the frontend feature path; Python module name uses underscore
 for import compat).
 
-The full contract is in `GBL_HR_Frontend/src/features/account-payable/types.ts`
+The full contract is in `GBL_MASTER_FRONTEND/src/features/account-payable/types.ts`
 and `docs/cr/account-payable.md`.
 
 Auth: token + admin/manager. Department gate (HR, ACC) is enforced by
