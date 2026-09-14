@@ -1,5 +1,5 @@
 """
-GBL HR API - Main Application Entry Point
+GBL Master API - Main Application Entry Point
 """
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -14,6 +14,9 @@ from app.modules.auth.user_routes import user_bp
 from app.modules.bathroom.routes import bathroom_bp
 from app.modules.crm.routes import crm_bp
 from app.modules.custom_reports.routes import custom_reports_bp
+from app.modules.handcarry.routes import handcarry_bp
+from app.modules.account_payable.routes import account_payable_bp
+from app.modules.reports.routes import reports_bp
 
 
 def create_app():
@@ -49,12 +52,15 @@ def create_app():
     app.register_blueprint(bathroom_bp)
     app.register_blueprint(crm_bp)
     app.register_blueprint(custom_reports_bp)
+    app.register_blueprint(handcarry_bp)
+    app.register_blueprint(account_payable_bp)
+    app.register_blueprint(reports_bp)
 
     # Root endpoint
     @app.route('/')
     def index():
         return jsonify({
-            'service': 'GBL HR API',
+            'service': 'GBL Master API',
             'version': '1.0',
             'status': 'running',
             'endpoints': {
@@ -71,7 +77,10 @@ def create_app():
                 'users': '/api/v1/users',
                 'bathroom': '/api/v1/bathroom',
                 'crm': '/api/v1/crm',
-                'custom_reports': '/api/v1/custom-reports'
+                'custom_reports': '/api/v1/custom-reports',
+                'handcarry': '/api/v1/handcarry',
+                'account_payable': '/api/v1/account-payable',
+                'reports': '/api/v1/reports'
             }
         }), 200
 

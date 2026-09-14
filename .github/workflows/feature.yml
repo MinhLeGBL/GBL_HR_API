@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.changes.outputs.core }}
+      account_payable: ${{ steps.changes.outputs.account_payable }}
       auth: ${{ steps.changes.outputs.auth }}
       bathroom: ${{ steps.changes.outputs.bathroom }}
       commission: ${{ steps.changes.outputs.commission }}
@@ -18,8 +19,10 @@ jobs:
       custom_reports: ${{ steps.changes.outputs.custom_reports }}
       dashboard: ${{ steps.changes.outputs.dashboard }}
       employees: ${{ steps.changes.outputs.employees }}
+      handcarry: ${{ steps.changes.outputs.handcarry }}
       health: ${{ steps.changes.outputs.health }}
       permissions: ${{ steps.changes.outputs.permissions }}
+      reports: ${{ steps.changes.outputs.reports }}
       stores: ${{ steps.changes.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +39,9 @@ jobs:
               - 'app/main.py'
               - 'config/**'
               - '.github/workflows/feature.yml'
+            account_payable:
+              - 'app/modules/account_payable/**'
+              - 'tests/unit/modules/account_payable/**'
             auth:
               - 'app/modules/auth/**'
               - 'tests/unit/modules/auth/**'
@@ -57,12 +63,18 @@ jobs:
             employees:
               - 'app/modules/employees/**'
               - 'tests/unit/modules/employees/**'
+            handcarry:
+              - 'app/modules/handcarry/**'
+              - 'tests/unit/modules/handcarry/**'
             health:
               - 'app/modules/health/**'
               - 'tests/unit/modules/health/**'
             permissions:
               - 'app/modules/permissions/**'
               - 'tests/unit/modules/permissions/**'
+            reports:
+              - 'app/modules/reports/**'
+              - 'tests/unit/modules/reports/**'
             stores:
               - 'app/modules/stores/**'
               - 'tests/unit/modules/stores/**'
@@ -94,6 +106,7 @@ jobs:
         if: needs.detect.outputs.core != 'true'
         run: |
           PATHS=""
+          [ "${{ needs.detect.outputs.account_payable }}" = "true" ] && PATHS="$PATHS tests/unit/modules/account_payable"
           [ "${{ needs.detect.outputs.auth }}" = "true" ]        && PATHS="$PATHS tests/unit/modules/auth"
           [ "${{ needs.detect.outputs.bathroom }}" = "true" ]    && PATHS="$PATHS tests/unit/modules/bathroom"
           [ "${{ needs.detect.outputs.commission }}" = "true" ]  && PATHS="$PATHS tests/unit/modules/commission"
@@ -101,8 +114,10 @@ jobs:
           [ "${{ needs.detect.outputs.custom_reports }}" = "true" ] && PATHS="$PATHS tests/unit/modules/custom_reports"
           [ "${{ needs.detect.outputs.dashboard }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/dashboard"
           [ "${{ needs.detect.outputs.employees }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/employees"
+          [ "${{ needs.detect.outputs.handcarry }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/handcarry"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
+          [ "${{ needs.detect.outputs.reports }}" = "true" ]     && PATHS="$PATHS tests/unit/modules/reports"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"
           if [ -n "$PATHS" ]; then
             echo "Running:$PATHS"

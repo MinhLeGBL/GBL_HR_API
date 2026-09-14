@@ -4,8 +4,6 @@ Commission API Routes
 from flask import Blueprint, jsonify, request, Response
 from app.modules.commission.service import CommissionService, CommissionSettingsService, CommissionStoreSettingsService, CommissionRevenueService
 from app.core.auth.middleware import token_required, manager_required
-import pandas as pd
-import io
 
 commission_bp = Blueprint('commission', __name__, url_prefix='/api/v1/commission')
 
@@ -76,216 +74,6 @@ def _safe_int(value, field_name):
         return int(value), None
     except (ValueError, TypeError):
         return None, f'{field_name} must be an integer'
-
-
-@commission_bp.route('/personal/calculate', methods=['POST'])
-@manager_required
-def calculate_personal_commission():
-    """
-    Calculate personal commissions for employees
-
-    Request Body:
-        {
-            "month": integer (1-12),
-            "year": integer,
-            "employees": [
-                {
-                    "employee_id": "string",
-                    "target": number,
-                    "employee_name": "string" (optional),
-                    "department": "string" (optional)
-                }
-            ]
-        }
-
-    Returns:
-        JSON response with personal commission calculation results for all employees
-    """
-    try:
-        data = request.get_json()
-
-        # Validate required fields
-        required_fields = ['month', 'year', 'employees']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
-        # Validate month range
-        if not (1 <= data['month'] <= 12):
-            return jsonify({
-                'success': False,
-                'error': 'month must be between 1 and 12'
-            }), 400
-
-        # Validate employees list
-        if not isinstance(data['employees'], list) or len(data['employees']) == 0:
-            return jsonify({
-                'success': False,
-                'error': 'employees must be a non-empty list'
-            }), 400
-
-        # Validate each employee entry
-        for i, employee in enumerate(data['employees']):
-            if 'employee_id' not in employee or 'target' not in employee:
-                return jsonify({
-                    'success': False,
-                    'error': f'Employee at index {i} is missing required field: employee_id or target'
-                }), 400
-
-        # Execute personal commission calculation
-        service = CommissionService()
-        result = service.calculate_personal_commissions(
-            month=data['month'],
-            year=data['year'],
-            employees=data['employees']
-        )
-
-        # Check if calculation was successful
-        if not result.get('success', False):
-            return jsonify(result), 400
-
-        return jsonify(result), 200
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-
-@commission_bp.route('/store/calculate-v2', methods=['POST'])
-@manager_required
-def calculate_store_commission_v2():
-    """
-    Calculate store commission following the updated pseudocode algorithm
-
-    Request Body (following the pseudocode structure):
-        {
-            "store_code": "string" (e.g., "RHN", "HBT", "HDG"),
-            "store_target": number (store's revenue target),
-            "store_fp_ratio_target": number (target full-price ratio, 0.0 to 1.0),
-            "query_date": {
-                "from_date": "YYYY-MM-DD HH:MI:SS" (start date),
-                "to_date": "YYYY-MM-DD HH:MI:SS" (end date)
-            },
-            "employees": [
-                {
-                    "employee_code": "string" (unique employee identifier),
-                    "full_name": "string" (employee's full name),
-                    "seniority": number (tenure in years),
-                    "personal_target": number (employee's personal sales target),
-                    "working_day_count": number (days worked in the period),
-                    "is_manager": boolean (true if employee is store manager),
-                    "is_probation": boolean (true if employee is on probation)
-                }
-            ]
-        }
-
-    Returns:
-        JSON response with commission calculation results following pseudocode output structure:
-        {
-            "success": true,
-            "data": {
-                "eligible": boolean,
-                "store_code": "string",
-                "achievement_pct": number,
-                "actual_fp_ratio": number,
-                "store_target": number,
-                "actual_revenue": number,
-                "store_pool": number,
-                "total_employee_count": number,
-                "total_working_days": number,
-                "employees": [
-                    {
-                        "employee_code": "string",
-                        "full_name": "string",
-                        "seniority": number (years),
-                        "is_manager": boolean,
-                        "is_probation": boolean,
-                        "working_day_count": number,
-                        "store_code": "string",
-                        "individual_share": number (70% based on contribution),
-                        "equal_share": number (30% share),
-                        "manager_bonus": number (0, 750000, or 3000000),
-                        "total_store_commission": number (equal_share only for probation employees, or individual_share + equal_share + manager_bonus for regular employees)
-                    }
-                ]
-            }
-        }
-    """
-    try:
-        data = request.get_json()
-
-        # Validate required fields
-        required_fields = ['store_code', 'store_target', 'store_fp_ratio_target', 'query_date', 'employees']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
-        # Validate query_date structure
-        if not isinstance(data['query_date'], dict):
-            return jsonify({
-                'success': False,
-                'error': 'query_date must be an object with from_date and to_date'
-            }), 400
-
-        if 'from_date' not in data['query_date'] or 'to_date' not in data['query_date']:
-            return jsonify({
-                'success': False,
-                'error': 'query_date must contain from_date and to_date'
-            }), 400
-
-        # Validate store_fp_ratio_target range
-        if not (0.0 <= data['store_fp_ratio_target'] <= 1.0):
-            return jsonify({
-                'success': False,
-                'error': 'store_fp_ratio_target must be between 0.0 and 1.0'
-            }), 400
-
-        # Validate employees list
-        if not isinstance(data['employees'], list) or len(data['employees']) == 0:
-            return jsonify({
-                'success': False,
-                'error': 'employees must be a non-empty list'
-            }), 400
-
-        # Validate each employee entry
-        required_emp_fields = ['employee_code', 'full_name', 'seniority', 'personal_target', 'working_day_count', 'is_manager', 'is_probation']
-        for i, employee in enumerate(data['employees']):
-            for field in required_emp_fields:
-                if field not in employee:
-                    return jsonify({
-                        'success': False,
-                        'error': f'Employee at index {i} is missing required field: {field}'
-                    }), 400
-
-        # Execute commission calculation using the v2 method
-        service = CommissionService()
-        result = service.calculate_store_commission_v2(
-            store_code=data['store_code'],
-            store_target=data['store_target'],
-            store_fp_ratio_target=data['store_fp_ratio_target'],
-            query_date=data['query_date'],
-            employees=data['employees']
-        )
-
-        return jsonify({
-            'success': True,
-            'data': result
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
 
 
 @commission_bp.route('/employees', methods=['GET'])
@@ -718,115 +506,33 @@ def update_revenue_adjustments(employee_code):
 @manager_required
 def calculate_commission():
     """
-    CR #29: Calculate commissions using frontend-supplied revenue context.
+    Calculate commissions for a period — fully DB-authoritative.
 
-    Frontend sends stores, employees, per-category revenue (base + adjustments),
-    derived totals, achievement rates, and eligibility flags. Backend applies
-    commission rates, handles before-VAT conversion, and returns results.
+    The backend is the single source of truth: it loads the roster (commission-active
+    employees by assigned store), store targets, and persisted revenue adjustments,
+    then computes revenue, achievement, eligibility, store pool, and personal
+    commission. Cross-store sellers are rostered under their HOME store; their
+    out-of-store sales reach the destination store's eligibility revenue and their own
+    personal commission, but never any store's commission pool.
 
     Request Body:
-        {
-            "month": 3,
-            "year": 2026,
-            "stores": [
-                {
-                    "store_code": "RWR",
-                    "store_target": 11000000000,
-                    "fp_ratio_target": 60,
-                    "store_total": 6800000000,
-                    "store_fp_total": 4300000000,
-                    "store_achievement": 61.8,
-                    "store_fp_ratio": 63.2,
-                    "store_eligible": true,
-                    "employees": [
-                        {
-                            "employee_code": "GL013",
-                            "is_manager": true,
-                            "contract": "permanent",
-                            "personal_target": 650000000,
-                            "personal_total": 680000000,
-                            "personal_achievement": 104.6,
-                            "personal_eligible": true,
-                            "revenue": [
-                                {
-                                    "revenue_type": "fashion",
-                                    "fp_base": 400000000,
-                                    "fp_adjustment": 50000000,
-                                    "md_base": 80000000,
-                                    "md_adjustment": 0
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
+        { "month": 5, "year": 2026 }
+
+    A legacy `stores` array (CR #29) is accepted but IGNORED — adjustments and targets
+    are read from the database, not the request. Save them first via
+    PUT /commission/revenue/adjustments/<employee_code> and PUT /commission/stores/<code>.
     """
     try:
         data, err = _parse_json_body()
         if err:
             return err
 
-        for field in ['month', 'year', 'stores']:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'Missing required field: {field}'
-                }), 400
-
         month, year, err = _parse_period(data)
         if err:
             return err
 
-        stores = data.get('stores')
-        if not isinstance(stores, list):
-            return jsonify({
-                'success': False,
-                'error': 'stores must be an array'
-            }), 400
-
-        if len(stores) == 0:
-            return jsonify({
-                'success': False,
-                'error': 'stores array must not be empty'
-            }), 400
-
-        # Validate each store has required fields
-        store_required = ['store_code', 'store_target', 'fp_ratio_target',
-                          'store_total', 'store_fp_total', 'store_achievement',
-                          'store_fp_ratio', 'store_eligible', 'employees']
-        for i, store in enumerate(stores):
-            for field in store_required:
-                if field not in store:
-                    return jsonify({
-                        'success': False,
-                        'error': f'stores[{i}] missing required field: {field}'
-                    }), 400
-            if not isinstance(store['employees'], list):
-                return jsonify({
-                    'success': False,
-                    'error': f'stores[{i}].employees must be an array'
-                }), 400
-
-        # Validate each employee has required fields
-        emp_required = ['employee_code', 'is_manager', 'contract',
-                        'personal_target', 'personal_total',
-                        'personal_achievement', 'personal_eligible', 'revenue']
-        for i, store in enumerate(stores):
-            for j, emp in enumerate(store['employees']):
-                for field in emp_required:
-                    if field not in emp:
-                        return jsonify({
-                            'success': False,
-                            'error': f'stores[{i}].employees[{j}] missing required field: {field}'
-                        }), 400
-
         service = CommissionService()
-        result = service.calculate_commissions_v2(
-            month=month,
-            year=year,
-            stores_data=stores
-        )
+        result = service.calculate_commissions(month=month, year=year)
 
         if not result.get('success', False):
             return jsonify(result), 500

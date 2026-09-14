@@ -33,7 +33,14 @@ class TestInitDatabase:
         # CREATE TABLE + 2 migrations + 2 named drops + DO$$ drop + delete invalid types
         # + month check + revenue_type check + CREATE INDEX
         # + CR #28: add store_code col + drop old unique + add new unique + delete old rows
-        assert mock_cursor.execute.call_count == 14
+        # + CR #61: create payable_bill_rates table + DO$$ effective_rate precision migration + its index
+        assert mock_cursor.execute.call_count == 17
+        # CR #61 follow-up: spot-check that the new table appears in the executed SQL.
+        executed_sql = ' '.join(
+            call.args[0] if call.args else '' for call in mock_cursor.execute.call_args_list
+        )
+        assert 'payable_bill_rates' in executed_sql
+        assert 'NUMERIC(6,5)' in executed_sql
         mock_conn.commit.assert_called_once()
         mock_cursor.close.assert_called_once()
         mock_conn.close.assert_called_once()

@@ -49,6 +49,11 @@ class CRMRepository:
                 'frequency':          int(r[4]),
                 'monetary':           int(r[5] or 0),
                 'last_purchase_date': r[6].date() if hasattr(r[6], 'date') else r[6],
+                # CR #76 (frontend): FP/MD split (revenue + units sold).
+                'fp_revenue':         int(r[7] or 0),
+                'discounted_revenue': int(r[8] or 0),
+                'fp_units':           int(r[9] or 0),
+                'discounted_units':   int(r[10] or 0),
             }
             for r in rows
         ]
@@ -131,7 +136,8 @@ class CRMRepository:
         Fetch all live aggregates for a single customer's drilldown view.
 
         Returns a dict with keys:
-            totals: {total_monetary, total_bills, fp_revenue, discounted_revenue}
+            totals: {total_monetary, total_bills, fp_revenue, discounted_revenue,
+                     fp_units, discounted_units}
                     (None if customer has zero matching transactions)
             brands: list of {brand_name, revenue, brand_recency_days}
             categories: list of {category_name, revenue}
@@ -150,6 +156,8 @@ class CRMRepository:
                     'total_bills':        int(row[1] or 0),
                     'fp_revenue':         int(row[2] or 0),
                     'discounted_revenue': int(row[3] or 0),
+                    'fp_units':           int(row[4] or 0),
+                    'discounted_units':   int(row[5] or 0),
                 }
 
             cur.execute(CRMQueries.CUSTOMER_DRILLDOWN_BRANDS,
@@ -364,6 +372,11 @@ class CRMRepository:
                 'frequency':          int(r[4]),
                 'monetary':           int(r[5] or 0),
                 'last_purchase_date': r[6].date() if hasattr(r[6], 'date') else r[6],
+                # CR #76 (frontend): FP/MD split (revenue + units sold).
+                'fp_revenue':         int(r[7] or 0),
+                'discounted_revenue': int(r[8] or 0),
+                'fp_units':           int(r[9] or 0),
+                'discounted_units':   int(r[10] or 0),
             }
             for r in rows
         ]
@@ -424,14 +437,16 @@ class CRMRepository:
                     r_score, f_score, m_score,
                     weighted_score, engagement_score, segment,
                     top_brand, top_category, category_breadth,
-                    last_purchase_date
+                    last_purchase_date,
+                    fp_revenue, discounted_revenue, fp_units, discounted_units
                 ) VALUES (
                     %(customer_sid)s, %(name)s, %(email)s, %(phone)s,
                     %(recency)s, %(frequency)s, %(monetary)s,
                     %(r_score)s, %(f_score)s, %(m_score)s,
                     %(weighted_score)s, %(engagement_score)s, %(segment)s,
                     %(top_brand)s, %(top_category)s, %(category_breadth)s,
-                    %(last_purchase_date)s
+                    %(last_purchase_date)s,
+                    %(fp_revenue)s, %(discounted_revenue)s, %(fp_units)s, %(discounted_units)s
                 )
             """
             cur.executemany(insert_sql, scored_customers)
@@ -574,7 +589,8 @@ class CRMRepository:
                    r_score, f_score, m_score,
                    weighted_score, engagement_score, segment,
                    top_brand, top_category, category_breadth,
-                   last_purchase_date
+                   last_purchase_date,
+                   fp_revenue, discounted_revenue, fp_units, discounted_units
             FROM crm_customer_scores
             {where}
             ORDER BY weighted_score DESC, customer_sid ASC
@@ -609,7 +625,11 @@ class CRMRepository:
                     COALESCE(SUM(monetary), 0)                 AS revenue,
                     COALESCE(AVG(recency), 0)                  AS avg_recency,
                     COALESCE(AVG(frequency), 0)                AS avg_frequency,
-                    COALESCE(AVG(monetary), 0)                 AS avg_monetary
+                    COALESCE(AVG(monetary), 0)                 AS avg_monetary,
+                    COALESCE(SUM(fp_revenue), 0)               AS total_full_price,
+                    COALESCE(SUM(discounted_revenue), 0)       AS total_discounted,
+                    COALESCE(SUM(fp_units), 0)                 AS count_full_price,
+                    COALESCE(SUM(discounted_units), 0)         AS count_discounted
                 FROM crm_customer_scores
                 GROUP BY segment
             """)

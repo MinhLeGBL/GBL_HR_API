@@ -19,7 +19,36 @@ FIRST_NAME through as `name`.
 Excluded customers: SYSADMIN (system-internal) and Tourist / Tourist. (POS
 aggregation bucket — combines all walk-in tourist transactions into a
 single record, which would skew RFM scoring badly).
+
+Revenue formula (v1.2.0 fix) — verified against live Retail Pro data, mirrors
+the `reports` module's `_NET_LINE`:
+- `di.PRICE` is the actual UNIT selling price ALREADY net of the item-level
+  discount (`ORIG_PRICE × (1 - di.DISC_PERC/100) == di.PRICE` on every line), so
+  re-applying `di.DISC_PERC` DOUBLE-discounts. The prior expression did exactly
+  that AND omitted `× QTY`, undercounting revenue (~⅓ at high-discount stores).
+- `di.TAX_AMT` is the item's real per-unit tax; subtracted for ex-tax revenue.
+- the DOCUMENT-level discount `d.DISC_PERC` is NOT baked into `di.PRICE`, so it
+  is applied.
+`di.DISC_PERC` is still used — legitimately — in the Full-Price vs Markdown
+CLASSIFICATION (`_COMBINED_DISC`), which is a discount *rate*, not revenue.
 """
+
+# Net line revenue (ex-tax): (unit price ex-tax) × qty × (1 − document discount).
+# di.PRICE is already net of the item discount, so di.DISC_PERC is deliberately
+# NOT applied here (applying it double-discounts).
+_NET_REVENUE = (
+    "(di.PRICE - NVL(di.TAX_AMT, 0)) "
+    "* NVL(di.QTY, 0) "
+    "* (1 - NVL(d.DISC_PERC, 0) / 100)"
+)
+
+# Combined (item × document) discount RATE — used ONLY to classify a line as
+# Full Price (<= 30%) vs Markdown (> 30%). This is a discount fraction, not
+# revenue, so it legitimately uses di.DISC_PERC.
+_COMBINED_DISC = (
+    "(1 - (1 - NVL(di.DISC_PERC, 0) / 100) "
+    "* (1 - NVL(d.DISC_PERC, 0) / 100))"
+)
 
 # Names (case-insensitive, trimmed) that identify non-real customer accounts
 # and must be excluded from RFM analytics:
@@ -40,17 +69,30 @@ class CRMQueries:
     # rolling 24-month window. CUSTOMER metadata pulled inline.
     # Uses SYSDATE for the daily recompute. For backfill, use
     # as_of_query() which replaces SYSDATE with a bind variable.
-    CUSTOMER_RFM_AGGREGATES = """
+    CUSTOMER_RFM_AGGREGATES = f"""
         SELECT
             c.SID                                                          AS customer_sid,
             TRIM(c.FIRST_NAME)                                             AS name,
             c.EMAIL                                                        AS email,
             TRUNC(SYSDATE) - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))    AS recency_days,
             COUNT(DISTINCT d.SID)                                          AS frequency,
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                      * (1 - NVL(di.DISC_PERC, 0) / 100)
-                      * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)               AS monetary,
-            MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                     AS last_purchase_date
+            ROUND(SUM({_NET_REVENUE}), 0)                                  AS monetary,
+            MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                     AS last_purchase_date,
+            -- CR #76 (frontend): FP vs MD split. Binary per line item on the
+            -- COMBINED (item × document) discount rate: <= 30% kept-price
+            -- reduction is Full Price, > 30% is Markdown. Each line's whole
+            -- net revenue / unit count goes to exactly one bucket, so
+            -- fp + md == monetary and fp_units + md_units == total units.
+            ROUND(SUM(
+                CASE WHEN {_COMBINED_DISC} <= 0.30
+                     THEN {_NET_REVENUE} ELSE 0 END), 0)                   AS fp_revenue,
+            ROUND(SUM(
+                CASE WHEN {_COMBINED_DISC} > 0.30
+                     THEN {_NET_REVENUE} ELSE 0 END), 0)                   AS discounted_revenue,
+            SUM(CASE WHEN {_COMBINED_DISC} <= 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                       AS fp_units,
+            SUM(CASE WHEN {_COMBINED_DISC} > 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                       AS discounted_units
         FROM CUSTOMER c
         JOIN DOCUMENT d        ON d.BT_CUID = c.SID
         JOIN DOCUMENT_ITEM di  ON di.DOC_SID = d.SID
@@ -77,7 +119,7 @@ class CRMQueries:
     # category_breadth counts distinct composite category values.
     #
     # Returns one row per customer with top_brand, top_category, category_breadth.
-    CUSTOMER_TOP_BRAND_CATEGORY = """
+    CUSTOMER_TOP_BRAND_CATEGORY = f"""
         WITH customer_sales AS (
             SELECT
                 d.BT_CUID                                                  AS customer_sid,
@@ -86,9 +128,7 @@ class CRMQueries:
                   || ' - '
                   || NVL(ext.UDF8_STRING, '(Unknown)')                     AS category_name,
                 d.SID                                                      AS doc_sid,
-                (di.PRICE - NVL(di.TAX_AMT, 0))
-                  * (1 - NVL(di.DISC_PERC, 0) / 100)
-                  * (1 - NVL(d.DISC_PERC, 0) / 100)                        AS net_revenue
+                {_NET_REVENUE}                                             AS net_revenue
             FROM DOCUMENT d
             JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
             LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
@@ -200,19 +240,17 @@ class CRMQueries:
     #   items                 — total quantity of items of this brand the
     #                           customer bought across all their transactions
     #                           (SUM(QTY))
-    #   revenue               — net revenue (after item + doc disc) across
+    #   revenue               — net revenue (ex-tax, after doc disc) across
     #                           those line items
     #   customer_recency_days — days since this customer's most recent
     #                           transaction containing the brand
     #                           (today − MAX(invc_post_date))
-    PRODUCT_BRAND_AGGREGATES = """
+    PRODUCT_BRAND_AGGREGATES = f"""
         SELECT
             d.BT_CUID                                                      AS customer_sid,
             NVL(v.VEND_NAME, di.VEND_CODE)                                 AS group_name,
             SUM(NVL(di.QTY, 0))                                            AS items,
-            SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100))                         AS revenue,
+            SUM({_NET_REVENUE})                                           AS revenue,
             TRUNC(SYSDATE)
               - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                 AS customer_recency_days
         FROM DOCUMENT d
@@ -236,16 +274,14 @@ class CRMQueries:
     # UDF8_STRING composite category used elsewhere in the CRM module
     # (CR #42). Categories with neither value are emitted as
     # "(Unknown) - (Unknown)" so they aggregate together.
-    PRODUCT_CATEGORY_AGGREGATES = """
+    PRODUCT_CATEGORY_AGGREGATES = f"""
         SELECT
             d.BT_CUID                                                      AS customer_sid,
             NVL(dcs.C_NAME, '(Unknown)')
               || ' - '
               || NVL(ext.UDF8_STRING, '(Unknown)')                         AS group_name,
             SUM(NVL(di.QTY, 0))                                            AS items,
-            SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100))                         AS revenue,
+            SUM({_NET_REVENUE})                                           AS revenue,
             TRUNC(SYSDATE)
               - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                 AS customer_recency_days
         FROM DOCUMENT d
@@ -273,34 +309,30 @@ class CRMQueries:
     # Three small queries instead of one wide CTE — each is independently
     # readable, and the customer SID is bound once per query.
 
-    # 6a. Headline metrics: total monetary, total bills, FP/discounted split.
-    # Per-line proportional split: each line's net revenue is split by its
-    # kept-vs-discount ratio. For a line with combined kept_fraction k:
-    #   FP_per_line = net * k       = (PRICE-TAX) * k * k
-    #   MD_per_line = net * (1 - k) = (PRICE-TAX) * k * (1 - k)
-    # FP + MD = net, so FP + MD across all lines = total_monetary.
-    # Zero-discount lines collapse to FP = net, MD = 0.
-    # Example: PRICE-TAX = 100 with item disc 20% (k=0.8) → net=80,
-    #          FP=80*0.8=64, MD=80*0.2=16.
-    CUSTOMER_DRILLDOWN_TOTALS = """
+    # 6a. Headline metrics: total monetary, total bills, FP/MD split
+    # (revenue + units sold). CR #76 (frontend): binary per-line rule on the
+    # COMBINED (item × document) discount rate — <= 30% reduction is Full
+    # Price, > 30% is Markdown. Each line's whole net revenue / unit count
+    # lands in exactly one bucket, so fp_revenue + discounted_revenue ==
+    # total_monetary and fp_units + discounted_units == total units. Uses the
+    # SAME rule as the segment summary so the drilldown and dashboard agree.
+    # (Supersedes the pre-CR#76 per-line proportional split.)
+    CUSTOMER_DRILLDOWN_TOTALS = f"""
         SELECT
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS total_monetary,
+            ROUND(SUM({_NET_REVENUE}), 0)                                     AS total_monetary,
             COUNT(DISTINCT d.SID)                                              AS total_bills,
             ROUND(SUM(
-                (di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)
+                CASE WHEN {_COMBINED_DISC} <= 0.30
+                     THEN {_NET_REVENUE} ELSE 0 END
             ), 0)                                                              AS fp_revenue,
             ROUND(SUM(
-                (di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)
-                * (1 - (1 - NVL(di.DISC_PERC, 0) / 100) * (1 - NVL(d.DISC_PERC, 0) / 100))
-            ), 0)                                                              AS discounted_revenue
+                CASE WHEN {_COMBINED_DISC} > 0.30
+                     THEN {_NET_REVENUE} ELSE 0 END
+            ), 0)                                                              AS discounted_revenue,
+            SUM(CASE WHEN {_COMBINED_DISC} <= 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                           AS fp_units,
+            SUM(CASE WHEN {_COMBINED_DISC} > 0.30
+                     THEN NVL(di.QTY, 0) ELSE 0 END)                           AS discounted_units
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di ON di.DOC_SID = d.SID
         WHERE d.BT_CUID = :customer_sid
@@ -312,12 +344,10 @@ class CRMQueries:
     # 6b. Brand distribution + per-brand latest-purchase recency.
     # Service aggregates `avg_brand_recency_days = mean(brand_recency)` over
     # the rows. Distribution is the {name, monetary} columns.
-    CUSTOMER_DRILLDOWN_BRANDS = """
+    CUSTOMER_DRILLDOWN_BRANDS = f"""
         SELECT
             NVL(v.VEND_NAME, di.VEND_CODE)                                     AS brand_name,
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue,
+            ROUND(SUM({_NET_REVENUE}), 0)                                     AS revenue,
             TRUNC(SYSDATE)
               - MAX(TRUNC(CAST(d.invc_post_date AS DATE)))                     AS brand_recency_days
         FROM DOCUMENT d
@@ -332,12 +362,10 @@ class CRMQueries:
 
     # 6c. Category distribution (C_NAME only — matches CR #42 convention,
     # no UDF8 composite for the drilldown view).
-    CUSTOMER_DRILLDOWN_CATEGORIES = """
+    CUSTOMER_DRILLDOWN_CATEGORIES = f"""
         SELECT
             NVL(dcs.C_NAME, '(Unknown)')                                       AS category_name,
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue
+            ROUND(SUM({_NET_REVENUE}), 0)                                     AS revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
         LEFT JOIN DCS dcs           ON dcs.DCS_CODE = di.DCS_CODE
@@ -357,12 +385,10 @@ class CRMQueries:
     # on VEND_NAME with VEND_CODE fallback so it stays consistent with how
     # `top_brand` is rendered elsewhere.
 
-    BRAND_DRILLDOWN_TOTALS = """
+    BRAND_DRILLDOWN_TOTALS = f"""
         SELECT
             d.BT_CUID                                                          AS customer_sid,
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue,
+            ROUND(SUM({_NET_REVENUE}), 0)                                     AS revenue,
             SUM(NVL(di.QTY, 0))                                                AS items
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
@@ -381,13 +407,11 @@ class CRMQueries:
 
     # Per-customer per-season revenue. Season is INVN_SBS_ITEM.UDF5_STRING
     # (e.g. "SS25", "FW24"). Service strips the alpha prefix.
-    BRAND_DRILLDOWN_SEASONS = """
+    BRAND_DRILLDOWN_SEASONS = f"""
         SELECT
             d.BT_CUID                                                          AS customer_sid,
             isi.UDF5_STRING                                                    AS raw_season,
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue
+            ROUND(SUM({_NET_REVENUE}), 0)                                     AS revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
         LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
@@ -404,13 +428,11 @@ class CRMQueries:
         GROUP BY d.BT_CUID, isi.UDF5_STRING
     """
 
-    BRAND_DRILLDOWN_CATEGORIES = """
+    BRAND_DRILLDOWN_CATEGORIES = f"""
         SELECT
             d.BT_CUID                                                          AS customer_sid,
             NVL(dcs.C_NAME, '(Unknown)')                                       AS category_name,
-            ROUND(SUM((di.PRICE - NVL(di.TAX_AMT, 0))
-                * (1 - NVL(di.DISC_PERC, 0) / 100)
-                * (1 - NVL(d.DISC_PERC, 0) / 100)), 0)                         AS revenue
+            ROUND(SUM({_NET_REVENUE}), 0)                                     AS revenue
         FROM DOCUMENT d
         JOIN DOCUMENT_ITEM di       ON di.DOC_SID = d.SID
         LEFT JOIN VENDOR v          ON v.VEND_CODE = di.VEND_CODE
