@@ -1,5 +1,5 @@
 """
-GBL HR API - Main Application Entry Point
+GBL Master API - Main Application Entry Point
 """
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -58,7 +58,7 @@ def create_app():
     @app.route('/')
     def index():
         return jsonify({
-            'service': 'GBL HR API',
+            'service': 'GBL Master API',
             'version': '1.0',
             'status': 'running',
             'endpoints': {
