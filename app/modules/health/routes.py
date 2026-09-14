@@ -18,7 +18,7 @@ def health_check():
     return jsonify({
         'success': True,
         'status': 'healthy',
-        'service': 'GBL HR API'
+        'service': 'GBL Master API'
     }), 200
 
 

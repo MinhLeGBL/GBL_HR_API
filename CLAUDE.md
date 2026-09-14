@@ -1,4 +1,4 @@
-# GBL HR API — Architecture Guide
+# GBL Master API — Architecture Guide
 
 Flask REST API for GBL company. Domain-based module architecture with shared core infrastructure.
 
@@ -185,7 +185,7 @@ The two repos exchange change requests symmetrically. Each repo's `docs/cr/`
 holds its **outgoing** asks; the fulfiller reads the requester's repo.
 
 ```
-GBL_HR_API/                              GBL_MASTER_FRONTEND/
+GBL_MASTER_API/                          GBL_MASTER_FRONTEND/
 ├── docs/cr/<feature>.md                 ├── docs/cr/<feature>.md
 │   (backend → frontend outgoing,        │   (frontend → backend outgoing,
 │    pending only; feature branch only)  │    pending only; feature branch only)

@@ -21,7 +21,7 @@ class Config:
 
     # API Settings
     API_VERSION = os.getenv('API_VERSION', 'v1')
-    API_TITLE = os.getenv('API_TITLE', 'GBL HR API')
+    API_TITLE = os.getenv('API_TITLE', 'GBL Master API')
     API_DESCRIPTION = os.getenv('API_DESCRIPTION', 'HR Salary Calculation API')
 
     # CORS Settings
