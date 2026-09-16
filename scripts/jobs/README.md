@@ -74,9 +74,31 @@ endpoint 500s on the missing schema:
 cd /home/gbladmin/GBL_HR_API && FLASK_ENV=production .venv/bin/python scripts/database/init_db.py
 ```
 
-### Timing
+### Timing — the server is UTC, the business is not
 
-`gbl-periodic-report.timer` fires **Monday 03:00**. The week closes at Sunday
+`gbl-periodic-report.timer` fires at **20:00 UTC Sunday**, which is **03:00
+Monday in Vietnam** (UTC+7). The paired `.service` sets
+`Environment="TZ=Asia/Ho_Chi_Minh"`.
+
+⚠️ **These two must change together.** The job derives its entire reporting
+window from `date.today()`. At 20:00 UTC Sunday a process without the TZ
+override sees *Sunday*, and `last_complete_week()` then returns the week BEFORE
+the one that just closed — a silently week-old report, every week, with no error.
+
+⚠️ **The dispatch service must NOT get a TZ override.** It compares
+`datetime.now()` against send times the API wrote with its own `datetime.now()`,
+and the API service has no TZ set. Adding one would put them 7 hours apart and
+send scheduled reports early. The generator needs TZ because it derives a DATE;
+the dispatcher compares CLOCKS.
+
+Verify after any change:
+
+```bash
+systemctl list-timers | grep periodic-report   # expect Sun 20:00 UTC
+```
+
+The original design note still applies: Monday 03:00 local rather than Sunday
+midnight. The week closes at Sunday
 midnight, but sales posted late on Sunday keep arriving in Oracle afterwards and
 the figures are frozen the moment the job runs — hence the three-hour margin.
 MTD and YTD end on the closing **Sunday**, not the Monday the job fires on, so

@@ -8,6 +8,11 @@ User=gbladmin
 WorkingDirectory=/home/gbladmin/GBL_HR_API
 Environment="PYTHONPATH=/home/gbladmin/GBL_HR_API"
 Environment="FLASK_ENV=production"
+# Deliberately NO TZ override here, unlike the generator. This job
+# compares datetime.now() against send times the API wrote with its own
+# datetime.now(), and the API service has no TZ set. Adding one would put
+# the two 7 hours apart and dispatch scheduled reports early. The
+# generator needs TZ because it derives a DATE; this one compares CLOCKS.
 ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/python scripts/jobs/periodic_report_dispatch.py
 StandardOutput=append:/var/log/gbl-periodic-report.log
 StandardError=append:/var/log/gbl-periodic-report.log
