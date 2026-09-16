@@ -1,0 +1,13 @@
+[Unit]
+Description=GBL weekly periodic sales report — send approved reports
+Wants=gbl-periodic-report-dispatch.timer
+
+[Service]
+Type=oneshot
+User=gbladmin
+WorkingDirectory=/home/gbladmin/GBL_HR_API
+Environment="PYTHONPATH=/home/gbladmin/GBL_HR_API"
+Environment="FLASK_ENV=production"
+ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/python scripts/jobs/periodic_report_dispatch.py
+StandardOutput=append:/var/log/gbl-periodic-report.log
+StandardError=append:/var/log/gbl-periodic-report.log

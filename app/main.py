@@ -16,6 +16,7 @@ from app.modules.crm.routes import crm_bp
 from app.modules.handcarry.routes import handcarry_bp
 from app.modules.account_payable.routes import account_payable_bp
 from app.modules.reports.routes import reports_bp
+from app.modules.periodic_report.routes import periodic_report_bp
 
 
 def create_app():
@@ -53,6 +54,7 @@ def create_app():
     app.register_blueprint(handcarry_bp)
     app.register_blueprint(account_payable_bp)
     app.register_blueprint(reports_bp)
+    app.register_blueprint(periodic_report_bp)
 
     # Root endpoint
     @app.route('/')
@@ -76,7 +78,8 @@ def create_app():
                 'bathroom': '/api/v1/bathroom',
                 'crm': '/api/v1/crm',
                 'handcarry': '/api/v1/handcarry',
-                'account_payable': '/api/v1/account-payable'
+                'account_payable': '/api/v1/account-payable',
+                'periodic_report': '/api/v1/periodic-report'
             }
         }), 200
 

@@ -5,13 +5,15 @@ Run this once during deployment to create all required tables and seed data.
 Tables are created in dependency order.
 
 Usage:
-    python scripts/init_db.py
+    python scripts/database/init_db.py
 """
 import sys
 import os
 
-# Add project root to path so imports work
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Add project root to path so imports work. Two levels up, not one: this script
+# lives at scripts/database/, so '..' is scripts/ and every `from app...` import
+# fails with ModuleNotFoundError.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dotenv import load_dotenv
 
@@ -34,6 +36,7 @@ from app.modules.crm.service import CRMService
 from app.modules.handcarry.service import HandCarryService
 from app.modules.account_payable.service import AccountPayableService
 from app.modules.reports.service import ReportsService
+from app.modules.periodic_report.service import PeriodicReportService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -64,6 +67,8 @@ INIT_STEPS = [
      AccountPayableService().init_database),
     ('Reports (live_comparison_pins)',
      ReportsService().init_database),
+    ('Periodic Report (runs, recipients, settings, sends)',
+     PeriodicReportService().init_database),
 ]
 
 
