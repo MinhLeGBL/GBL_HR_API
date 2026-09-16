@@ -228,3 +228,30 @@ pins that, because it is the guarantee the whole feature rests on.
 Kept as an operational log of send attempts (success, failure detail, timestamp),
 which is what makes a failed delivery diagnosable. It is no longer presented as
 "who received this report" — the UI shows a short "last sent" line instead.
+
+
+## 0.7.0 — 2026-09-16
+
+**Approval and sending are now separate decisions**, with one Send action
+covering both a first send and a re-send.
+
+### Changed
+- **`POST /runs/<id>/approve`** signs off the CONTENT only. It takes no body,
+  queues nothing, and **no longer requires recipients** — the list is edited
+  independently and may legitimately be empty at that moment.
+  `approve_run` sets `scheduled_send_at = NULL`, which is what keeps an approved
+  run out of `claim_due_runs`: the dispatcher matches on
+  `scheduled_send_at <= now`, and NULL never compares true. So "approved" and
+  "queued" are distinguishable without another column.
+- **`POST /runs/<id>/send`** replaces `/resend`. One endpoint for both cases,
+  because sending the first time and sending again differ only in what the row
+  said beforehand. Guarded on `status IN ('approved', 'sent')`, so a run still
+  awaiting approval cannot be sent and one mid-send cannot be disturbed.
+  Recipients ARE required here — a send with no visible addressee is refused by
+  the mailer anyway, so it is better refused up front.
+- **A schedule passed to `/send` is saved as the new default**, the same
+  contract as the recipient list: set it once and it stays until changed.
+
+### Removed
+- `resend()` and `requeue_run`'s sent-only guard — both folded into `send()`
+  and `queue_run`.

@@ -473,13 +473,13 @@ class PeriodicReportService:
                     'code': 'INVALID_STATE'}
         return {'success': True}
 
-    def approve(self, run_id: int, user_id: int,
-                send_mode: Optional[str] = None) -> Dict[str, Any]:
-        """Approve a pending run and queue it.
+    def approve(self, run_id: int, user_id: int) -> Dict[str, Any]:
+        """Sign off the CONTENT. Does not send anything.
 
-        `send_mode` overrides the configured default for this run only:
-        'immediate' queues it for the next dispatcher tick, 'scheduled' queues
-        it for the configured weekday/time.
+        Approval and sending are separate decisions. Approving locks the
+        subject, body and figures; it deliberately does NOT require recipients,
+        because who receives the report is a standing list edited independently
+        and can legitimately be empty at this moment.
         """
         run = self.repo.get_run(run_id)
         if run is None:
@@ -488,25 +488,82 @@ class PeriodicReportService:
             return {'success': False,
                     'error': f"Run is {run['status']}, not awaiting approval.",
                     'code': 'INVALID_STATE'}
-        if not self.repo.list_recipients():
+        if not self.repo.approve_run(run_id, user_id):
+            # Lost a race with another approver between the read and the write.
             return {'success': False,
-                    'error': 'No active recipients are configured.',
+                    'error': 'Run is no longer awaiting approval.',
+                    'code': 'INVALID_STATE'}
+        return {'success': True, 'status': 'approved'}
+
+    def send(self, run_id: int, user_id: int, mode: Optional[str] = None,
+             send_weekday: Optional[int] = None,
+             send_time: Optional[str] = None) -> Dict[str, Any]:
+        """Queue an approved — or already sent — report for delivery.
+
+        One action for both: sending for the first time and sending again
+        differ only in what the row said beforehand. That is why there is one
+        Send button rather than a separate "send again".
+
+        `mode` is 'immediate' or 'scheduled'. A schedule supplied here is SAVED
+        as the new default, the same way the recipient list is — set it once and
+        it stays until changed.
+
+        Recipients ARE required here (unlike approval): a send with no visible
+        addressee is refused by the mailer anyway, so it is better refused now.
+        """
+        run = self.repo.get_run(run_id)
+        if run is None:
+            return {'success': False, 'error': 'Run not found', 'code': 'NOT_FOUND'}
+        if run['status'] not in ('approved', 'sent'):
+            return {'success': False,
+                    'error': f"Run is {run['status']} — approve it before sending."
+                             if run['status'] == 'pending_approval' else
+                             f"Run is {run['status']} and cannot be sent now.",
+                    'code': 'INVALID_STATE'}
+
+        recipients = self.repo.list_recipients()
+        if not any(r['kind'] == 'to' for r in recipients):
+            return {'success': False,
+                    'error': 'Add at least one “To” recipient before sending.',
                     'code': 'NO_RECIPIENTS'}
 
         settings = self.repo.get_settings() or {}
-        mode = send_mode or settings.get('send_mode') or 'immediate'
+        mode = mode or settings.get('send_mode') or 'immediate'
         if mode not in ('immediate', 'scheduled'):
             return {'success': False, 'error': f'Unknown send mode: {mode}',
                     'code': 'INVALID_INPUT'}
+
+        if mode == 'scheduled':
+            # A schedule chosen at send time becomes the standing default, the
+            # same contract as the recipient list.
+            fields: Dict[str, Any] = {'send_mode': 'scheduled'}
+            if send_weekday is not None:
+                if not (isinstance(send_weekday, int) and 0 <= send_weekday <= 6):
+                    return {'success': False,
+                            'error': 'send_weekday must be 0-6 (Monday=0)',
+                            'code': 'INVALID_INPUT'}
+                fields['send_weekday'] = send_weekday
+            if send_time is not None:
+                try:
+                    fields['send_time'] = time.fromisoformat(send_time)
+                except (TypeError, ValueError):
+                    return {'success': False, 'error': 'send_time must be HH:MM',
+                            'code': 'INVALID_INPUT'}
+            merged = {**settings, **fields}
+            if merged.get('send_weekday') is None or merged.get('send_time') is None:
+                return {'success': False,
+                        'error': 'Scheduled sending needs both a weekday and a time.',
+                        'code': 'INVALID_INPUT'}
+            self.repo.update_settings(fields)
+            settings = merged
 
         send_at = (datetime.now() if mode == 'immediate'
                    else next_send_time(datetime.now(),
                                        settings.get('send_weekday'),
                                        settings.get('send_time')))
-        if not self.repo.approve_run(run_id, user_id, send_at):
-            # Lost a race with another approver between the read and the write.
+        if not self.repo.queue_run(run_id, user_id, send_at):
             return {'success': False,
-                    'error': 'Run is no longer awaiting approval.',
+                    'error': 'This report can no longer be queued.',
                     'code': 'INVALID_STATE'}
         return {'success': True, 'scheduled_send_at': send_at.isoformat(),
                 'send_mode': mode}
@@ -582,50 +639,6 @@ class PeriodicReportService:
         self.repo.log_send(run_id, envelope, True, detail)
         return {'run_id': run_id, 'success': True, 'detail': detail,
                 'recipients': len(envelope)}
-
-    def resend(self, run_id: int, user_id: int,
-               send_mode: Optional[str] = None) -> Dict[str, Any]:
-        """Send an already-sent report again, to the CURRENT recipient list.
-
-        Recipients are deliberately independent of approval: approval locks the
-        SUBJECT, BODY and FIGURES — the things that were signed off — but who
-        receives the report is a standing list that changes over time. So a past
-        report can be forwarded to someone new by adding them and re-sending;
-        nothing about the report itself changes.
-
-        No fresh approval is required because the content is unchanged and was
-        already approved. The APPROVE section still gates the route.
-        """
-        run = self.repo.get_run(run_id)
-        if run is None:
-            return {'success': False, 'error': 'Run not found', 'code': 'NOT_FOUND'}
-        if run['status'] != 'sent':
-            return {'success': False,
-                    'error': f"Only a sent report can be sent again — this one "
-                             f"is {run['status']}.",
-                    'code': 'INVALID_STATE'}
-        if not self.repo.list_recipients():
-            return {'success': False,
-                    'error': 'No active recipients are configured.',
-                    'code': 'NO_RECIPIENTS'}
-
-        settings = self.repo.get_settings() or {}
-        mode = send_mode or settings.get('send_mode') or 'immediate'
-        if mode not in ('immediate', 'scheduled'):
-            return {'success': False, 'error': f'Unknown send mode: {mode}',
-                    'code': 'INVALID_INPUT'}
-
-        send_at = (datetime.now() if mode == 'immediate'
-                   else next_send_time(datetime.now(),
-                                       settings.get('send_weekday'),
-                                       settings.get('send_time')))
-        if not self.repo.requeue_run(run_id, user_id, send_at):
-            # Lost a race — something moved it out of `sent` in between.
-            return {'success': False,
-                    'error': 'This report is no longer in a sent state.',
-                    'code': 'INVALID_STATE'}
-        return {'success': True, 'scheduled_send_at': send_at.isoformat(),
-                'send_mode': mode}
 
     # ==================================================================
     # Recipients and settings
