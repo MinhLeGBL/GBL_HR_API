@@ -114,6 +114,23 @@ def approve_run(run_id):
         run_id, user_id=g.sid, send_mode=body.get('send_mode')))
 
 
+@periodic_report_bp.route('/runs/<int:run_id>/resend', methods=['POST'])
+@section_required(APPROVE)
+def resend_run(run_id):
+    """Send an already-sent report again, to the CURRENT recipient list.
+
+    Recipients are independent of approval — approval locks the subject, body
+    and figures, not who receives them. So a past report can be forwarded to
+    someone new by adding them and re-sending; the report itself is unchanged
+    and needs no fresh approval.
+
+    Body (optional): {send_mode: 'immediate' | 'scheduled'}.
+    """
+    body = request.get_json(silent=True) or {}
+    return _respond(periodic_report_service.resend(
+        run_id, user_id=g.sid, send_mode=body.get('send_mode')))
+
+
 @periodic_report_bp.route('/runs/<int:run_id>/retry', methods=['POST'])
 @section_required(APPROVE)
 def retry_run(run_id):

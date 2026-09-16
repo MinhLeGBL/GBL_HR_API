@@ -316,6 +316,31 @@ class PeriodicReportRepository:
         finally:
             conn.close()
 
+    def requeue_run(self, run_id: int, user_id: int, scheduled_send_at) -> bool:
+        """Queue an already-SENT run to go out again.
+
+        Separate from `approve_run` and guarded on `status = 'sent'`: this is a
+        re-send of content that was already approved, not a fresh approval, and
+        the two must not be able to stand in for each other.
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE periodic_report_runs
+                       SET status = 'approved',
+                           approved_by = %s,
+                           approved_at = NOW(),
+                           scheduled_send_at = %s,
+                           error = NULL
+                     WHERE id = %s AND status = 'sent'
+                """, (user_id, scheduled_send_at, run_id))
+                changed = cur.rowcount
+            conn.commit()
+            return changed > 0
+        finally:
+            conn.close()
+
     def claim_due_runs(self, now) -> List[int]:
         """Atomically claim approved runs whose send time has arrived.
 

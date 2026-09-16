@@ -583,6 +583,50 @@ class PeriodicReportService:
         return {'run_id': run_id, 'success': True, 'detail': detail,
                 'recipients': len(envelope)}
 
+    def resend(self, run_id: int, user_id: int,
+               send_mode: Optional[str] = None) -> Dict[str, Any]:
+        """Send an already-sent report again, to the CURRENT recipient list.
+
+        Recipients are deliberately independent of approval: approval locks the
+        SUBJECT, BODY and FIGURES — the things that were signed off — but who
+        receives the report is a standing list that changes over time. So a past
+        report can be forwarded to someone new by adding them and re-sending;
+        nothing about the report itself changes.
+
+        No fresh approval is required because the content is unchanged and was
+        already approved. The APPROVE section still gates the route.
+        """
+        run = self.repo.get_run(run_id)
+        if run is None:
+            return {'success': False, 'error': 'Run not found', 'code': 'NOT_FOUND'}
+        if run['status'] != 'sent':
+            return {'success': False,
+                    'error': f"Only a sent report can be sent again — this one "
+                             f"is {run['status']}.",
+                    'code': 'INVALID_STATE'}
+        if not self.repo.list_recipients():
+            return {'success': False,
+                    'error': 'No active recipients are configured.',
+                    'code': 'NO_RECIPIENTS'}
+
+        settings = self.repo.get_settings() or {}
+        mode = send_mode or settings.get('send_mode') or 'immediate'
+        if mode not in ('immediate', 'scheduled'):
+            return {'success': False, 'error': f'Unknown send mode: {mode}',
+                    'code': 'INVALID_INPUT'}
+
+        send_at = (datetime.now() if mode == 'immediate'
+                   else next_send_time(datetime.now(),
+                                       settings.get('send_weekday'),
+                                       settings.get('send_time')))
+        if not self.repo.requeue_run(run_id, user_id, send_at):
+            # Lost a race — something moved it out of `sent` in between.
+            return {'success': False,
+                    'error': 'This report is no longer in a sent state.',
+                    'code': 'INVALID_STATE'}
+        return {'success': True, 'scheduled_send_at': send_at.isoformat(),
+                'send_mode': mode}
+
     # ==================================================================
     # Recipients and settings
     # ==================================================================

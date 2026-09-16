@@ -200,3 +200,31 @@ stored payload when only the prose failed — which was more code for no benefit
 
 A retry whose analysis fails again returns `COMMENTARY_FAILED` (502) rather than
 reporting success; the refreshed figures are still saved.
+
+
+## 0.6.0 — 2026-09-16
+
+Recipients are now independent of approval.
+
+### The rule
+Approval locks the **subject, body and figures** — what was signed off. It does
+NOT lock **who receives them**. The recipient list is global and changes over
+time, so a past report can be forwarded to someone added since.
+
+### Added
+- **`POST /runs/<id>/resend`** — send an already-sent report again, to the
+  CURRENT recipient list. No fresh approval: the content is unchanged and was
+  already approved. Still gated by the APPROVE section.
+- `repository.requeue_run()`, guarded on `status = 'sent'` and kept separate
+  from `approve_run` so a re-send and a first approval cannot stand in for each
+  other.
+
+### Why this works without a schema change
+Nothing about recipients was ever stored on a run — `create_run` has no
+recipient parameter, and `send_run` reads the live list at send time. A test now
+pins that, because it is the guarantee the whole feature rests on.
+
+### Note on `periodic_report_sends`
+Kept as an operational log of send attempts (success, failure detail, timestamp),
+which is what makes a failed delivery diagnosable. It is no longer presented as
+"who received this report" — the UI shows a short "last sent" line instead.
