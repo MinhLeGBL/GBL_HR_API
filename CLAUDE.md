@@ -48,6 +48,7 @@ tests/                     # Mirrors module structure
 | `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
 | `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
 | `modules/reports` | `reports_bp` | `/api/v1/reports` | `ReportsService` | Read-only Oracle reports — two-period sale comparison (revenue/bills/avg + new-vs-returning), CR #78 |
+| `modules/periodic_report` | `periodic_report_bp` | `/api/v1/periodic-report` | `PeriodicReportService` | Weekly sales report — snapshot, .xlsx, email draft, approve-and-send workflow |
 
 ## Import Rules
 

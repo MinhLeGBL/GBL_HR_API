@@ -1,0 +1,13 @@
+[Unit]
+Description=GBL weekly periodic sales report — generate the week that just closed
+Wants=gbl-periodic-report.timer
+
+[Service]
+Type=oneshot
+User=gbladmin
+WorkingDirectory=/home/gbladmin/GBL_HR_API
+Environment="PYTHONPATH=/home/gbladmin/GBL_HR_API"
+Environment="FLASK_ENV=production"
+ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/python scripts/jobs/periodic_report_generate.py
+StandardOutput=append:/var/log/gbl-periodic-report.log
+StandardError=append:/var/log/gbl-periodic-report.log
