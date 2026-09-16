@@ -1,0 +1,13 @@
+[Unit]
+Description=Generate the GBL weekly sales report every Monday at 03:00
+Requires=gbl-periodic-report.service
+
+[Timer]
+# Monday 03:00, not Sunday midnight: the week closes at midnight but sales
+# posted late on Sunday keep arriving in Oracle afterwards, and the figures are
+# frozen into a snapshot the moment this runs.
+OnCalendar=Mon *-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -129,7 +129,9 @@ class PermissionService:
                 ('CRM', 'CRM', 'Customer relationship management and RFM analytics'),
                 ('ACCOUNT_PAYABLE', 'Account Payable', 'AR payable reconciliation tool (CR #60)'),
                 ('HAND_CARRY', 'Hand Carry', 'Hand-carry UPC catalog under Commission (CR #57)'),
-                ('LIVE_COMPARISON', 'Live Sale Comparison', 'Two-period sale comparison report under Report (CR #78)')
+                ('LIVE_COMPARISON', 'Live Sale Comparison', 'Two-period sale comparison report under Report (CR #78)'),
+                ('PERIODIC_REPORT', 'Periodic Report', 'Weekly sales report preview under Report'),
+                ('PERIODIC_REPORT_APPROVE', 'Periodic Report — Approve & Send', 'Edit the draft, approve, and manage recipients for the weekly sales email')
                 ON CONFLICT (code) DO NOTHING
             ''')
 
@@ -161,6 +163,8 @@ class PermissionService:
             'CRM': [],
             'ACCOUNT_PAYABLE': ['HR', 'ACC'],
             'HAND_CARRY': ['HR'],
+            'PERIODIC_REPORT': ['BOD'],
+            'PERIODIC_REPORT_APPROVE': ['BOD'],
         }
         for section_code, depts in section_depts.items():
             for dept in depts:
@@ -179,6 +183,8 @@ class PermissionService:
             'CRM': [],
             'ACCOUNT_PAYABLE': ['ADMIN', 'MANAGER'],
             'HAND_CARRY': ['ADMIN', 'MANAGER', 'STAFF'],
+            'PERIODIC_REPORT': ['ADMIN', 'MANAGER'],
+            'PERIODIC_REPORT_APPROVE': ['ADMIN'],
         }
         for section_code, roles in section_roles.items():
             for role in roles:

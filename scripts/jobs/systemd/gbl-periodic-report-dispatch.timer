@@ -1,0 +1,13 @@
+[Unit]
+Description=Send approved GBL weekly sales reports as they fall due
+Requires=gbl-periodic-report-dispatch.service
+
+[Timer]
+# Every 15 minutes. An approval with send mode 'immediate' is picked up by the
+# next tick, so this interval is the worst-case delay between pressing Approve
+# and the email going out.
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

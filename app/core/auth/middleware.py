@@ -122,3 +122,36 @@ def admin_or_it_manager_required(f):
         }), 403
 
     return decorated
+
+
+def section_required(section_code):
+    """Decorator to require access to a permission SECTION.
+
+    Sections are the unit of permission in this app (see the `permissions`
+    module): access resolves through role, department, and per-user
+    inclusion/exclusion, with admin allowed everything. Until this decorator
+    existed, sections only drove which nav entries the frontend rendered — which
+    is fine for hiding a page, but not for gating an action that sends email to
+    the management board. A hidden button is not an access control.
+
+    Usage:
+        @bp.route('/approve', methods=['POST'])
+        @section_required('PERIODIC_REPORT_APPROVE')
+        def approve():
+            ...
+    """
+    def decorator(f):
+        @wraps(f)
+        @token_required
+        def decorated(*args, **kwargs):
+            from app.modules.permissions.service import PermissionService
+            sections = PermissionService().get_user_permissions_v2(
+                g.sid, g.role, getattr(g, 'department_code', None))
+            if not any(s['section_code'] == section_code for s in sections):
+                return jsonify({
+                    'success': False,
+                    'error': 'You do not have access to this action',
+                }), 403
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
