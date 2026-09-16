@@ -1,12 +1,19 @@
 [Unit]
-Description=Generate the GBL weekly sales report every Monday at 03:00
+Description=Generate the GBL weekly sales report every Monday 03:00 Vietnam time
 Requires=gbl-periodic-report.service
 
 [Timer]
-# Monday 03:00, not Sunday midnight: the week closes at midnight but sales
-# posted late on Sunday keep arriving in Oracle afterwards, and the figures are
-# frozen into a snapshot the moment this runs.
-OnCalendar=Mon *-*-* 03:00:00
+# 20:00 UTC Sunday == 03:00 Monday in Asia/Ho_Chi_Minh (UTC+7), the server
+# clock being UTC. Expressed in UTC rather than with an OnCalendar timezone
+# suffix so it works on systemd older than v252.
+#
+# Monday 03:00 local, not Sunday midnight: the week closes at midnight but
+# sales posted late on Sunday keep arriving in Oracle afterwards, and the
+# figures are frozen into a snapshot the moment this runs.
+#
+# The paired .service sets TZ=Asia/Ho_Chi_Minh — both must change together, or
+# the job reports the wrong week. See that file for why.
+OnCalendar=Sun *-*-* 20:00:00
 Persistent=true
 
 [Install]
