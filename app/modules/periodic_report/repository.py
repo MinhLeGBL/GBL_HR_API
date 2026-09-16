@@ -296,20 +296,54 @@ class PeriodicReportRepository:
         finally:
             conn.close()
 
-    def approve_run(self, run_id: int, user_id: int, scheduled_send_at) -> bool:
-        """Mark a pending run approved. Guarded on the current status so two
-        approvals racing cannot both win — the second updates zero rows."""
+    def approve_run(self, run_id: int, user_id: int) -> bool:
+        """Mark a pending run approved. Does NOT queue it — sending is a
+        separate decision, made with the Send action.
+
+        `scheduled_send_at` is cleared to NULL, which is what keeps an approved
+        run out of `claim_due_runs`: the dispatcher matches on
+        `scheduled_send_at <= now`, and NULL never compares true. So "approved"
+        and "queued" are distinguishable without another column.
+
+        Guarded on the current status so two approvals racing cannot both win.
+        """
         conn = self._connect()
         try:
             with conn.cursor() as cur:
-                cur.execute('''
+                cur.execute("""
                     UPDATE periodic_report_runs
                        SET status = 'approved',
                            approved_by = %s,
                            approved_at = NOW(),
-                           scheduled_send_at = %s
+                           scheduled_send_at = NULL
                      WHERE id = %s AND status = 'pending_approval'
-                ''', (user_id, scheduled_send_at, run_id))
+                """, (user_id, run_id))
+                changed = cur.rowcount
+            conn.commit()
+            return changed > 0
+        finally:
+            conn.close()
+
+    def queue_run(self, run_id: int, user_id: int, scheduled_send_at) -> bool:
+        """Queue an approved — or already sent — run for delivery.
+
+        One path for both, because there is one Send action: sending a report
+        for the first time and sending it again differ only in what the row
+        happened to say beforehand. Guarded on those two statuses so a run still
+        awaiting approval cannot be sent, and one mid-send cannot be disturbed.
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE periodic_report_runs
+                       SET status = 'approved',
+                           approved_by = %s,
+                           approved_at = NOW(),
+                           scheduled_send_at = %s,
+                           error = NULL
+                     WHERE id = %s AND status IN ('approved', 'sent')
+                """, (user_id, scheduled_send_at, run_id))
                 changed = cur.rowcount
             conn.commit()
             return changed > 0
