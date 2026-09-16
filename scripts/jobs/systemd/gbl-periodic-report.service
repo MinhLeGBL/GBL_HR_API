@@ -8,6 +8,12 @@ User=gbladmin
 WorkingDirectory=/home/gbladmin/GBL_HR_API
 Environment="PYTHONPATH=/home/gbladmin/GBL_HR_API"
 Environment="FLASK_ENV=production"
+# The server clock is UTC; the business runs on Vietnam time. The job derives
+# its whole reporting window from `date.today()`, so it MUST see the local date:
+# the timer fires at 20:00 UTC Sunday, which is 03:00 Monday in Vietnam. Without
+# this line the process would see Sunday and `last_complete_week()` would return
+# the week BEFORE the one that just closed — a silently week-old report.
+Environment="TZ=Asia/Ho_Chi_Minh"
 ExecStart=/home/gbladmin/GBL_HR_API/.venv/bin/python scripts/jobs/periodic_report_generate.py
 StandardOutput=append:/var/log/gbl-periodic-report.log
 StandardError=append:/var/log/gbl-periodic-report.log
