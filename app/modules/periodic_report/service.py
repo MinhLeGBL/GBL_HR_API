@@ -14,9 +14,11 @@ Oracle is live and moves during the day — a verification run once saw qty go
 would not be the numbers emailed. `generate_run` writes the aggregates once and
 every later read serves that payload.
 """
+import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from .aggregate import METRICS, aggregate, delta_for, is_unfavourable
 from .excel import SHEET_NAMES, build_workbook_bytes
@@ -30,6 +32,18 @@ from .repository import PeriodicReportRepository
 # subunit in practice, and the exact figures survive in the stored workbook,
 # whose cells still hold the Decimals.
 _ROUND_TO = 2
+
+# The server clock is UTC; the business runs on Vietnam time. Every send time a
+# user picks is meant in THEIR timezone, so schedules are computed here and
+# stored as timezone-AWARE values. Naive `datetime.now()` on a UTC server
+# silently turned "00:30" into 00:30 UTC — 07:30 in Vietnam — and the browser
+# then faithfully displayed 07:30 for a time the user had typed as 00:30.
+REPORT_TZ = ZoneInfo(os.getenv('REPORT_TIMEZONE', 'Asia/Ho_Chi_Minh'))
+
+
+def now_local() -> datetime:
+    """Current time as an AWARE datetime in the report timezone."""
+    return datetime.now(REPORT_TZ)
 
 DEFAULT_SUBJECT_TEMPLATE = 'Báo cáo bán hàng định kỳ — Tuần {{week_no}}/{{week_year}}'
 
@@ -273,6 +287,21 @@ class PeriodicReportService:
         other status is replaced, so a retry after a failure is safe.
         """
         as_of = as_of or date.today()
+        # Normalise to the canonical day for the week being reported: the day
+        # after that week ends. Runs are keyed by `as_of`, but EVERY day from
+        # Mon-Sun reports the same closed week — so a manual run on Wednesday
+        # used to create a SECOND row for a week that already had one, and the
+        # week selector showed it twice. Collapsing to the canonical day makes
+        # `ON CONFLICT (as_of)` replace the existing run, which is what "run it
+        # again for this week" should mean.
+        week_end = last_complete_week(as_of, week_start)[1]
+        as_of = week_end + timedelta(days=1)
+        # Default MTD/YTD to that same closing Sunday. Previously only the job
+        # passed `through`, so any other caller silently got windows running to
+        # the Monday — a day with almost no sales against a full prior-year day.
+        # The correct behaviour should not depend on the caller remembering.
+        if through is None:
+            through = week_end
 
         existing = self.repo.get_run_by_as_of(as_of)
         if existing and existing['status'] == 'sent':
@@ -557,8 +586,8 @@ class PeriodicReportService:
             self.repo.update_settings(fields)
             settings = merged
 
-        send_at = (datetime.now() if mode == 'immediate'
-                   else next_send_time(datetime.now(),
+        send_at = (now_local() if mode == 'immediate'
+                   else next_send_time(now_local(),
                                        settings.get('send_weekday'),
                                        settings.get('send_time')))
         if not self.repo.queue_run(run_id, user_id, send_at):
@@ -579,7 +608,7 @@ class PeriodicReportService:
         selects it, so a slow send that overruns the timer interval cannot have
         the next tick pick up the same run and email the report twice.
         """
-        now = now or datetime.now()
+        now = now or now_local()
         results = []
         for run_id in self.repo.claim_due_runs(now):
             results.append(self.send_run(run_id))
@@ -761,13 +790,19 @@ def next_send_time(now: datetime, weekday: Optional[int],
                    at: Optional[time]) -> datetime:
     """The next occurrence of `weekday` at `at`, strictly after `now`.
 
-    Falls back to `now` when either is unset, so an approval can never be queued
-    to a time that will not arrive.
+    `now` must be timezone-AWARE and the result carries the same zone, because
+    the weekday and time the user picked are meant in THEIR timezone. Combining
+    them into a naive value would let the server's own zone decide, which is how
+    "00:30" became 00:30 UTC (07:30 in Vietnam).
+
+    Falls back to `now` when either is unset, so a send can never be queued to a
+    time that will not arrive.
     """
     if weekday is None or at is None:
         return now
     days_ahead = (weekday - now.weekday()) % 7
-    candidate = datetime.combine(now.date() + timedelta(days=days_ahead), at)
+    candidate = datetime.combine(now.date() + timedelta(days=days_ahead), at,
+                                 tzinfo=now.tzinfo)
     if candidate <= now:
         candidate += timedelta(days=7)
     return candidate

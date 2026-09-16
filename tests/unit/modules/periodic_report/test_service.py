@@ -4,7 +4,7 @@ Oracle and Postgres are mocked throughout — what is exercised here is the
 payload shape the frontend binds to, the template renderer, the send-time
 scheduling maths, and the approval state machine.
 """
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal as D
 from unittest.mock import MagicMock, patch
 
@@ -696,3 +696,86 @@ class TestRecipientsAreNotBoundToARun:
         from app.modules.periodic_report.repository import PeriodicReportRepository
         sig = inspect.signature(PeriodicReportRepository.create_run)
         assert not any('recipient' in p for p in sig.parameters)
+
+
+class TestScheduleIsTimezoneAware:
+    """A send time the user picks is meant in THEIR timezone.
+
+    Observed in production: the user chose 00:30 and it was stored as 00:30 UTC
+    — 07:30 in Vietnam — because the server clock is UTC and `datetime.now()`
+    was naive. The browser then faithfully displayed 07:30 for a time typed as
+    00:30.
+    """
+
+    def test_now_local_is_aware(self):
+        from app.modules.periodic_report.service import now_local
+        assert now_local().tzinfo is not None
+
+    def test_next_send_time_keeps_the_callers_zone(self):
+        from app.modules.periodic_report.service import REPORT_TZ
+        now = datetime(2026, 9, 16, 9, 0, tzinfo=REPORT_TZ)   # Wed
+        result = next_send_time(now, 3, time(0, 30))          # Thu 00:30
+        assert result.tzinfo is not None
+        assert result == datetime(2026, 9, 17, 0, 30, tzinfo=REPORT_TZ)
+
+    def test_the_stored_instant_is_the_users_clock_not_the_servers(self):
+        # 00:30 in Vietnam is 17:30 UTC the previous day. Before the fix this
+        # became 00:30 UTC, seven hours late.
+        from app.modules.periodic_report.service import REPORT_TZ
+        now = datetime(2026, 9, 16, 9, 0, tzinfo=REPORT_TZ)
+        result = next_send_time(now, 3, time(0, 30))
+        assert result.astimezone(timezone.utc) == \
+            datetime(2026, 9, 16, 17, 30, tzinfo=timezone.utc)
+
+    def test_a_time_already_past_today_rolls_a_week(self):
+        from app.modules.periodic_report.service import REPORT_TZ
+        now = datetime(2026, 9, 17, 9, 0, tzinfo=REPORT_TZ)   # Thu 09:00
+        assert next_send_time(now, 3, time(0, 30)) == \
+            datetime(2026, 9, 24, 0, 30, tzinfo=REPORT_TZ)
+
+    def test_an_immediate_send_is_aware_too(self, service):
+        service.repo.get_run.return_value = {'id': 1, 'status': 'approved',
+                                             'as_of': date(2026, 9, 14)}
+        service.repo.list_recipients.return_value = [{'email': 'a@b.c', 'kind': 'to'}]
+        service.repo.queue_run.return_value = True
+        service.send(1, user_id=7, mode='immediate')
+        queued_at = service.repo.queue_run.call_args[0][2]
+        assert queued_at.tzinfo is not None
+
+
+class TestRunsAreKeyedByTheWeekTheyReport:
+    """Observed in production: the week selector showed Week 37 twice.
+
+    Runs are keyed by `as_of`, but every day Mon-Sun reports the SAME closed
+    week — so a manual run mid-week created a second row for a week that
+    already had one.
+    """
+
+    def test_any_day_of_the_week_collapses_to_one_as_of(self, service):
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        seen = set()
+        for day in range(14, 21):                  # Mon 14th .. Sun 20th
+            service.repo.create_run.reset_mock()
+            with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+                service.generate_run(date(2026, 9, day))
+            seen.add(service.repo.create_run.call_args.kwargs['as_of'])
+        assert seen == {date(2026, 9, 14)}
+
+    def test_the_canonical_day_is_the_one_after_the_week_ends(self, service):
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+            service.generate_run(date(2026, 9, 16))
+        kwargs = service.repo.create_run.call_args.kwargs
+        assert kwargs['as_of'] == date(2026, 9, 14)
+        assert kwargs['through_date'] == date(2026, 9, 13)
+
+    def test_a_rerun_mid_week_REPLACES_rather_than_duplicating(self, service):
+        # It looks up the existing run under the canonical key, so ON CONFLICT
+        # replaces it instead of inserting a rival row for the same week.
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+            service.generate_run(date(2026, 9, 17))
+        assert service.repo.get_run_by_as_of.call_args[0][0] == date(2026, 9, 14)

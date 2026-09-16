@@ -255,3 +255,34 @@ covering both a first send and a re-send.
 ### Removed
 - `resend()` and `requeue_run`'s sent-only guard — both folded into `send()`
   and `queue_run`.
+
+
+## 0.7.1 — 2026-09-17
+
+Two bugs found on the deployed system.
+
+### Fixed: a schedule was interpreted in the SERVER's timezone, not the user's
+The user picked **00:30** and it was stored as **00:30 UTC** — 07:30 in Vietnam.
+The browser then faithfully displayed 07:30 for a time typed as 00:30, and the
+run was not due for another seven hours.
+
+`datetime.now()` on a UTC server is naive UTC, and that is what reached a
+`TIMESTAMPTZ` column. Schedules are now computed as timezone-AWARE values in a
+configurable report timezone (`REPORT_TIMEZONE`, default `Asia/Ho_Chi_Minh`),
+so `00:30` means 00:30 where the user is.
+
+Same class of bug as the systemd timer fixed in 0.7.0 — that fix addressed the
+TIMER and left the APPLICATION untouched.
+
+### Fixed: the week selector showed the same week twice
+Runs are keyed by `as_of`, but **every day Mon-Sun reports the same closed
+week** — so a manual run mid-week created a second row for a week that already
+had one. `generate_run` now normalises `as_of` to the canonical day for the week
+being reported (the day after it ends), so `ON CONFLICT (as_of)` replaces the
+existing run, which is what "run it again for this week" should mean.
+
+### Also
+`through` now defaults to that same closing Sunday. Previously only the job
+passed it, so any other caller silently got MTD/YTD windows running to the
+Monday — a day with almost no sales measured against a full prior-year day. The
+correct behaviour should not depend on the caller remembering.
