@@ -222,47 +222,146 @@ class TestNextSendTime:
 
 
 class TestApproval:
+    """Approval signs off the CONTENT. It does not send, and deliberately does
+    not require recipients — the list is edited independently and may be empty
+    at that moment."""
+
     def _run(self, status='pending_approval'):
         return {'id': 1, 'status': status, 'as_of': date(2026, 9, 14)}
 
+    def test_approving_does_not_queue_anything(self, service):
+        service.repo.get_run.return_value = self._run()
+        service.repo.approve_run.return_value = True
+        result = service.approve(1, user_id=7)
+        assert result['success'] is True
+        # No send time is set: `queue_run` is the Send action's job.
+        service.repo.queue_run.assert_not_called()
+
+    def test_approving_does_NOT_require_recipients(self, service):
+        service.repo.get_run.return_value = self._run()
+        service.repo.list_recipients.return_value = []
+        service.repo.approve_run.return_value = True
+        assert service.approve(1, user_id=7)['success'] is True
+
     def test_rejects_a_run_that_is_not_pending(self, service):
         service.repo.get_run.return_value = self._run('sent')
-        result = service.approve(1, user_id=7)
-        assert result['success'] is False
-        assert result['code'] == 'INVALID_STATE'
+        assert service.approve(1, user_id=7)['code'] == 'INVALID_STATE'
 
     def test_rejects_a_missing_run(self, service):
         service.repo.get_run.return_value = None
         assert service.approve(1, user_id=7)['code'] == 'NOT_FOUND'
 
-    def test_refuses_to_approve_with_no_recipients(self, service):
+    def test_losing_the_approval_race_is_reported_not_swallowed(self, service):
         service.repo.get_run.return_value = self._run()
-        service.repo.list_recipients.return_value = []
-        result = service.approve(1, user_id=7)
-        assert result['code'] == 'NO_RECIPIENTS'
+        service.repo.approve_run.return_value = False
+        assert service.approve(1, user_id=7)['code'] == 'INVALID_STATE'
 
-    def test_immediate_mode_queues_it_now(self, service):
+
+class TestSend:
+    """One Send action covers the first send and a re-send — they differ only in
+    what the row said beforehand."""
+
+    def _run(self, status='approved'):
+        return {'id': 1, 'status': status, 'as_of': date(2026, 9, 14)}
+
+    def _recips(self, service, kinds=('to',)):
+        service.repo.list_recipients.return_value = [
+            {'email': f'{k}@b.c', 'kind': k} for k in kinds]
+
+    def test_sends_an_approved_run_now(self, service):
         service.repo.get_run.return_value = self._run()
-        service.repo.list_recipients.return_value = [{'email': 'a@b.c'}]
-        service.repo.approve_run.return_value = True
-        result = service.approve(1, user_id=7, send_mode='immediate')
+        self._recips(service)
+        service.repo.queue_run.return_value = True
+        result = service.send(1, user_id=7, mode='immediate')
         assert result['success'] is True
         assert result['send_mode'] == 'immediate'
 
-    def test_losing_the_approval_race_is_reported_not_swallowed(self, service):
-        # Another approver won between the status read and the write; the
-        # guarded UPDATE matches zero rows.
-        service.repo.get_run.return_value = self._run()
-        service.repo.list_recipients.return_value = [{'email': 'a@b.c'}]
-        service.repo.approve_run.return_value = False
-        result = service.approve(1, user_id=7)
-        assert result['success'] is False
-        assert result['code'] == 'INVALID_STATE'
+    def test_the_SAME_action_sends_an_already_sent_run_again(self, service):
+        service.repo.get_run.return_value = self._run('sent')
+        self._recips(service)
+        service.repo.queue_run.return_value = True
+        assert service.send(1, user_id=7, mode='immediate')['success'] is True
 
-    def test_rejects_an_unknown_send_mode(self, service):
+    def test_refuses_a_run_still_awaiting_approval(self, service):
+        service.repo.get_run.return_value = self._run('pending_approval')
+        self._recips(service)
+        result = service.send(1, user_id=7)
+        assert result['code'] == 'INVALID_STATE'
+        assert 'approve it before sending' in result['error']
+
+    def test_refuses_one_mid_send(self, service):
+        service.repo.get_run.return_value = self._run('sending')
+        self._recips(service)
+        assert service.send(1, user_id=7)['code'] == 'INVALID_STATE'
+
+    def test_REQUIRES_a_to_recipient(self, service):
+        # Unlike approval. A send with no visible addressee is refused by the
+        # mailer anyway, so it is better refused here.
         service.repo.get_run.return_value = self._run()
-        service.repo.list_recipients.return_value = [{'email': 'a@b.c'}]
-        assert service.approve(1, 7, send_mode='whenever')['code'] == 'INVALID_INPUT'
+        self._recips(service, kinds=('cc',))
+        assert service.send(1, user_id=7)['code'] == 'NO_RECIPIENTS'
+
+    def test_refuses_with_an_empty_list(self, service):
+        service.repo.get_run.return_value = self._run()
+        service.repo.list_recipients.return_value = []
+        assert service.send(1, user_id=7)['code'] == 'NO_RECIPIENTS'
+
+    def test_a_schedule_given_at_send_time_BECOMES_the_default(self, service):
+        # Same contract as the recipient list: set it once, it stays until
+        # changed.
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        service.repo.queue_run.return_value = True
+        service.send(1, user_id=7, mode='scheduled',
+                     send_weekday=2, send_time='08:30')
+        saved = service.repo.update_settings.call_args[0][0]
+        assert saved['send_mode'] == 'scheduled'
+        assert saved['send_weekday'] == 2
+        assert saved['send_time'] == time(8, 30)
+
+    def test_a_later_send_reuses_the_saved_schedule(self, service):
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        service.repo.queue_run.return_value = True
+        service.repo.get_settings.return_value = {
+            **service.repo.get_settings.return_value,
+            'send_weekday': 2, 'send_time': time(8, 30)}
+        result = service.send(1, user_id=7, mode='scheduled')
+        assert result['success'] is True
+        # Nothing new to persist, so settings are untouched apart from the mode.
+        assert result['send_mode'] == 'scheduled'
+
+    def test_scheduling_without_a_time_anywhere_is_refused(self, service):
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        service.repo.get_settings.return_value = {
+            **service.repo.get_settings.return_value,
+            'send_weekday': None, 'send_time': None}
+        result = service.send(1, user_id=7, mode='scheduled')
+        assert result['code'] == 'INVALID_INPUT'
+
+    def test_rejects_a_weekday_out_of_range(self, service):
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        assert service.send(1, 7, mode='scheduled',
+                            send_weekday=9)['code'] == 'INVALID_INPUT'
+
+    def test_rejects_a_malformed_time(self, service):
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        assert service.send(1, 7, mode='scheduled',
+                            send_time='half eight')['code'] == 'INVALID_INPUT'
+
+    def test_rejects_an_unknown_mode(self, service):
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        assert service.send(1, 7, mode='whenever')['code'] == 'INVALID_INPUT'
+
+    def test_losing_the_queue_race_is_reported(self, service):
+        service.repo.get_run.return_value = self._run()
+        self._recips(service)
+        service.repo.queue_run.return_value = False
+        assert service.send(1, user_id=7)['code'] == 'INVALID_STATE'
 
 
 class TestRecipientValidation:
@@ -584,3 +683,16 @@ class TestRetryGeneration:
         # The figures were still saved — only the prose is missing.
         assert service.repo.create_run.call_args.kwargs['commentary_error'] \
             == 'still broken'
+
+
+class TestRecipientsAreNotBoundToARun:
+    def test_a_run_never_stores_recipients(self, service):
+        # The guarantee behind re-sending: `create_run` has no recipient
+        # parameter, so nothing about who receives a report is frozen onto it.
+        import inspect
+        params = inspect.signature(
+            service.repo.create_run).parameters if not isinstance(
+                service.repo, MagicMock) else None
+        from app.modules.periodic_report.repository import PeriodicReportRepository
+        sig = inspect.signature(PeriodicReportRepository.create_run)
+        assert not any('recipient' in p for p in sig.parameters)
