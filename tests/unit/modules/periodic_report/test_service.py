@@ -779,3 +779,118 @@ class TestRunsAreKeyedByTheWeekTheyReport:
         with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
             service.generate_run(date(2026, 9, 17))
         assert service.repo.get_run_by_as_of.call_args[0][0] == date(2026, 9, 14)
+
+
+class TestBackfill:
+    """Past weeks are stored as `historical` reports: figures, workbook and the
+    email template, with NO analysis and no API call."""
+
+    def _go(self, service, week_end=date(2026, 9, 13)):
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 99
+        return service.backfill_week(week_end, DEPT_ROWS, STORE_ROWS)
+
+    def test_NEVER_calls_the_model(self, service):
+        with patch('app.modules.periodic_report.commentary.generate_commentary') as gen:
+            self._go(service)
+        gen.assert_not_called()
+
+    def test_stores_it_as_historical(self, service):
+        self._go(service)
+        assert service.repo.create_run.call_args.kwargs['status'] == 'historical'
+
+    def test_records_no_failure_because_skipping_analysis_is_deliberate(self, service):
+        # Otherwise the page would show "the analysis could not be generated"
+        # on every past week.
+        self._go(service)
+        assert service.repo.create_run.call_args.kwargs['commentary_error'] is None
+
+    def test_stores_a_workbook(self, service):
+        self._go(service)
+        assert service.repo.create_run.call_args.kwargs['workbook'][:2] == b'PK'
+
+    def test_uses_the_canonical_as_of_and_closing_sunday(self, service):
+        self._go(service, week_end=date(2026, 9, 13))
+        kw = service.repo.create_run.call_args.kwargs
+        assert kw['as_of'] == date(2026, 9, 14)
+        assert kw['through_date'] == date(2026, 9, 13)
+
+    def test_NEVER_overwrites_an_existing_run(self, service):
+        # Weeks already generated may carry a real, paid analysis.
+        service.repo.get_run_by_as_of.return_value = {'id': 1, 'status': 'sent'}
+        result = service.backfill_week(date(2026, 9, 13), DEPT_ROWS, STORE_ROWS)
+        assert result['skipped'] is True
+        service.repo.create_run.assert_not_called()
+
+    def test_renders_the_template_without_analysis(self, service):
+        self._go(service)
+        body = service.repo.create_run.call_args.kwargs['email_body']
+        assert '{{commentary}}' not in body
+        assert '{{' not in body
+
+    def test_workbook_rows_are_limited_to_the_weeks_own_span(self, service):
+        # One shared fetch covers the whole backfill; a week's Raw Data sheet
+        # must not contain rows from after it.
+        future = {**DEPT_ROWS[0], 'day': date(2027, 1, 1)}
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch('app.modules.periodic_report.service.build_workbook_bytes',
+                   return_value=b'PK') as build:
+            service.backfill_week(date(2026, 9, 13), DEPT_ROWS + [future], STORE_ROWS)
+        passed_rows = build.call_args[0][1]
+        assert future not in passed_rows
+
+    def test_figures_match_a_live_generation_of_the_same_week(self, service):
+        # The backfill must produce what the Monday job would have.
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+            service.generate_run(date(2026, 9, 14))
+        live = service.repo.create_run.call_args.kwargs['payload']
+        service.repo.create_run.reset_mock()
+        service.backfill_week(date(2026, 9, 13), DEPT_ROWS, STORE_ROWS)
+        backfilled = service.repo.create_run.call_args.kwargs['payload']
+        assert backfilled['periods'] == live['periods']
+
+
+class TestHistoricalRunsInTheFlow:
+    def _run(self, **over):
+        return {'id': 1, 'status': 'historical', 'as_of': date(2026, 9, 14), **over}
+
+    def test_a_historical_report_can_be_sent(self, service):
+        service.repo.get_run.return_value = self._run()
+        service.repo.list_recipients.return_value = [{'email': 'a@b.c', 'kind': 'to'}]
+        service.repo.queue_run.return_value = True
+        assert service.send(1, user_id=7, mode='immediate')['success'] is True
+
+    def test_a_historical_report_is_not_approvable(self, service):
+        # Nothing to sign off: it was never a live draft.
+        service.repo.get_run.return_value = self._run()
+        assert service.approve(1, user_id=7)['code'] == 'INVALID_STATE'
+
+    def test_a_historical_report_can_NEVER_trigger_the_model(self, service):
+        # No retry path from history to a paid API call.
+        service.repo.get_run.return_value = self._run()
+        assert service.retry_generation(1)['code'] == 'INVALID_STATE'
+
+
+class TestWeeksBetween:
+    def _weeks(self, a, b):
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            'bf', Path(__file__).resolve().parents[4]
+            / 'scripts' / 'jobs' / 'periodic_report_backfill.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.weeks_between(a, b)
+
+    def test_2026_through_week_37_is_37_weeks(self):
+        weeks = self._weeks(date(2026, 1, 1), date(2026, 9, 13))
+        assert len(weeks) == 37
+        assert weeks[0] == (date(2025, 12, 29), date(2026, 1, 4))
+        assert weeks[-1] == (date(2026, 9, 7), date(2026, 9, 13))
+
+    def test_every_week_is_monday_to_sunday(self):
+        for begin, end in self._weeks(date(2026, 1, 1), date(2026, 9, 13)):
+            assert begin.weekday() == 0 and end.weekday() == 6

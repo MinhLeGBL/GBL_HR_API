@@ -354,6 +354,57 @@ class PeriodicReportService:
         return {'success': True, 'run_id': run_id, 'as_of': as_of.isoformat(),
                 'commentary_error': commentary_error}
 
+    def backfill_week(self, week_end: date, dept_rows, store_rows,
+                      week_start: str = 'monday') -> Dict[str, Any]:
+        """Store a past week as a `historical` report, from rows already fetched.
+
+        Used by the backfill script, which fetches Oracle ONCE for the whole
+        range and calls this per week — rather than issuing a full
+        history-spanning query per week against the live database.
+
+        Deliberately calls NO model. The analysis is paid for once per report,
+        by the Monday job; history is figures, workbook and template only. A
+        person can still write the analysis for any single week via Edit.
+
+        Never overwrites an existing run: weeks already generated — including
+        ones carrying a real, paid analysis — are left untouched.
+        """
+        as_of = week_end + timedelta(days=1)
+        if self.repo.get_run_by_as_of(as_of) is not None:
+            return {'success': True, 'skipped': True, 'as_of': as_of.isoformat()}
+
+        windows = period_windows(as_of, week_start, week_end)
+        fetch_from, fetch_to = fetch_span(windows)
+
+        # Narrow the shared rows to THIS week's own span. The figures would be
+        # unaffected either way (aggregation filters by window), but the
+        # workbook's Raw Data sheet shows every row it is given — and week 1's
+        # sheet must not contain months of data from after that week.
+        dept = [r for r in dept_rows if fetch_from <= r['day'] <= fetch_to]
+        store = [r for r in store_rows if fetch_from <= r['day'] <= fetch_to]
+
+        payload = self._snapshot_from_rows(
+            as_of, week_start, week_end, windows, fetch_from, fetch_to,
+            dept, store)
+        workbook = build_workbook_bytes(windows, dept, store)
+
+        settings = self.repo.get_settings() or {}
+        subject = render_template(
+            settings.get('subject_template') or DEFAULT_SUBJECT_TEMPLATE, payload)
+        body = render_template(
+            settings.get('body_template') or DEFAULT_BODY_TEMPLATE, payload, '')
+
+        run_id = self.repo.create_run(
+            as_of=as_of, week_start=week_start, through_date=week_end,
+            status='historical', payload=payload, workbook=workbook,
+            email_subject=subject, email_body=body, error=None,
+            # Not a failure — the analysis was deliberately not generated — so
+            # no error is recorded and the page raises no "could not be
+            # generated" notice.
+            commentary_error=None)
+        return {'success': True, 'skipped': False, 'run_id': run_id,
+                'as_of': as_of.isoformat()}
+
     # ==================================================================
     # Email draft
     # ==================================================================
@@ -498,7 +549,8 @@ class PeriodicReportService:
                     'code': 'INVALID_INPUT'}
         if not self.repo.update_email_draft(run_id, subject, body):
             return {'success': False,
-                    'error': 'Only a run awaiting approval can be edited.',
+                    'error': 'Only a draft awaiting approval, or a historical '
+                             'report, can be edited.',
                     'code': 'INVALID_STATE'}
         return {'success': True}
 
@@ -543,7 +595,9 @@ class PeriodicReportService:
         run = self.repo.get_run(run_id)
         if run is None:
             return {'success': False, 'error': 'Run not found', 'code': 'NOT_FOUND'}
-        if run['status'] not in ('approved', 'sent'):
+        # `historical` is a backfilled past week: nothing to approve (it was
+        # never a live draft), but it can be forwarded like any sent report.
+        if run['status'] not in ('approved', 'sent', 'historical'):
             return {'success': False,
                     'error': f"Run is {run['status']} — approve it before sending."
                              if run['status'] == 'pending_approval' else
