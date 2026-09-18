@@ -320,3 +320,33 @@ while Oracle holds data back to 2024.
 
 ### Verified against production (dry run, 2026-09-17)
 2026 through ISO week 37: **37 weeks, 3 already exist (kept), 34 to create.**
+
+
+## 0.8.1 — 2026-09-18
+
+### Fixed: a complete month was never reported
+Reported from production on week 36 (31 Aug - 6 Sep), whose MTD sheet showed six
+days of September.
+
+A week that straddles a month boundary now reports the month that **ended**
+inside it, in full. Week 36's MTD is the whole of August.
+
+Without this, a complete month is never reported at all: the last week ending in
+August stops on the 30th, and the next week jumps to September — so August is
+only ever seen a day short. That happens in **every month whose last day is not
+a Sunday**. Six days of a new month is also a poor comparison against six days
+of the prior year, while a complete month is the natural unit.
+
+The rule applies only when the report is **anchored to that week**
+(`through <= week_end`), which production always is. An ad-hoc run asking for a
+later cut-off — `--as-of 9 Sep` with no `--through` — still gets month-to-date on
+the 9th.
+
+A week spanning New Year gets the same treatment: it now reports the whole of
+December, which it never did before.
+
+### Known, not changed
+**YTD has the same flaw one level up.** In the week spanning New Year, YTD is
+just the first few days of January, and a complete year is never reported. The
+same rule would fix it; left alone for now because YTD was explicitly reported
+as correct.

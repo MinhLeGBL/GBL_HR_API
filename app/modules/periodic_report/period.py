@@ -15,7 +15,8 @@ Window rules
 `through` defaults to `as_of`. The scheduled Monday run passes the last closed
 day instead — see `period_windows`.
 """
-from datetime import timedelta
+from calendar import monthrange
+from datetime import date, timedelta
 
 # Women/Men pairs collapse to their shared category; everything else passes
 # through. Explicit rather than "strip a leading W/M" so a future code such as
@@ -68,6 +69,11 @@ def previous_week_window(cur_start, cur_end):
     return cur_start - shift, cur_end - shift
 
 
+def month_end(d):
+    """The last day of `d`'s month."""
+    return d.replace(day=monthrange(d.year, d.month)[1])
+
+
 def last_complete_week(as_of, week_start='monday'):
     """The last complete week on or before `as_of`, as (begin, end) inclusive.
 
@@ -104,6 +110,15 @@ def period_windows(as_of, week_start='monday', through=None):
     Monday 1 September with `through` = Sunday 31 August, MTD is the whole of
     August, not an inverted 1 Sep .. 31 Aug range. The same rule makes a run on
     1 January report the prior year in full.
+
+    **When the reported week straddles a month boundary, MTD reports the month
+    that ENDED inside it, in full.** Week 36 of 2026 runs 31 Aug - 6 Sep; MTD
+    there is the whole of August, not the first six days of September. Without
+    this, a complete month is never reported at all: the last week ending in
+    August stops on the 30th, and the next week jumps to September — so August
+    is only ever seen a day short. That happens in every month whose last day is
+    not a Sunday. Six days of a new month is also a poor comparison against six
+    days of the prior year, while a complete month is the natural unit.
     """
     week_begin, week_end = last_complete_week(as_of, week_start)
     windows = {
@@ -111,10 +126,27 @@ def period_windows(as_of, week_start='monday', through=None):
     }
 
     period_end = as_of if through is None else through
-    for label, start in (('MTD', period_end.replace(day=1)),
-                         ('YTD', period_end.replace(month=1, day=1))):
-        windows[label] = ((start, period_end),
-                          (shift_year(start), shift_year(period_end)))
+
+    if week_begin.month != week_end.month and period_end <= week_end:
+        # A month ended inside the reported week, and the report is anchored to
+        # that week. Report the month whole.
+        #
+        # The `period_end <= week_end` guard matters: an ad-hoc run that asks
+        # for a LATER cut-off ("--as-of 9 Sep", no --through) is asking for
+        # month-to-date on the 9th, and should get it, even though the week it
+        # reports on happens to straddle. Production always anchors to the week,
+        # so the scheduled run always takes the branch above.
+        mtd_from = week_begin.replace(day=1)
+        mtd_to = month_end(week_begin)
+    else:
+        mtd_from = period_end.replace(day=1)
+        mtd_to = period_end
+    windows['MTD'] = ((mtd_from, mtd_to),
+                      (shift_year(mtd_from), shift_year(mtd_to)))
+
+    ytd_from = period_end.replace(month=1, day=1)
+    windows['YTD'] = ((ytd_from, period_end),
+                      (shift_year(ytd_from), shift_year(period_end)))
     return windows
 
 
