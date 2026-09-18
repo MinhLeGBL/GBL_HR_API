@@ -4,7 +4,7 @@ Oracle and Postgres are mocked throughout — what is exercised here is the
 payload shape the frontend binds to, the template renderer, the send-time
 scheduling maths, and the approval state machine.
 """
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal as D
 from unittest.mock import MagicMock, patch
 
@@ -696,3 +696,201 @@ class TestRecipientsAreNotBoundToARun:
         from app.modules.periodic_report.repository import PeriodicReportRepository
         sig = inspect.signature(PeriodicReportRepository.create_run)
         assert not any('recipient' in p for p in sig.parameters)
+
+
+class TestScheduleIsTimezoneAware:
+    """A send time the user picks is meant in THEIR timezone.
+
+    Observed in production: the user chose 00:30 and it was stored as 00:30 UTC
+    — 07:30 in Vietnam — because the server clock is UTC and `datetime.now()`
+    was naive. The browser then faithfully displayed 07:30 for a time typed as
+    00:30.
+    """
+
+    def test_now_local_is_aware(self):
+        from app.modules.periodic_report.service import now_local
+        assert now_local().tzinfo is not None
+
+    def test_next_send_time_keeps_the_callers_zone(self):
+        from app.modules.periodic_report.service import REPORT_TZ
+        now = datetime(2026, 9, 16, 9, 0, tzinfo=REPORT_TZ)   # Wed
+        result = next_send_time(now, 3, time(0, 30))          # Thu 00:30
+        assert result.tzinfo is not None
+        assert result == datetime(2026, 9, 17, 0, 30, tzinfo=REPORT_TZ)
+
+    def test_the_stored_instant_is_the_users_clock_not_the_servers(self):
+        # 00:30 in Vietnam is 17:30 UTC the previous day. Before the fix this
+        # became 00:30 UTC, seven hours late.
+        from app.modules.periodic_report.service import REPORT_TZ
+        now = datetime(2026, 9, 16, 9, 0, tzinfo=REPORT_TZ)
+        result = next_send_time(now, 3, time(0, 30))
+        assert result.astimezone(timezone.utc) == \
+            datetime(2026, 9, 16, 17, 30, tzinfo=timezone.utc)
+
+    def test_a_time_already_past_today_rolls_a_week(self):
+        from app.modules.periodic_report.service import REPORT_TZ
+        now = datetime(2026, 9, 17, 9, 0, tzinfo=REPORT_TZ)   # Thu 09:00
+        assert next_send_time(now, 3, time(0, 30)) == \
+            datetime(2026, 9, 24, 0, 30, tzinfo=REPORT_TZ)
+
+    def test_an_immediate_send_is_aware_too(self, service):
+        service.repo.get_run.return_value = {'id': 1, 'status': 'approved',
+                                             'as_of': date(2026, 9, 14)}
+        service.repo.list_recipients.return_value = [{'email': 'a@b.c', 'kind': 'to'}]
+        service.repo.queue_run.return_value = True
+        service.send(1, user_id=7, mode='immediate')
+        queued_at = service.repo.queue_run.call_args[0][2]
+        assert queued_at.tzinfo is not None
+
+
+class TestRunsAreKeyedByTheWeekTheyReport:
+    """Observed in production: the week selector showed Week 37 twice.
+
+    Runs are keyed by `as_of`, but every day Mon-Sun reports the SAME closed
+    week — so a manual run mid-week created a second row for a week that
+    already had one.
+    """
+
+    def test_any_day_of_the_week_collapses_to_one_as_of(self, service):
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        seen = set()
+        for day in range(14, 21):                  # Mon 14th .. Sun 20th
+            service.repo.create_run.reset_mock()
+            with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+                service.generate_run(date(2026, 9, day))
+            seen.add(service.repo.create_run.call_args.kwargs['as_of'])
+        assert seen == {date(2026, 9, 14)}
+
+    def test_the_canonical_day_is_the_one_after_the_week_ends(self, service):
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+            service.generate_run(date(2026, 9, 16))
+        kwargs = service.repo.create_run.call_args.kwargs
+        assert kwargs['as_of'] == date(2026, 9, 14)
+        assert kwargs['through_date'] == date(2026, 9, 13)
+
+    def test_a_rerun_mid_week_REPLACES_rather_than_duplicating(self, service):
+        # It looks up the existing run under the canonical key, so ON CONFLICT
+        # replaces it instead of inserting a rival row for the same week.
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+            service.generate_run(date(2026, 9, 17))
+        assert service.repo.get_run_by_as_of.call_args[0][0] == date(2026, 9, 14)
+
+
+class TestBackfill:
+    """Past weeks are stored as `historical` reports: figures, workbook and the
+    email template, with NO analysis and no API call."""
+
+    def _go(self, service, week_end=date(2026, 9, 13)):
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 99
+        return service.backfill_week(week_end, DEPT_ROWS, STORE_ROWS)
+
+    def test_NEVER_calls_the_model(self, service):
+        with patch('app.modules.periodic_report.commentary.generate_commentary') as gen:
+            self._go(service)
+        gen.assert_not_called()
+
+    def test_stores_it_as_historical(self, service):
+        self._go(service)
+        assert service.repo.create_run.call_args.kwargs['status'] == 'historical'
+
+    def test_records_no_failure_because_skipping_analysis_is_deliberate(self, service):
+        # Otherwise the page would show "the analysis could not be generated"
+        # on every past week.
+        self._go(service)
+        assert service.repo.create_run.call_args.kwargs['commentary_error'] is None
+
+    def test_stores_a_workbook(self, service):
+        self._go(service)
+        assert service.repo.create_run.call_args.kwargs['workbook'][:2] == b'PK'
+
+    def test_uses_the_canonical_as_of_and_closing_sunday(self, service):
+        self._go(service, week_end=date(2026, 9, 13))
+        kw = service.repo.create_run.call_args.kwargs
+        assert kw['as_of'] == date(2026, 9, 14)
+        assert kw['through_date'] == date(2026, 9, 13)
+
+    def test_NEVER_overwrites_an_existing_run(self, service):
+        # Weeks already generated may carry a real, paid analysis.
+        service.repo.get_run_by_as_of.return_value = {'id': 1, 'status': 'sent'}
+        result = service.backfill_week(date(2026, 9, 13), DEPT_ROWS, STORE_ROWS)
+        assert result['skipped'] is True
+        service.repo.create_run.assert_not_called()
+
+    def test_renders_the_template_without_analysis(self, service):
+        self._go(service)
+        body = service.repo.create_run.call_args.kwargs['email_body']
+        assert '{{commentary}}' not in body
+        assert '{{' not in body
+
+    def test_workbook_rows_are_limited_to_the_weeks_own_span(self, service):
+        # One shared fetch covers the whole backfill; a week's Raw Data sheet
+        # must not contain rows from after it.
+        future = {**DEPT_ROWS[0], 'day': date(2027, 1, 1)}
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch('app.modules.periodic_report.service.build_workbook_bytes',
+                   return_value=b'PK') as build:
+            service.backfill_week(date(2026, 9, 13), DEPT_ROWS + [future], STORE_ROWS)
+        passed_rows = build.call_args[0][1]
+        assert future not in passed_rows
+
+    def test_figures_match_a_live_generation_of_the_same_week(self, service):
+        # The backfill must produce what the Monday job would have.
+        service.repo.get_run_by_as_of.return_value = None
+        service.repo.create_run.return_value = 1
+        with patch.object(service, 'draft_email', return_value=('S', 'B', None)):
+            service.generate_run(date(2026, 9, 14))
+        live = service.repo.create_run.call_args.kwargs['payload']
+        service.repo.create_run.reset_mock()
+        service.backfill_week(date(2026, 9, 13), DEPT_ROWS, STORE_ROWS)
+        backfilled = service.repo.create_run.call_args.kwargs['payload']
+        assert backfilled['periods'] == live['periods']
+
+
+class TestHistoricalRunsInTheFlow:
+    def _run(self, **over):
+        return {'id': 1, 'status': 'historical', 'as_of': date(2026, 9, 14), **over}
+
+    def test_a_historical_report_can_be_sent(self, service):
+        service.repo.get_run.return_value = self._run()
+        service.repo.list_recipients.return_value = [{'email': 'a@b.c', 'kind': 'to'}]
+        service.repo.queue_run.return_value = True
+        assert service.send(1, user_id=7, mode='immediate')['success'] is True
+
+    def test_a_historical_report_is_not_approvable(self, service):
+        # Nothing to sign off: it was never a live draft.
+        service.repo.get_run.return_value = self._run()
+        assert service.approve(1, user_id=7)['code'] == 'INVALID_STATE'
+
+    def test_a_historical_report_can_NEVER_trigger_the_model(self, service):
+        # No retry path from history to a paid API call.
+        service.repo.get_run.return_value = self._run()
+        assert service.retry_generation(1)['code'] == 'INVALID_STATE'
+
+
+class TestWeeksBetween:
+    def _weeks(self, a, b):
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            'bf', Path(__file__).resolve().parents[4]
+            / 'scripts' / 'jobs' / 'periodic_report_backfill.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.weeks_between(a, b)
+
+    def test_2026_through_week_37_is_37_weeks(self):
+        weeks = self._weeks(date(2026, 1, 1), date(2026, 9, 13))
+        assert len(weeks) == 37
+        assert weeks[0] == (date(2025, 12, 29), date(2026, 1, 4))
+        assert weeks[-1] == (date(2026, 9, 7), date(2026, 9, 13))
+
+    def test_every_week_is_monday_to_sunday(self):
+        for begin, end in self._weeks(date(2026, 1, 1), date(2026, 9, 13)):
+            assert begin.weekday() == 0 and end.weekday() == 6
