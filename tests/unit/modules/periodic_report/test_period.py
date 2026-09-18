@@ -116,3 +116,130 @@ class TestFetchSpan:
 class TestShiftYear:
     def test_leap_day_folds_back_to_feb_28(self):
         assert shift_year(date(2024, 2, 29)) == date(2023, 2, 28)
+
+
+class TestMonthEndStraddle:
+    """A week that spans a month boundary reports the month that ENDED in it.
+
+    Reported from production on week 36 (31 Aug - 6 Sep), whose MTD sheet showed
+    six days of September. Without this rule a complete month is never reported
+    at all: the last week ending in August stops on the 30th and the next week
+    jumps to September, so August is only ever seen a day short. That happens in
+    every month whose last day is not a Sunday.
+    """
+
+    def _mtd(self, as_of):
+        wk = last_complete_week(as_of)
+        return period_windows(as_of, 'monday', wk[1])['MTD']
+
+    def test_week_36_reports_the_whole_of_august(self):
+        cur, prior = self._mtd(date(2026, 9, 7))       # week 31 Aug - 6 Sep
+        assert cur == (date(2026, 8, 1), date(2026, 8, 31))
+        assert prior == (date(2025, 8, 1), date(2025, 8, 31))
+
+    def test_it_does_NOT_show_the_new_months_first_days(self):
+        cur, _ = self._mtd(date(2026, 9, 7))
+        assert cur[1].month == 8
+
+    def test_a_week_inside_one_month_is_unchanged(self):
+        cur, prior = self._mtd(date(2026, 9, 14))      # week 7-13 Sep
+        assert cur == (date(2026, 9, 1), date(2026, 9, 13))
+        assert prior == (date(2025, 9, 1), date(2025, 9, 13))
+
+    def test_the_week_before_the_boundary_is_unchanged(self):
+        cur, _ = self._mtd(date(2026, 8, 31))          # week 24-30 Aug
+        assert cur == (date(2026, 8, 1), date(2026, 8, 30))
+
+    def test_a_week_spanning_new_year_reports_the_whole_of_december(self):
+        cur, prior = self._mtd(date(2026, 1, 5))       # week 29 Dec - 4 Jan
+        assert cur == (date(2025, 12, 1), date(2025, 12, 31))
+        assert prior == (date(2024, 12, 1), date(2024, 12, 31))
+
+    def test_february_is_reported_to_its_real_last_day(self):
+        # 2026: Feb ends on the 28th, inside the week 23 Feb - 1 Mar.
+        cur, _ = self._mtd(date(2026, 3, 2))
+        assert cur == (date(2026, 2, 1), date(2026, 2, 28))
+
+    def test_a_leap_february_ends_on_the_29th(self):
+        # 2028 is a leap year; Feb 29 falls in the week 28 Feb - 5 Mar.
+        cur, prior = self._mtd(date(2028, 3, 6))
+        assert cur == (date(2028, 2, 1), date(2028, 2, 29))
+        # The prior-year side folds 29 Feb back to the 28th.
+        assert prior == (date(2027, 2, 1), date(2027, 2, 28))
+
+    def test_a_month_ending_on_a_sunday_needs_no_special_case(self):
+        # 31 May 2026 is a Sunday, so that week already ends the month.
+        cur, _ = self._mtd(date(2026, 6, 1))
+        assert cur == (date(2026, 5, 1), date(2026, 5, 31))
+
+    def test_YTD_is_untouched_by_the_straddle(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 9, 6))
+
+    def test_the_week_window_is_untouched_by_the_straddle(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        assert w['WOW'][0] == (date(2026, 8, 31), date(2026, 9, 6))
+
+    def test_fetch_span_still_covers_every_window(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        start, end = fetch_span(w)
+        for cur, prior in w.values():
+            for win in (cur, prior):
+                assert start <= win[0] and win[1] <= end
+
+
+class TestYearEndStraddle:
+    """The month rule, one level up: a week spanning New Year reports the whole
+    of the year that ended, not the two or three days of the new one.
+
+    A complete year is otherwise never reported either, since 31 December is
+    rarely a Sunday.
+    """
+
+    def _w(self, as_of):
+        wk = last_complete_week(as_of)
+        return period_windows(as_of, 'monday', wk[1])
+
+    def test_the_new_year_week_reports_the_whole_previous_year(self):
+        cur, prior = self._w(date(2026, 1, 5))['YTD']   # week 29 Dec - 4 Jan
+        assert cur == (date(2025, 1, 1), date(2025, 12, 31))
+        assert prior == (date(2024, 1, 1), date(2024, 12, 31))
+
+    def test_it_does_NOT_show_the_new_years_first_days(self):
+        cur, _ = self._w(date(2026, 1, 5))['YTD']
+        assert cur[1].year == 2025
+
+    def test_month_and_year_agree_in_that_week(self):
+        # A complete December sitting inside a complete 2025 — the whole point
+        # of applying the same rule to both.
+        w = self._w(date(2026, 1, 5))
+        assert w['MTD'][0] == (date(2025, 12, 1), date(2025, 12, 31))
+        assert w['YTD'][0] == (date(2025, 1, 1), date(2025, 12, 31))
+        assert w['MTD'][0][1] == w['YTD'][0][1]
+
+    def test_the_following_week_is_normal_year_to_date(self):
+        cur, prior = self._w(date(2026, 1, 12))['YTD']  # week 5-11 Jan
+        assert cur == (date(2026, 1, 1), date(2026, 1, 11))
+        assert prior == (date(2025, 1, 1), date(2025, 1, 11))
+
+    def test_a_month_end_that_is_not_a_year_end_leaves_YTD_alone(self):
+        cur, _ = self._w(date(2026, 9, 7))['YTD']       # week 31 Aug - 6 Sep
+        assert cur == (date(2026, 1, 1), date(2026, 9, 6))
+
+    def test_an_ad_hoc_later_cutoff_still_wins(self):
+        # Same guard as the month: asking for a later cut-off means asking for
+        # year-to-date at that date.
+        w = period_windows(date(2026, 1, 7), 'monday', None)
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 1, 7))
+
+    def test_a_year_ending_on_a_sunday_needs_no_special_case(self):
+        # 31 Dec 2028 is a Sunday, so that week already ends the year.
+        cur, _ = self._w(date(2029, 1, 1))['YTD']
+        assert cur == (date(2028, 1, 1), date(2028, 12, 31))
+
+    def test_fetch_span_still_covers_every_window(self):
+        w = self._w(date(2026, 1, 5))
+        start, end = fetch_span(w)
+        for cur, prior in w.values():
+            for win in (cur, prior):
+                assert start <= win[0] and win[1] <= end

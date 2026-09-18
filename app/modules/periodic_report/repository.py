@@ -288,7 +288,7 @@ class PeriodicReportRepository:
                     UPDATE periodic_report_runs
                        SET email_subject = %s, email_body = %s,
                            commentary_error = NULL
-                     WHERE id = %s AND status = 'pending_approval'
+                     WHERE id = %s AND status IN ('pending_approval', 'historical')
                 ''', (subject, body, run_id))
                 changed = cur.rowcount
             conn.commit()
@@ -325,7 +325,7 @@ class PeriodicReportRepository:
             conn.close()
 
     def queue_run(self, run_id: int, user_id: int, scheduled_send_at) -> bool:
-        """Queue an approved — or already sent — run for delivery.
+        """Queue an approved, already-sent, or historical run for delivery.
 
         One path for both, because there is one Send action: sending a report
         for the first time and sending it again differ only in what the row
@@ -342,7 +342,7 @@ class PeriodicReportRepository:
                            approved_at = NOW(),
                            scheduled_send_at = %s,
                            error = NULL
-                     WHERE id = %s AND status IN ('approved', 'sent')
+                     WHERE id = %s AND status IN ('approved', 'sent', 'historical')
                 """, (user_id, scheduled_send_at, run_id))
                 changed = cur.rowcount
             conn.commit()

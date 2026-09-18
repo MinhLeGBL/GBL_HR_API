@@ -14,9 +14,11 @@ Oracle is live and moves during the day — a verification run once saw qty go
 would not be the numbers emailed. `generate_run` writes the aggregates once and
 every later read serves that payload.
 """
+import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from .aggregate import METRICS, aggregate, delta_for, is_unfavourable
 from .excel import SHEET_NAMES, build_workbook_bytes
@@ -30,6 +32,18 @@ from .repository import PeriodicReportRepository
 # subunit in practice, and the exact figures survive in the stored workbook,
 # whose cells still hold the Decimals.
 _ROUND_TO = 2
+
+# The server clock is UTC; the business runs on Vietnam time. Every send time a
+# user picks is meant in THEIR timezone, so schedules are computed here and
+# stored as timezone-AWARE values. Naive `datetime.now()` on a UTC server
+# silently turned "00:30" into 00:30 UTC — 07:30 in Vietnam — and the browser
+# then faithfully displayed 07:30 for a time the user had typed as 00:30.
+REPORT_TZ = ZoneInfo(os.getenv('REPORT_TIMEZONE', 'Asia/Ho_Chi_Minh'))
+
+
+def now_local() -> datetime:
+    """Current time as an AWARE datetime in the report timezone."""
+    return datetime.now(REPORT_TZ)
 
 DEFAULT_SUBJECT_TEMPLATE = 'Báo cáo bán hàng định kỳ — Tuần {{week_no}}/{{week_year}}'
 
@@ -273,6 +287,21 @@ class PeriodicReportService:
         other status is replaced, so a retry after a failure is safe.
         """
         as_of = as_of or date.today()
+        # Normalise to the canonical day for the week being reported: the day
+        # after that week ends. Runs are keyed by `as_of`, but EVERY day from
+        # Mon-Sun reports the same closed week — so a manual run on Wednesday
+        # used to create a SECOND row for a week that already had one, and the
+        # week selector showed it twice. Collapsing to the canonical day makes
+        # `ON CONFLICT (as_of)` replace the existing run, which is what "run it
+        # again for this week" should mean.
+        week_end = last_complete_week(as_of, week_start)[1]
+        as_of = week_end + timedelta(days=1)
+        # Default MTD/YTD to that same closing Sunday. Previously only the job
+        # passed `through`, so any other caller silently got windows running to
+        # the Monday — a day with almost no sales against a full prior-year day.
+        # The correct behaviour should not depend on the caller remembering.
+        if through is None:
+            through = week_end
 
         existing = self.repo.get_run_by_as_of(as_of)
         if existing and existing['status'] == 'sent':
@@ -324,6 +353,57 @@ class PeriodicReportService:
             commentary_error=commentary_error)
         return {'success': True, 'run_id': run_id, 'as_of': as_of.isoformat(),
                 'commentary_error': commentary_error}
+
+    def backfill_week(self, week_end: date, dept_rows, store_rows,
+                      week_start: str = 'monday') -> Dict[str, Any]:
+        """Store a past week as a `historical` report, from rows already fetched.
+
+        Used by the backfill script, which fetches Oracle ONCE for the whole
+        range and calls this per week — rather than issuing a full
+        history-spanning query per week against the live database.
+
+        Deliberately calls NO model. The analysis is paid for once per report,
+        by the Monday job; history is figures, workbook and template only. A
+        person can still write the analysis for any single week via Edit.
+
+        Never overwrites an existing run: weeks already generated — including
+        ones carrying a real, paid analysis — are left untouched.
+        """
+        as_of = week_end + timedelta(days=1)
+        if self.repo.get_run_by_as_of(as_of) is not None:
+            return {'success': True, 'skipped': True, 'as_of': as_of.isoformat()}
+
+        windows = period_windows(as_of, week_start, week_end)
+        fetch_from, fetch_to = fetch_span(windows)
+
+        # Narrow the shared rows to THIS week's own span. The figures would be
+        # unaffected either way (aggregation filters by window), but the
+        # workbook's Raw Data sheet shows every row it is given — and week 1's
+        # sheet must not contain months of data from after that week.
+        dept = [r for r in dept_rows if fetch_from <= r['day'] <= fetch_to]
+        store = [r for r in store_rows if fetch_from <= r['day'] <= fetch_to]
+
+        payload = self._snapshot_from_rows(
+            as_of, week_start, week_end, windows, fetch_from, fetch_to,
+            dept, store)
+        workbook = build_workbook_bytes(windows, dept, store)
+
+        settings = self.repo.get_settings() or {}
+        subject = render_template(
+            settings.get('subject_template') or DEFAULT_SUBJECT_TEMPLATE, payload)
+        body = render_template(
+            settings.get('body_template') or DEFAULT_BODY_TEMPLATE, payload, '')
+
+        run_id = self.repo.create_run(
+            as_of=as_of, week_start=week_start, through_date=week_end,
+            status='historical', payload=payload, workbook=workbook,
+            email_subject=subject, email_body=body, error=None,
+            # Not a failure — the analysis was deliberately not generated — so
+            # no error is recorded and the page raises no "could not be
+            # generated" notice.
+            commentary_error=None)
+        return {'success': True, 'skipped': False, 'run_id': run_id,
+                'as_of': as_of.isoformat()}
 
     # ==================================================================
     # Email draft
@@ -469,7 +549,8 @@ class PeriodicReportService:
                     'code': 'INVALID_INPUT'}
         if not self.repo.update_email_draft(run_id, subject, body):
             return {'success': False,
-                    'error': 'Only a run awaiting approval can be edited.',
+                    'error': 'Only a draft awaiting approval, or a historical '
+                             'report, can be edited.',
                     'code': 'INVALID_STATE'}
         return {'success': True}
 
@@ -514,7 +595,9 @@ class PeriodicReportService:
         run = self.repo.get_run(run_id)
         if run is None:
             return {'success': False, 'error': 'Run not found', 'code': 'NOT_FOUND'}
-        if run['status'] not in ('approved', 'sent'):
+        # `historical` is a backfilled past week: nothing to approve (it was
+        # never a live draft), but it can be forwarded like any sent report.
+        if run['status'] not in ('approved', 'sent', 'historical'):
             return {'success': False,
                     'error': f"Run is {run['status']} — approve it before sending."
                              if run['status'] == 'pending_approval' else
@@ -557,8 +640,8 @@ class PeriodicReportService:
             self.repo.update_settings(fields)
             settings = merged
 
-        send_at = (datetime.now() if mode == 'immediate'
-                   else next_send_time(datetime.now(),
+        send_at = (now_local() if mode == 'immediate'
+                   else next_send_time(now_local(),
                                        settings.get('send_weekday'),
                                        settings.get('send_time')))
         if not self.repo.queue_run(run_id, user_id, send_at):
@@ -579,7 +662,7 @@ class PeriodicReportService:
         selects it, so a slow send that overruns the timer interval cannot have
         the next tick pick up the same run and email the report twice.
         """
-        now = now or datetime.now()
+        now = now or now_local()
         results = []
         for run_id in self.repo.claim_due_runs(now):
             results.append(self.send_run(run_id))
@@ -761,13 +844,19 @@ def next_send_time(now: datetime, weekday: Optional[int],
                    at: Optional[time]) -> datetime:
     """The next occurrence of `weekday` at `at`, strictly after `now`.
 
-    Falls back to `now` when either is unset, so an approval can never be queued
-    to a time that will not arrive.
+    `now` must be timezone-AWARE and the result carries the same zone, because
+    the weekday and time the user picked are meant in THEIR timezone. Combining
+    them into a naive value would let the server's own zone decide, which is how
+    "00:30" became 00:30 UTC (07:30 in Vietnam).
+
+    Falls back to `now` when either is unset, so a send can never be queued to a
+    time that will not arrive.
     """
     if weekday is None or at is None:
         return now
     days_ahead = (weekday - now.weekday()) % 7
-    candidate = datetime.combine(now.date() + timedelta(days=days_ahead), at)
+    candidate = datetime.combine(now.date() + timedelta(days=days_ahead), at,
+                                 tzinfo=now.tzinfo)
     if candidate <= now:
         candidate += timedelta(days=7)
     return candidate
