@@ -35,8 +35,12 @@ jobs:
           # deploy — which is exactly how the 2026-09-16 outage went unnoticed.
           # Retry rather than a flat `sleep 5`: gunicorn needs a moment, and a
           # single early probe is both flaky and slow to catch a real failure.
+          # Note the trailing slash. Flask 308-redirects /health to /health/,
+          # and `curl -f` treats a 3xx as success — so the probe passed without
+          # ever reaching the endpoint. A refused connection still failed it, so
+          # this caught a dead API, but not one that boots and answers wrongly.
           for i in $(seq 1 12); do
-            if curl -fsS http://localhost:5000/api/v1/health >/dev/null 2>&1; then
+            if curl -fsS http://localhost:5000/api/v1/health/ >/dev/null 2>&1; then
               echo "Health check passed on attempt $i."
               exit 0
             fi
