@@ -38,7 +38,33 @@ jobs:
           git fetch origin deployment
           git checkout deployment
           git merge origin/staging --no-ff -m "Auto-promote: staging tests passed"
-          git push origin deployment
+
+      # Was a separate workflow (docs-janitor.yml) that pushed the cleanup to
+      # staging. That could never work: staging is a protected branch requiring
+      # a pull request and the `test` check, and GITHUB_TOKEN cannot bypass
+      # either — every run since 2026-09-16 failed on `GH006 protected branch
+      # hook declined`. A PAT could push through, but it is what broke the job
+      # in the first place when it expired.
+      #
+      # `deployment` is not protected, so the strip happens here instead. CR
+      # files still ride into staging on feature merges and stay there; what
+      # matters is that they never reach deployment or the server, and this
+      # runs before the push that promotes. deploy.yml also strips docs/cr/
+      # server-side, so that remains the backstop.
+      #
+      # `git rm` stages its own deletions — no `git add -A`, which has twice
+      # swept stray files into a commit in these repos.
+      - name: Strip docs/cr from deployment
+        run: |
+          if [ -n "$(git ls-files docs/cr)" ]; then
+            git rm -r --quiet docs/cr
+            git commit -m "docs(janitor): strip docs/cr from deployment [skip ci]"
+          else
+            echo "No docs/cr files tracked on deployment — nothing to strip."
+          fi
+
+      - name: Push deployment
+        run: git push origin deployment
       - name: Trigger deploy workflow
         run: gh workflow run deploy.yml --ref deployment
         env:

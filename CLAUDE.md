@@ -196,10 +196,21 @@ GBL_MASTER_API/                          GBL_MASTER_FRONTEND/
 
 ### Branch isolation
 
-- **CR files** (`docs/cr/*`) exist on their **own feature branch only**.
-- **Auto-strip on push to staging** — [.github/workflows/docs-janitor.yml](.github/workflows/docs-janitor.yml)
-  removes any `docs/cr/*` files that slip onto staging via PR merges and commits
-  the cleanup automatically (`docs(janitor): strip docs/cr from staging [skip ci]`).
+- **CR files** (`docs/cr/*`) are written on their **own feature branch**. They do
+  ride into `staging` on PR merges and stay there — that is expected, not a bug
+  to chase. What is guaranteed is that they get no further.
+- **Auto-strip at promote** — the `promote` job in
+  [.github/workflows/staging.yml](.github/workflows/staging.yml) removes
+  `docs/cr/` after merging staging into `deployment` and before pushing it
+  (`docs(janitor): strip docs/cr from deployment [skip ci]`).
+
+  This used to be a separate `docs-janitor.yml` that pushed the cleanup to
+  `staging`. It could never work: `staging` is protected — a pull request and
+  the `test` check are both required — and `GITHUB_TOKEN` cannot bypass either,
+  so every run from 2026-09-16 onward died on `GH006 protected branch hook
+  declined`. `deployment` is unprotected, so the strip happens there instead.
+  Do not "fix" this by moving it back to staging or by adding a PAT; an expired
+  PAT is what broke the original job.
 - **Strip at deploy** — [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
   removes `docs/cr/` server-side alongside `tests/` and `document/`. Belt-and-braces.
 - **Local sync helper** — after merging staging into your feature branch, run
