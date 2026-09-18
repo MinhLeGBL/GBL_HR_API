@@ -119,6 +119,12 @@ def period_windows(as_of, week_start='monday', through=None):
     is only ever seen a day short. That happens in every month whose last day is
     not a Sunday. Six days of a new month is also a poor comparison against six
     days of the prior year, while a complete month is the natural unit.
+
+    **The same applies to YTD across a year boundary.** The week spanning New
+    Year reports the whole of the year that just ended, not the two or three
+    days of the new one — which would otherwise sit next to a complete December
+    and say far less. A complete year is likewise never reported otherwise,
+    since 31 December is rarely a Sunday.
     """
     week_begin, week_end = last_complete_week(as_of, week_start)
     windows = {
@@ -144,9 +150,18 @@ def period_windows(as_of, week_start='monday', through=None):
     windows['MTD'] = ((mtd_from, mtd_to),
                       (shift_year(mtd_from), shift_year(mtd_to)))
 
-    ytd_from = period_end.replace(month=1, day=1)
-    windows['YTD'] = ((ytd_from, period_end),
-                      (shift_year(ytd_from), shift_year(period_end)))
+    if week_begin.year != week_end.year and period_end <= week_end:
+        # A year ended inside the reported week — the same rule as the month,
+        # one level up. Report that year whole rather than the two or three
+        # days of the new one, which would otherwise sit next to a complete
+        # December and say far less.
+        ytd_from = date(week_begin.year, 1, 1)
+        ytd_to = date(week_begin.year, 12, 31)
+    else:
+        ytd_from = period_end.replace(month=1, day=1)
+        ytd_to = period_end
+    windows['YTD'] = ((ytd_from, ytd_to),
+                      (shift_year(ytd_from), shift_year(ytd_to)))
     return windows
 
 

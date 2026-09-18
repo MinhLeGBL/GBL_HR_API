@@ -345,8 +345,24 @@ the 9th.
 A week spanning New Year gets the same treatment: it now reports the whole of
 December, which it never did before.
 
-### Known, not changed
-**YTD has the same flaw one level up.** In the week spanning New Year, YTD is
-just the first few days of January, and a complete year is never reported. The
-same rule would fix it; left alone for now because YTD was explicitly reported
-as correct.
+### Known, not changed at the time
+YTD had the same flaw one level up. Fixed in 0.8.2 below.
+
+
+## 0.8.2 — 2026-09-18
+
+### Fixed: a complete year was never reported either
+The same rule as 0.8.1, one level up. A week spanning New Year now reports the
+whole of the year that **ended**, instead of the two or three days of the new
+one — which would otherwise have sat next to a complete December and said far
+less.
+
+A complete year was likewise never reported at all, since 31 December is rarely
+a Sunday.
+
+Affects exactly one week a year, and it is the week where YTD was least useful.
+Every other week is untouched. The same `through <= week_end` guard applies, so
+an ad-hoc run asking for a later cut-off still gets year-to-date at that date.
+
+The two rules now agree in that week: a complete December inside a complete
+prior year.
