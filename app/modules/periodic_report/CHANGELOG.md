@@ -366,3 +366,36 @@ an ad-hoc run asking for a later cut-off still gets year-to-date at that date.
 
 The two rules now agree in that week: a complete December inside a complete
 prior year.
+
+
+## 0.9.0 — 2026-09-19
+
+### Added
+- The prior-period block on every period sheet (Week by Week, MTD, YTD) is now
+  an Excel column group that opens COLLAPSED. The three blocks together are
+  ~1543px, which overflows a 15" screen; the prior figures are reference
+  material while the current figures and the deltas are what gets read.
+  Collapsing puts the delta block on screen beside the current one, and the
+  outline button restores the prior figures in one click.
+  - The `+` control sits on the first delta column — Excel draws it on the
+    column AFTER the group (`summaryRight`) and marks that column `collapsed`,
+    mirroring the summary-cell rule the existing row outline already follows
+    with `summaryBelow`. Both outlines coexist in one `outlinePr`.
+  - Implemented by setting `outlineLevel`/`hidden` per column rather than with
+    `column_dimensions.group()`. That helper deletes the per-column dimensions
+    across the range and leaves one spanning dimension keyed to the first
+    column, so the remaining columns fall back to Excel's default width of 13:
+    measured, `group('J','P')` over widths `[10,8,7,9,9,8,9]` yields
+    `[10,13,13,13,13,13,13]`, which would have made the block wider on expand
+    than the layout is sized for.
+
+### Tests
+- New `tests/unit/modules/periodic_report/test_excel.py` — 37 tests, the first
+  direct coverage of the workbook layout. Every assertion runs against a real
+  save/load round trip, since the outline only counts if it survives into the
+  file Excel opens. Confirmed to fail against the previous renderer (9 failures
+  across the three sheets) before being committed.
+- Covers the guard against the `group()` regression, that the current and delta
+  blocks stay visible, that the existing row outline and `summaryBelow` still
+  work alongside the new column outline, and that `Raw Data` is untouched.
+

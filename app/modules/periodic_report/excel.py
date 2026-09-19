@@ -257,6 +257,32 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
             col_letter = get_column_letter(3 + b * width + i)
             ws.column_dimensions[col_letter].width = (
                 DELTA_W if is_delta else VALUE_W[key])
+    # The prior-period block opens COLLAPSED behind an outline button. All
+    # three blocks together are ~1543px, which overflows a 15" screen; the
+    # prior figures are reference material, while the current figures and the
+    # deltas are what actually gets read. Collapsing them puts the delta block
+    # on screen next to the current one, and a single click brings them back.
+    #
+    # Deliberately NOT `ws.column_dimensions.group()`. That helper DELETES the
+    # per-column dimensions across the range and leaves a single spanning one
+    # keyed to the first column, so the widths set just above are lost: K..P
+    # fall back to Excel's default 13 and the block silently gets wider on
+    # expand than it was designed to be. Measured, not assumed --
+    # group('J','P') on widths [10,8,7,9,9,8,9] yields [10,13,13,13,13,13,13].
+    # Setting the outline attributes per column preserves them.
+    prior_start = 3 + width
+    for i in range(width):
+        dim = ws.column_dimensions[get_column_letter(prior_start + i)]
+        dim.outlineLevel = 1
+        dim.hidden = True
+    # Excel draws the +/- button on the column AFTER the group and marks THAT
+    # column collapsed -- the same summary-cell rule the row outline above
+    # follows, mirrored to the right. summaryRight is openpyxl's default; it is
+    # set explicitly because the button lands on the delta block, and having
+    # that be accidental would be easy to break.
+    ws.sheet_properties.outlinePr.summaryRight = True
+    ws.column_dimensions[get_column_letter(prior_start + width)].collapsed = True
+
     # Narrow columns push the wrapped headers onto two or three lines.
     ws.row_dimensions[sub].height = 44
     ws.sheet_view.zoomScale = ZOOM
