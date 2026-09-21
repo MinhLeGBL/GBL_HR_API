@@ -408,7 +408,8 @@ class WeeklyReportService:
                 'commentary_error': commentary_error}
 
     def backfill_week(self, week_end: date, dept_rows, store_rows,
-                      week_start: str = 'monday') -> Dict[str, Any]:
+                      week_start: str = 'monday',
+                      overwrite: bool = False) -> Dict[str, Any]:
         """Store a past week as a `historical` report, from rows already fetched.
 
         Used by the backfill script, which fetches Oracle ONCE for the whole
@@ -421,10 +422,27 @@ class WeeklyReportService:
 
         Never overwrites an existing run: weeks already generated — including
         ones carrying a real, paid analysis — are left untouched.
+
+        `overwrite` re-renders weeks this job itself produced, for when the
+        REPORT changed rather than the data. It is deliberately narrow: only
+        `historical` runs are replaced. A week that was approved or sent
+        carries prose somebody paid for and recipients have read, and this
+        method writes none — replacing it would destroy the analysis and
+        silently contradict an email already delivered. Those weeks are still
+        skipped, and reported as such so the caller can re-render them with
+        `generate_run(force=True, keep_analysis=True)` instead.
         """
         as_of = week_end + timedelta(days=1)
-        if self.repo.get_run_by_as_of(as_of) is not None:
-            return {'success': True, 'skipped': True, 'as_of': as_of.isoformat()}
+        existing = self.repo.get_run_by_as_of(as_of)
+        if existing is not None:
+            replaceable = overwrite and existing['status'] == 'historical'
+            if not replaceable:
+                return {'success': True, 'skipped': True,
+                        'as_of': as_of.isoformat(),
+                        'status': existing['status'],
+                        # Distinguishes "nothing asked of me" from "asked, but
+                        # this one is not mine to overwrite".
+                        'protected': bool(overwrite)}
 
         windows = period_windows(as_of, week_start, week_end)
         fetch_from, fetch_to = fetch_span(windows)

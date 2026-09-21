@@ -553,3 +553,26 @@ without touching its prose. Both times that was done by hand-editing the
 database: stash the analysis, clear the status, regenerate, restore. Three
 occurrences is enough to make it a flag.
 
+
+## 0.14.0 — 2026-09-21
+
+### Added
+- **`--overwrite` on the backfill**, for re-rendering weeks the job itself
+  produced after the REPORT changed — a new period, a new view.
+
+      PYTHONPATH=. python scripts/jobs/periodic_report_backfill.py \
+          --from 2026-01-01 --to 2026-09-20 --overwrite
+
+  Deliberately narrow: only `historical` runs are replaced. A week that was
+  approved or sent carries prose this job does not write and recipients have
+  read; replacing it would destroy the analysis and silently contradict a
+  delivered email. Those weeks are skipped, counted as `protected`, and the
+  run prints the `generate --force --keep-analysis` command for them.
+
+### Note
+Used to give all 38 stored reports the WTD period and the weekday chart data:
+34 historical weeks via `--overwrite`, and the four carrying analysis via
+`--force --keep-analysis`. Re-rendering clears approval state, so weeks 35, 37
+and 38 dropped from `sent` back to `pending_approval` — the send records in
+`weekly_report_sends` are untouched, but the page will ask for approval again.
+
