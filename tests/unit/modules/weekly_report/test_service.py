@@ -1051,3 +1051,47 @@ class TestReRenderFlags:
         r = s.generate_run(as_of=date(2026, 9, 21), keep_analysis=True,
                            draft_email=False)
         assert r['code'] == 'NOT_FOUND'
+
+
+class TestBackfillOverwrite:
+    """`--overwrite` re-renders only the weeks the backfill itself produced."""
+
+    @staticmethod
+    def _service(existing):
+        from unittest.mock import MagicMock
+        from app.modules.weekly_report.service import WeeklyReportService
+        s = WeeklyReportService()
+        s.repo = MagicMock()
+        s.repo.get_run_by_as_of.return_value = existing
+        s.repo.create_run.return_value = 5
+        s.repo.fetch_sales.return_value = ([], [])
+        return s
+
+    def test_without_overwrite_any_existing_week_is_skipped(self):
+        s = self._service({'status': 'historical'})
+        r = s.backfill_week(date(2026, 3, 1), [], [])
+        assert r['skipped'] is True
+        s.repo.create_run.assert_not_called()
+
+    def test_overwrite_re_renders_a_historical_week(self):
+        s = self._service({'status': 'historical'})
+        r = s.backfill_week(date(2026, 3, 1), [], [], overwrite=True)
+        assert not r.get('skipped')
+        s.repo.create_run.assert_called_once()
+
+    @pytest.mark.parametrize('status', ['sent', 'approved', 'pending_approval'])
+    def test_overwrite_refuses_a_week_carrying_analysis(self, status):
+        # The backfill writes no prose. Replacing a sent week would destroy
+        # the analysis AND silently contradict an email already delivered.
+        s = self._service({'status': status})
+        r = s.backfill_week(date(2026, 3, 1), [], [], overwrite=True)
+        assert r['skipped'] is True
+        assert r['protected'] is True
+        assert r['status'] == status
+        s.repo.create_run.assert_not_called()
+
+    def test_a_missing_week_is_created_either_way(self):
+        for overwrite in (False, True):
+            s = self._service(None)
+            s.backfill_week(date(2026, 3, 1), [], [], overwrite=overwrite)
+            s.repo.create_run.assert_called_once()

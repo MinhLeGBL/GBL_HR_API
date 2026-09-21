@@ -65,6 +65,11 @@ def main():
     parser.add_argument('--to', dest='date_to', default=None,
                         help='Latest week END to include (default: the last '
                              'closed week)')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Re-render weeks this job produced (status '
+                             'historical). Approved or sent weeks are still '
+                             'skipped — they carry analysis this job cannot '
+                             'write, and recipients have read it.')
     parser.add_argument('--dry-run', action='store_true',
                         help='List the weeks and what would happen; write nothing')
     args = parser.parse_args()
@@ -78,24 +83,38 @@ def main():
         return
 
     service = WeeklyReportService()
-    existing = [w for w in weeks
-                if service.repo.get_run_by_as_of(w[1] + timedelta(days=1))]
-    todo = [w for w in weeks if w not in existing]
+    stored = {w: service.repo.get_run_by_as_of(w[1] + timedelta(days=1))
+              for w in weeks}
+    if args.overwrite:
+        # Only weeks this job owns are re-renderable; the rest stay put.
+        existing = [w for w, run in stored.items()
+                    if run is not None and run['status'] != 'historical']
+        redo = [w for w, run in stored.items()
+                if run is not None and run['status'] == 'historical']
+    else:
+        existing = [w for w, run in stored.items() if run is not None]
+        redo = []
+    todo = [w for w in weeks if w not in existing and w not in redo]
 
     print(f'{len(weeks)} weeks from {weeks[0][0]} to {weeks[-1][1]}: '
-          f'{len(existing)} already exist (kept), {len(todo)} to create.')
+          f'{len(existing)} kept, {len(redo)} to re-render, '
+          f'{len(todo)} to create.')
     for begin, finish in weeks:
-        tag = 'exists' if (begin, finish) in existing else 'create'
+        tag = ('kept' if (begin, finish) in existing
+               else 're-render' if (begin, finish) in redo else 'create')
         print(f'  [{tag}] ISO week {begin.isocalendar().week:>2}  '
               f'{begin} .. {finish}')
 
-    if args.dry_run or not todo:
+    # Weeks that will actually be written: new ones, plus re-renders.
+    work = todo + redo
+
+    if args.dry_run or not work:
         print('\nDry run — nothing written.' if args.dry_run else '\nNothing to do.')
         return
 
-    # One fetch spanning every window of every week to be created.
+    # One fetch spanning every window of every week being written.
     spans = [fetch_span(period_windows(f + timedelta(days=1), 'monday', f))
-             for _b, f in todo]
+             for _b, f in work]
     fetch_from = min(s[0] for s in spans)
     fetch_to = max(s[1] for s in spans)
     print(f'\nFetching {fetch_from} .. {fetch_to} once ...')
@@ -103,17 +122,32 @@ def main():
     print(f'  -> {len(dept_rows)} day x store x dept rows, '
           f'{len(store_rows)} day x store rows')
 
-    failures = 0
-    for begin, finish in todo:
+    failures = protected = 0
+    for begin, finish in sorted(work):
         try:
-            result = service.backfill_week(finish, dept_rows, store_rows)
-            state = 'skipped' if result.get('skipped') else f"run {result['run_id']}"
+            # 'monday' throughout this script, matching the window maths above.
+            result = service.backfill_week(finish, dept_rows, store_rows,
+                                           'monday',
+                                           overwrite=args.overwrite)
+            if result.get('skipped'):
+                # Asked for, but not this job's to overwrite — it carries
+                # analysis the backfill cannot write.
+                protected += bool(result.get('protected'))
+                state = f"skipped ({result.get('status', 'exists')})"
+            else:
+                state = f"run {result['run_id']}"
             print(f'  ok   {begin} .. {finish}  ({state})')
         except Exception as e:   # noqa: BLE001 — keep going; report at the end
             failures += 1
             print(f'  FAIL {begin} .. {finish}: {e}', file=sys.stderr)
 
-    print(f'\n{len(todo) - failures} created, {failures} failed.')
+    print(f'\n{len(work) - failures - protected} written, '
+          f'{protected} protected, {failures} failed.')
+    if protected:
+        print('Protected weeks carry an analysis this job does not write. '
+              'Re-render them with:\n'
+              '  periodic_report_generate.py --as-of <date> --force '
+              '--keep-analysis')
     if failures:
         sys.exit(1)
 

@@ -351,8 +351,10 @@ class TestMetricColumns:
         assert 'total_discount_value' in pr.ZERO_METRICS
         assert 'avg_discount_pct' in {k for _l, k, _u in pr.METRIC_COLUMNS}
 
-    def test_seven_metrics_per_block(self):
-        assert len(pr.METRIC_COLUMNS) == 7
+    def test_eight_metrics_per_block(self):
+        # Seven until 0.15.0, when qty_returned joined returns_value: the value
+        # of what came back and how many items did are different problems.
+        assert len(pr.METRIC_COLUMNS) == 8
 
     def test_millions_format_scales_by_two_thousands(self):
         # Two trailing commas in an Excel format divide the DISPLAYED value by
@@ -362,7 +364,7 @@ class TestMetricColumns:
 
     def test_counts_are_not_scaled(self):
         counts = [key for _l, key, unit in pr.METRIC_COLUMNS if unit == 'count']
-        assert counts == ['qty_sold', 'bills']
+        assert counts == ['qty_sold', 'bills', 'qty_returned']
         assert ',,' not in pr.COUNT_FORMAT
 
     def test_percentage_metric_is_the_only_pct_unit(self):
@@ -388,7 +390,10 @@ class TestDeltaPolarity:
     """
 
     def test_only_discount_and_returns_are_inverted(self):
-        assert pr.LOWER_IS_BETTER == {'avg_discount_pct', 'returns_value'}
+        # Both return metrics invert: more returned stock is a loss whether it
+        # is measured in đồng or in items.
+        assert pr.LOWER_IS_BETTER == {'avg_discount_pct', 'returns_value',
+                                      'qty_returned'}
 
     def test_every_inverted_metric_is_actually_displayed(self):
         shown = {k for _l, k, _u in pr.METRIC_COLUMNS}
