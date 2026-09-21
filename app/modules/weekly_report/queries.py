@@ -1,4 +1,4 @@
-"""Oracle queries for the periodic sales report.
+"""Oracle queries for the weekly sales report.
 
 Revenue formulas are taken verbatim from `app/modules/reports/queries.py`
 (CR #78-#85) so this report reconciles with the live-comparison feature:

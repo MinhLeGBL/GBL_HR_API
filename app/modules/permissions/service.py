@@ -130,13 +130,13 @@ class PermissionService:
                 ('ACCOUNT_PAYABLE', 'Account Payable', 'AR payable reconciliation tool (CR #60)'),
                 ('HAND_CARRY', 'Hand Carry', 'Hand-carry UPC catalog under Commission (CR #57)'),
                 ('LIVE_COMPARISON', 'Live Sale Comparison', 'Two-period sale comparison report under Report (CR #78)'),
-                ('PERIODIC_REPORT', 'Periodic Report', 'Weekly sales report preview under Report'),
-                ('PERIODIC_REPORT_APPROVE', 'Periodic Report — Approve & Send', 'Edit the draft, approve, and manage recipients for the weekly sales email')
+                ('WEEKLY_REPORT', 'Weekly Report', 'Weekly sales report under Report — view, approve and send')
                 ON CONFLICT (code) DO NOTHING
             ''')
 
             # Section permissions seed (additive — ON CONFLICT in _seed_v2_permissions)
             self._seed_v2_permissions(cursor)
+            self._migrate_periodic_report_to_weekly(cursor)
 
             conn.commit()
             cursor.close()
@@ -151,6 +151,42 @@ class PermissionService:
             if conn:
                 conn.close()
 
+    @staticmethod
+    def _migrate_periodic_report_to_weekly(cursor):
+        """2026-09-21: two sections collapse into one, and the name changes.
+
+        PERIODIC_REPORT (view) and PERIODIC_REPORT_APPROVE (edit/approve/send)
+        become a single WEEKLY_REPORT. Access to the page is access to the
+        page, matching every other feature.
+
+        Grants are carried over as a UNION, so anyone who held EITHER old
+        section holds the new one. That deliberately widens what a view-only
+        holder can do — which is the point of the change — rather than
+        stranding them with no access at all.
+
+        Idempotent: the copies are ON CONFLICT DO NOTHING and the deletes are
+        no-ops once the old rows are gone, so it is safe on every init run.
+        """
+        old_sections = ('PERIODIC_REPORT', 'PERIODIC_REPORT_APPROVE')
+        # (table, the column that is not the section code)
+        grant_tables = (
+            ('section_roles', 'role_code'),
+            ('section_departments', 'department_code'),
+            ('section_inclusions', 'user_sid'),
+            ('section_exclusions_v2', 'user_sid'),
+        )
+        for table, column in grant_tables:
+            cursor.execute(
+                f"""INSERT INTO {table} (section_code, {column})
+                    SELECT DISTINCT 'WEEKLY_REPORT', {column}
+                      FROM {table}
+                     WHERE section_code IN %s
+                    ON CONFLICT DO NOTHING""",
+                (old_sections,))
+            cursor.execute(
+                f'DELETE FROM {table} WHERE section_code IN %s', (old_sections,))
+        cursor.execute('DELETE FROM sections WHERE code IN %s', (old_sections,))
+
     def _seed_v2_permissions(self, cursor):
         """Seed v2 flat permission tables with default access config."""
         # Section → departments mapping
@@ -163,8 +199,7 @@ class PermissionService:
             'CRM': [],
             'ACCOUNT_PAYABLE': ['HR', 'ACC'],
             'HAND_CARRY': ['HR'],
-            'PERIODIC_REPORT': ['BOD'],
-            'PERIODIC_REPORT_APPROVE': ['BOD'],
+            'WEEKLY_REPORT': ['BOD'],
         }
         for section_code, depts in section_depts.items():
             for dept in depts:
@@ -183,8 +218,7 @@ class PermissionService:
             'CRM': [],
             'ACCOUNT_PAYABLE': ['ADMIN', 'MANAGER'],
             'HAND_CARRY': ['ADMIN', 'MANAGER', 'STAFF'],
-            'PERIODIC_REPORT': ['ADMIN', 'MANAGER'],
-            'PERIODIC_REPORT_APPROVE': ['ADMIN'],
+            'WEEKLY_REPORT': ['ADMIN', 'MANAGER'],
         }
         for section_code, roles in section_roles.items():
             for role in roles:

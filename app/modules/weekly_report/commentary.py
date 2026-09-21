@@ -21,8 +21,8 @@ management board.
 
 Configuration (all optional):
   ANTHROPIC_API_KEY                      required; absent → commentary skipped
-  PERIODIC_REPORT_MODEL                  model id (default: claude-opus-5)
-  PERIODIC_REPORT_COMMENTARY_MAX_WORDS   length target (default: 600)
+  WEEKLY_REPORT_MODEL                  model id (default: claude-opus-5)
+  WEEKLY_REPORT_COMMENTARY_MAX_WORDS   length target (default: 600)
 """
 import os
 
@@ -340,9 +340,9 @@ def generate_commentary(payload, model: str = None,
 
     import anthropic
 
-    model = model or os.getenv('PERIODIC_REPORT_MODEL') or DEFAULT_MODEL
+    model = model or os.getenv('WEEKLY_REPORT_MODEL') or DEFAULT_MODEL
     if max_words is None:
-        max_words = int(os.getenv('PERIODIC_REPORT_COMMENTARY_MAX_WORDS',
+        max_words = int(os.getenv('WEEKLY_REPORT_COMMENTARY_MAX_WORDS',
                                   DEFAULT_MAX_WORDS))
 
     client = anthropic.Anthropic()

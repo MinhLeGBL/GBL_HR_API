@@ -1,4 +1,4 @@
-"""Periodic report repository — Oracle sales fetch + Postgres run state.
+"""Weekly report repository — Oracle sales fetch + Postgres run state.
 
 Two very different jobs behind one class, matching how `reports` pairs its
 Oracle queries with its Postgres pins:
@@ -46,7 +46,7 @@ def _decimal_output_handler(cursor, name, default_type, size, precision, scale):
     return None
 
 
-class PeriodicReportRepository:
+class WeeklyReportRepository:
 
     # ------------------------------------------------------------------
     # Oracle — sales data

@@ -1,4 +1,4 @@
-"""Unit tests for app.modules.periodic_report.service.
+"""Unit tests for app.modules.weekly_report.service.
 
 Oracle and Postgres are mocked throughout — what is exercised here is the
 payload shape the frontend binds to, the template renderer, the send-time
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.modules.periodic_report.service import (DEFAULT_BODY_TEMPLATE,
-                                                 PeriodicReportService,
+from app.modules.weekly_report.service import (DEFAULT_BODY_TEMPLATE,
+                                                 WeeklyReportService,
                                                  next_send_time,
                                                  render_template,
                                                  summary_lines)
@@ -44,7 +44,7 @@ STORE_ROWS = [
 
 @pytest.fixture
 def service():
-    svc = PeriodicReportService()
+    svc = WeeklyReportService()
     svc.repo = MagicMock()
     svc.repo.fetch_sales.return_value = (DEPT_ROWS, STORE_ROWS)
     svc.repo.get_settings.return_value = {
@@ -479,7 +479,7 @@ class TestCommentaryIsBestEffort:
         }
         payload = service.build_snapshot(date(2026, 9, 14), 'monday',
                                          date(2026, 9, 13))
-        with patch('app.modules.periodic_report.commentary.generate_commentary',
+        with patch('app.modules.weekly_report.commentary.generate_commentary',
                    side_effect=RuntimeError('no API key')):
             subject, body, error = service.draft_email(payload)
         assert subject
@@ -496,7 +496,7 @@ class TestCommentaryIsBestEffort:
                                          date(2026, 9, 13))
         service.repo.get_settings.return_value = {
             **service.repo.get_settings.return_value, 'commentary_enabled': True}
-        with patch('app.modules.periodic_report.commentary.generate_commentary',
+        with patch('app.modules.weekly_report.commentary.generate_commentary',
                    return_value=''):
             _subject, _body, error = service.draft_email(payload)
         assert error and 'ANTHROPIC_API_KEY' in error
@@ -602,14 +602,14 @@ class TestLLMIsCalledOncePerReport:
 
     def test_the_scheduled_job_defaults_to_drafting(self):
         import inspect
-        sig = inspect.signature(PeriodicReportService.generate_run)
+        sig = inspect.signature(WeeklyReportService.generate_run)
         assert sig.parameters['draft_email'].default is True
 
     def test_draft_email_false_skips_the_model_entirely(self, service):
         # The CLI's --no-email-draft flag: figures without paying for prose.
         service.repo.get_run_by_as_of.return_value = None
         service.repo.create_run.return_value = 1
-        with patch('app.modules.periodic_report.commentary.generate_commentary') as gen:
+        with patch('app.modules.weekly_report.commentary.generate_commentary') as gen:
             service.generate_run(date(2026, 9, 14), through=date(2026, 9, 13),
                                  draft_email=False)
         gen.assert_not_called()
@@ -714,8 +714,8 @@ class TestRecipientsAreNotBoundToARun:
         params = inspect.signature(
             service.repo.create_run).parameters if not isinstance(
                 service.repo, MagicMock) else None
-        from app.modules.periodic_report.repository import PeriodicReportRepository
-        sig = inspect.signature(PeriodicReportRepository.create_run)
+        from app.modules.weekly_report.repository import WeeklyReportRepository
+        sig = inspect.signature(WeeklyReportRepository.create_run)
         assert not any('recipient' in p for p in sig.parameters)
 
 
@@ -729,11 +729,11 @@ class TestScheduleIsTimezoneAware:
     """
 
     def test_now_local_is_aware(self):
-        from app.modules.periodic_report.service import now_local
+        from app.modules.weekly_report.service import now_local
         assert now_local().tzinfo is not None
 
     def test_next_send_time_keeps_the_callers_zone(self):
-        from app.modules.periodic_report.service import REPORT_TZ
+        from app.modules.weekly_report.service import REPORT_TZ
         now = datetime(2026, 9, 16, 9, 0, tzinfo=REPORT_TZ)   # Wed
         result = next_send_time(now, 3, time(0, 30))          # Thu 00:30
         assert result.tzinfo is not None
@@ -742,14 +742,14 @@ class TestScheduleIsTimezoneAware:
     def test_the_stored_instant_is_the_users_clock_not_the_servers(self):
         # 00:30 in Vietnam is 17:30 UTC the previous day. Before the fix this
         # became 00:30 UTC, seven hours late.
-        from app.modules.periodic_report.service import REPORT_TZ
+        from app.modules.weekly_report.service import REPORT_TZ
         now = datetime(2026, 9, 16, 9, 0, tzinfo=REPORT_TZ)
         result = next_send_time(now, 3, time(0, 30))
         assert result.astimezone(timezone.utc) == \
             datetime(2026, 9, 16, 17, 30, tzinfo=timezone.utc)
 
     def test_a_time_already_past_today_rolls_a_week(self):
-        from app.modules.periodic_report.service import REPORT_TZ
+        from app.modules.weekly_report.service import REPORT_TZ
         now = datetime(2026, 9, 17, 9, 0, tzinfo=REPORT_TZ)   # Thu 09:00
         assert next_send_time(now, 3, time(0, 30)) == \
             datetime(2026, 9, 24, 0, 30, tzinfo=REPORT_TZ)
@@ -812,7 +812,7 @@ class TestBackfill:
         return service.backfill_week(week_end, DEPT_ROWS, STORE_ROWS)
 
     def test_NEVER_calls_the_model(self, service):
-        with patch('app.modules.periodic_report.commentary.generate_commentary') as gen:
+        with patch('app.modules.weekly_report.commentary.generate_commentary') as gen:
             self._go(service)
         gen.assert_not_called()
 
@@ -855,7 +855,7 @@ class TestBackfill:
         future = {**DEPT_ROWS[0], 'day': date(2027, 1, 1)}
         service.repo.get_run_by_as_of.return_value = None
         service.repo.create_run.return_value = 1
-        with patch('app.modules.periodic_report.service.build_workbook_bytes',
+        with patch('app.modules.weekly_report.service.build_workbook_bytes',
                    return_value=b'PK') as build:
             service.backfill_week(date(2026, 9, 13), DEPT_ROWS + [future], STORE_ROWS)
         passed_rows = build.call_args[0][1]

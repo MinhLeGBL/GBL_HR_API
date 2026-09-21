@@ -50,8 +50,8 @@ if os.path.exists(env_file):
 else:
     load_dotenv()
 
-from app.modules.periodic_report.period import last_complete_week  # noqa: E402
-from app.modules.periodic_report.service import PeriodicReportService  # noqa: E402
+from app.modules.weekly_report.period import last_complete_week  # noqa: E402
+from app.modules.weekly_report.service import WeeklyReportService  # noqa: E402
 
 
 def main():
@@ -78,7 +78,7 @@ def main():
     print(f'Periodic report: as-of {as_of}, reporting {week_begin} .. {week_end}, '
           f'MTD/YTD through {through}')
 
-    result = PeriodicReportService().generate_run(
+    result = WeeklyReportService().generate_run(
         as_of=as_of, week_start=args.week_start, through=through,
         draft_email=not args.no_email_draft)
 

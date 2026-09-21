@@ -1,4 +1,4 @@
-"""Metric derivation and window aggregation for the periodic sales report.
+"""Metric derivation and window aggregation for the weekly sales report.
 
 Pure functions over the day x store x department rows the repository fetches.
 All money and quantities stay `Decimal` end to end: float64 accumulates ~1e-12

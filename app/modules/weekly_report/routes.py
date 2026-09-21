@@ -1,4 +1,4 @@
-"""Periodic report API routes.
+"""Weekly report API routes.
 
 The analysis costs money and is written exactly once per report, by the Monday
 03:00 job. There is deliberately no general "regenerate" endpoint: it would
@@ -10,26 +10,34 @@ The one exception is `/runs/<id>/retry`, which re-runs a generation that FAILED
 fine. The service refuses it on a healthy run, so it cannot become the casual
 spend path.
 
-Two permission sections gate this module:
-  PERIODIC_REPORT          see the page, the figures and the draft
-  PERIODIC_REPORT_APPROVE  edit the draft, approve, and change who receives it
+One permission section gates this module: WEEKLY_REPORT. Access to the page is
+access to the page — the same design as every other feature.
 
-Approval sends email to the management board, so it is enforced here rather
-than only hidden in the frontend nav.
+It was briefly split into view and approve/send sections while the email was
+new and its blast radius unknown. That bought nothing: nobody was granted the
+view without also needing to act on it, and the split only made the access
+model inconsistent with the rest of the app.
+
+Still enforced here rather than only hidden in the nav — approving sends email
+to the management board, and a hidden button is not an access control.
 """
 from io import BytesIO
 
 from flask import Blueprint, g, jsonify, request, send_file
 
 from app.core.auth.middleware import section_required
-from .service import PeriodicReportService
+from .service import WeeklyReportService
 
-periodic_report_bp = Blueprint('periodic_report', __name__,
-                               url_prefix='/api/v1/periodic-report')
-periodic_report_service = PeriodicReportService()
+weekly_report_bp = Blueprint('weekly_report', __name__,
+                               url_prefix='/api/v1/weekly-report')
+weekly_report_service = WeeklyReportService()
 
-VIEW = 'PERIODIC_REPORT'
-APPROVE = 'PERIODIC_REPORT_APPROVE'
+# ONE section, not two. Access to the page is access to the page — the same
+# design as every other feature. Approving and sending were gated separately
+# while the email was new and the blast radius unknown; splitting them turned
+# out to buy nothing, because nobody was ever granted the view without the
+# ability to act on it.
+SECTION = 'WEEKLY_REPORT'
 
 # Service error code → HTTP status.
 _ERROR_STATUS = {
@@ -49,16 +57,16 @@ def _respond(result, ok=200):
     return jsonify(result), ok
 
 
-@periodic_report_bp.route('/runs/latest', methods=['GET'])
-@section_required(VIEW)
+@weekly_report_bp.route('/runs/latest', methods=['GET'])
+@section_required(SECTION)
 def get_latest_run():
     """The most recent run — the Monday report awaiting approval, normally.
     Returns `{run: null}` (not 404) before the first run has ever happened."""
-    return _respond(periodic_report_service.get_latest())
+    return _respond(weekly_report_service.get_latest())
 
 
-@periodic_report_bp.route('/runs', methods=['GET'])
-@section_required(VIEW)
+@weekly_report_bp.route('/runs', methods=['GET'])
+@section_required(SECTION)
 def list_runs():
     """Recent runs, newest first, without payloads — a history list."""
     try:
@@ -66,21 +74,21 @@ def list_runs():
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'limit must be an integer',
                         'code': 'INVALID_INPUT'}), 400
-    return _respond(periodic_report_service.list_runs(limit))
+    return _respond(weekly_report_service.list_runs(limit))
 
 
-@periodic_report_bp.route('/runs/<int:run_id>', methods=['GET'])
-@section_required(VIEW)
+@weekly_report_bp.route('/runs/<int:run_id>', methods=['GET'])
+@section_required(SECTION)
 def get_run(run_id):
     """One run in full, including the snapshot payload and the email draft."""
-    return _respond(periodic_report_service.get_run(run_id))
+    return _respond(weekly_report_service.get_run(run_id))
 
 
-@periodic_report_bp.route('/runs/<int:run_id>/workbook', methods=['GET'])
-@section_required(VIEW)
+@weekly_report_bp.route('/runs/<int:run_id>/workbook', methods=['GET'])
+@section_required(SECTION)
 def download_workbook(run_id):
     """The stored .xlsx for a run — the same file the email attaches."""
-    run = periodic_report_service.get_workbook(run_id)
+    run = weekly_report_service.get_workbook(run_id)
     if run is None:
         return jsonify({'success': False, 'error': 'No workbook for this run',
                         'code': 'NOT_FOUND'}), 404
@@ -88,21 +96,21 @@ def download_workbook(run_id):
         BytesIO(run['workbook']),
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         as_attachment=True,
-        download_name=f"periodic_report_{run['as_of']}.xlsx",
+        download_name=f"weekly_report_{run['as_of']}.xlsx",
     )
 
 
-@periodic_report_bp.route('/runs/<int:run_id>/email', methods=['PUT'])
-@section_required(APPROVE)
+@weekly_report_bp.route('/runs/<int:run_id>/email', methods=['PUT'])
+@section_required(SECTION)
 def update_draft(run_id):
     """Save edits to the draft. Only while the run awaits approval."""
     body = request.get_json(silent=True) or {}
-    return _respond(periodic_report_service.update_draft(
+    return _respond(weekly_report_service.update_draft(
         run_id, body.get('subject', ''), body.get('body', '')))
 
 
-@periodic_report_bp.route('/runs/<int:run_id>/approve', methods=['POST'])
-@section_required(APPROVE)
+@weekly_report_bp.route('/runs/<int:run_id>/approve', methods=['POST'])
+@section_required(SECTION)
 def approve_run(run_id):
     """Sign off the content. Does NOT send.
 
@@ -110,11 +118,11 @@ def approve_run(run_id):
     not require recipients — the list is edited independently and may be empty
     at this moment.
     """
-    return _respond(periodic_report_service.approve(run_id, user_id=g.sid))
+    return _respond(weekly_report_service.approve(run_id, user_id=g.sid))
 
 
-@periodic_report_bp.route('/runs/<int:run_id>/send', methods=['POST'])
-@section_required(APPROVE)
+@weekly_report_bp.route('/runs/<int:run_id>/send', methods=['POST'])
+@section_required(SECTION)
 def send_run(run_id):
     """Queue an approved — or already sent — report for delivery.
 
@@ -126,13 +134,13 @@ def send_run(run_id):
     same way the recipient list is.
     """
     body = request.get_json(silent=True) or {}
-    return _respond(periodic_report_service.send(
+    return _respond(weekly_report_service.send(
         run_id, user_id=g.sid, mode=body.get('send_mode'),
         send_weekday=body.get('send_weekday'), send_time=body.get('send_time')))
 
 
-@periodic_report_bp.route('/runs/<int:run_id>/retry', methods=['POST'])
-@section_required(APPROVE)
+@weekly_report_bp.route('/runs/<int:run_id>/retry', methods=['POST'])
+@section_required(SECTION)
 def retry_run(run_id):
     """Re-run a generation that FAILED. One action; the service picks the scope.
 
@@ -143,34 +151,34 @@ def retry_run(run_id):
     NOT a general regenerate button — refused unless something actually went
     wrong, so it cannot become a way to casually re-roll a healthy report.
     """
-    return _respond(periodic_report_service.retry_generation(run_id))
+    return _respond(weekly_report_service.retry_generation(run_id))
 
 
-@periodic_report_bp.route('/recipients', methods=['GET'])
-@section_required(VIEW)
+@weekly_report_bp.route('/recipients', methods=['GET'])
+@section_required(SECTION)
 def get_recipients():
-    return _respond(periodic_report_service.get_recipients())
+    return _respond(weekly_report_service.get_recipients())
 
 
-@periodic_report_bp.route('/recipients', methods=['PUT'])
-@section_required(APPROVE)
+@weekly_report_bp.route('/recipients', methods=['PUT'])
+@section_required(SECTION)
 def set_recipients():
     """Replace the recipient list. Body: {recipients: [{email, name?, kind?}]}."""
     body = request.get_json(silent=True) or {}
-    return _respond(periodic_report_service.set_recipients(
+    return _respond(weekly_report_service.set_recipients(
         body.get('recipients')))
 
 
-@periodic_report_bp.route('/settings', methods=['GET'])
-@section_required(VIEW)
+@weekly_report_bp.route('/settings', methods=['GET'])
+@section_required(SECTION)
 def get_settings():
-    return _respond(periodic_report_service.get_settings())
+    return _respond(weekly_report_service.get_settings())
 
 
-@periodic_report_bp.route('/settings', methods=['PUT'])
-@section_required(APPROVE)
+@weekly_report_bp.route('/settings', methods=['PUT'])
+@section_required(SECTION)
 def update_settings():
     """Body: any of {send_mode, send_weekday, send_time, subject_template,
     body_template, commentary_enabled}."""
-    return _respond(periodic_report_service.update_settings(
+    return _respond(weekly_report_service.update_settings(
         request.get_json(silent=True)))

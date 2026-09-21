@@ -43,7 +43,7 @@ if os.path.exists(env_file):
 else:
     load_dotenv()
 
-from app.modules.periodic_report.service import PeriodicReportService  # noqa: E402
+from app.modules.weekly_report.service import WeeklyReportService  # noqa: E402
 
 
 def main():
@@ -53,7 +53,7 @@ def main():
                              '(it must already be approved)')
     args = parser.parse_args()
 
-    service = PeriodicReportService()
+    service = WeeklyReportService()
 
     if args.run_id is not None:
         results = [service.send_run(args.run_id)]

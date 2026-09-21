@@ -1,4 +1,4 @@
-"""Periodic report service — snapshot generation, approval, dispatch state.
+"""Weekly report service — snapshot generation, approval, dispatch state.
 
 The weekly cycle this serves:
 
@@ -26,7 +26,7 @@ from .render import html_document, markdown_to_html, to_plain_text
 from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
                      fetch_span, last_complete_week,
                      period_windows, week_label)
-from .repository import PeriodicReportRepository
+from .repository import WeeklyReportRepository
 
 # Money and quantities are exact `Decimal` through aggregation; the JSON payload
 # carries them as floats rounded to 2dp. That is a display artifact — VND has no
@@ -65,10 +65,10 @@ Best regards,
 """
 
 
-class PeriodicReportService:
+class WeeklyReportService:
 
     def __init__(self):
-        self.repo = PeriodicReportRepository()
+        self.repo = WeeklyReportRepository()
 
     # ==================================================================
     # Schema
@@ -446,7 +446,7 @@ class PeriodicReportService:
                              'analysis was not generated.')
             except Exception as e:   # noqa: BLE001 — never fail the run on this
                 error = f'{type(e).__name__}: {e}'
-                print(f'[WARN] periodic report commentary unavailable: {e}')
+                print(f'[WARN] weekly report commentary unavailable: {e}')
 
         return (render_template(subject_tpl, payload, commentary),
                 render_template(body_tpl, payload, commentary),
@@ -724,7 +724,7 @@ class PeriodicReportService:
             error = str(e)
             self.repo.mark_send_failed(run_id, error)
             self.repo.log_send(run_id, envelope, False, error)
-            print(f'[ERROR] periodic report send failed for run {run_id}: {error}')
+            print(f'[ERROR] weekly report send failed for run {run_id}: {error}')
             return {'run_id': run_id, 'success': False, 'error': error}
 
         self.repo.mark_sent(run_id)
