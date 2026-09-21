@@ -31,12 +31,13 @@ METRICS = (
     ('avg_transaction_value', 'money1'),
     ('avg_discount_pct',      'pct'),
     ('returns_value',         'money'),
+    ('qty_returned',          'count'),
 )
 
 # Metrics where a FALL is the good outcome. Everything else is "higher is
 # better". Without this, a shrinking discount rate and shrinking returns would
 # read as losses, which is exactly backwards — both are wins.
-LOWER_IS_BETTER = {'avg_discount_pct', 'returns_value'}
+LOWER_IS_BETTER = {'avg_discount_pct', 'returns_value', 'qty_returned'}
 
 
 def blank():
@@ -58,6 +59,10 @@ def metrics(acc):
     return {
         'total_sales': sale_net - acc['return_net'],
         'returns_value': acc['return_net'],
+        # Already summed as a component; reported since 0.15.0 so the value of
+        # what came back sits beside how many items did. A few expensive
+        # returns and many cheap ones are different problems.
+        'qty_returned': acc['qty_returned'],
         'qty_sold': qty,
         'bills': bills,
         'avg_unit_price': (sale_net / qty) if qty else None,
