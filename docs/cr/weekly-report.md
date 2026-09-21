@@ -1,8 +1,8 @@
 # Periodic Report — Backend → Frontend CR
 
-**Backend module:** `app/modules/periodic_report/` v0.1.0
+**Backend module:** `app/modules/weekly_report/` v0.1.0
 **Branch:** `feature/periodic-report` (both repos)
-**Base URL:** `/api/v1/periodic-report`
+**Base URL:** `/api/v1/weekly-report`
 
 The weekly sales report became a real module. This is the contract for the
 preview-and-approve page.
@@ -22,11 +22,11 @@ on approve the run is queued; a dispatcher timer sends it (immediately, or at
 
 | Section | Grants |
 |---|---|
-| `PERIODIC_REPORT` | see the page, the figures, the draft |
-| `PERIODIC_REPORT_APPROVE` | edit the draft, approve, manage recipients and settings |
+| `WEEKLY_REPORT` | see the page, the figures, the draft |
+| `WEEKLY_REPORT` | edit the draft, approve, manage recipients and settings |
 
 Both are enforced **server-side** (403 without them), not just hidden in the nav.
-Seeded: `PERIODIC_REPORT` → ADMIN + MANAGER, `PERIODIC_REPORT_APPROVE` → ADMIN.
+Seeded: `WEEKLY_REPORT` → ADMIN + MANAGER, `WEEKLY_REPORT` → ADMIN.
 
 ## Endpoints
 

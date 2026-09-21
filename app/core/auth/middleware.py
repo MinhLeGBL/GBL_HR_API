@@ -136,7 +136,7 @@ def section_required(section_code):
 
     Usage:
         @bp.route('/approve', methods=['POST'])
-        @section_required('PERIODIC_REPORT_APPROVE')
+        @section_required('WEEKLY_REPORT')
         def approve():
             ...
     """

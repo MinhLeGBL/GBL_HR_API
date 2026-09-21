@@ -1,4 +1,4 @@
-"""Unit tests for app.modules.periodic_report.excel.
+"""Unit tests for app.modules.weekly_report.excel.
 
 Focused on the sheet's column outline: the prior-period block is grouped and
 opens collapsed. Everything here goes through a real save/load round trip
@@ -13,9 +13,9 @@ import pytest
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from app.modules.periodic_report.excel import (METRIC_COLUMNS, SHEET_NAMES,
+from app.modules.weekly_report.excel import (METRIC_COLUMNS, SHEET_NAMES,
                                                build_workbook_bytes)
-from app.modules.periodic_report.period import period_windows
+from app.modules.weekly_report.period import period_windows
 
 WIDTH = len(METRIC_COLUMNS)
 FIRST_CURRENT = 3

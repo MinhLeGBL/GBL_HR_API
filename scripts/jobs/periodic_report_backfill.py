@@ -42,9 +42,9 @@ if os.path.exists(env_file):
 else:
     load_dotenv()
 
-from app.modules.periodic_report.period import (  # noqa: E402
+from app.modules.weekly_report.period import (  # noqa: E402
     fetch_span, last_complete_week, period_windows)
-from app.modules.periodic_report.service import PeriodicReportService  # noqa: E402
+from app.modules.weekly_report.service import WeeklyReportService  # noqa: E402
 
 
 def weeks_between(start: date, end: date):
@@ -77,7 +77,7 @@ def main():
         print('No closed weeks in that range.')
         return
 
-    service = PeriodicReportService()
+    service = WeeklyReportService()
     existing = [w for w in weeks
                 if service.repo.get_run_by_as_of(w[1] + timedelta(days=1))]
     todo = [w for w in weeks if w not in existing]

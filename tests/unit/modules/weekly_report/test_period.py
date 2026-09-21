@@ -1,4 +1,4 @@
-"""Unit tests for app.modules.periodic_report.period.
+"""Unit tests for app.modules.weekly_report.period.
 
 The Phase 1 period maths is already covered by
 `tests/unit/scripts/test_periodic_report.py`, which loads the CLI script and so
@@ -8,7 +8,7 @@ ADDED: the `through` clamp that ends MTD and YTD on the last closed day, and
 """
 from datetime import date
 
-from app.modules.periodic_report.period import (fetch_span, last_complete_week,
+from app.modules.weekly_report.period import (fetch_span, last_complete_week,
                                                 month_end, period_windows,
                                                 shift_year)
 

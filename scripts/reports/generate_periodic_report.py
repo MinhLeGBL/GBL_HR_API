@@ -1,7 +1,7 @@
 """
 Periodic sales Excel report: week-over-week, plus MTD / YTD against last year.
 
-Command-line front end for `app.modules.periodic_report`. The logic lives in the
+Command-line front end for `app.modules.weekly_report`. The logic lives in the
 module — this script parses arguments, runs one Oracle fetch and writes the
 workbook to disk. The scheduled Monday job (`scripts/jobs/periodic_report_generate.py`)
 goes through the same module, so the file emailed to recipients is the file this
@@ -40,7 +40,7 @@ containing its start date.
 
 Departments, metrics, revenue formulas and the deliberate divergences from
 `app/modules/reports/queries.py` are documented in the module:
-`app/modules/periodic_report/{period,queries,aggregate}.py`.
+`app/modules/weekly_report/{period,queries,aggregate}.py`.
 
 Output: document/reports/periodic_report_<as_of>.xlsx
 """
@@ -55,22 +55,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # test_periodic_report.py` loads this file by path and reaches for
 # `pr.shift_year`, `pr.aggregate`, `pr.METRIC_COLUMNS` and the rest, so the
 # names must stay bound here even though main() uses only a few of them.
-from app.modules.periodic_report.aggregate import (  # noqa: E402,F401
+from app.modules.weekly_report.aggregate import (  # noqa: E402,F401
     LOWER_IS_BETTER, METRICS, ZERO, ZERO_METRICS, _COMPONENTS, aggregate,
     blank as _blank, delta as _delta, metrics as _metrics)
-from app.modules.periodic_report.excel import (  # noqa: E402,F401
+from app.modules.weekly_report.excel import (  # noqa: E402,F401
     BAD_COLOUR, COUNT_FORMAT, METRIC_COLUMNS, MONEY_1DP_FORMAT, MONEY_FORMAT,
     PCT_FORMAT, POINT_FORMAT, _UNIT_FORMAT, build_workbook)
-from app.modules.periodic_report.period import (  # noqa: E402,F401
+from app.modules.weekly_report.period import (  # noqa: E402,F401
     DEPT_MERGE, UNKNOWN_DEPT, fetch_span, merge_department, period_windows,
     previous_week_window, shift_year, week_label)
-from app.modules.periodic_report.repository import (  # noqa: E402,F401
-    PeriodicReportRepository)
+from app.modules.weekly_report.repository import (  # noqa: E402,F401
+    WeeklyReportRepository)
 
 
 def fetch(from_date, to_date):
     """Pull both grains over [from_date, to_date] inclusive."""
-    return PeriodicReportRepository().fetch_sales(from_date, to_date)
+    return WeeklyReportRepository().fetch_sales(from_date, to_date)
 
 
 def main():

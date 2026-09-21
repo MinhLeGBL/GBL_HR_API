@@ -36,7 +36,7 @@ from app.modules.crm.service import CRMService
 from app.modules.handcarry.service import HandCarryService
 from app.modules.account_payable.service import AccountPayableService
 from app.modules.reports.service import ReportsService
-from app.modules.periodic_report.service import PeriodicReportService
+from app.modules.weekly_report.service import WeeklyReportService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -68,7 +68,7 @@ INIT_STEPS = [
     ('Reports (live_comparison_pins)',
      ReportsService().init_database),
     ('Periodic Report (runs, recipients, settings, sends)',
-     PeriodicReportService().init_database),
+     WeeklyReportService().init_database),
 ]
 
 
