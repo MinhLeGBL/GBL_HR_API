@@ -20,7 +20,8 @@ from decimal import Decimal
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
-from .aggregate import METRICS, aggregate, delta_for, is_unfavourable
+from .aggregate import (METRICS, aggregate, delta_for, is_unfavourable,
+                        weekday_averages)
 from .excel import build_workbook_bytes
 from .render import html_document, markdown_to_html, to_plain_text
 from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
@@ -211,6 +212,7 @@ class WeeklyReportService:
             store_names.update(pri_data[3])
             store_names.update(cur_data[3])
             periods[label] = self._period_payload(label, cur_win, pri_win,
+                                                  dept_rows,
                                                   cur_data, pri_data)
 
         return {
@@ -225,7 +227,8 @@ class WeeklyReportService:
             'periods': periods,
         }
 
-    def _period_payload(self, label, cur_win, pri_win, cur_data, pri_data):
+    def _period_payload(self, label, cur_win, pri_win, dept_rows,
+                        cur_data, pri_data):
         cur_dept, cur_store, cur_grand, _ = cur_data
         pri_dept, pri_store, pri_grand, _ = pri_data
 
@@ -249,7 +252,21 @@ class WeeklyReportService:
             'prior': self._window_payload(label, pri_win),
             'total': self._compare(cur_grand, pri_grand),
             'stores': stores,
+            # Average revenue by weekday, for the chart view behind each tab.
+            # Computed at generation because the daily rows are not stored —
+            # the snapshot is all the page ever sees.
+            'weekdays': {
+                'current': self._weekday_payload(dept_rows, cur_win),
+                'prior': self._weekday_payload(dept_rows, pri_win),
+            },
         }
+
+    @staticmethod
+    def _weekday_payload(dept_rows, window):
+        return [{**row,
+                 'total': float(row['total']),
+                 'average': None if row['average'] is None else float(row['average'])}
+                for row in weekday_averages(dept_rows, window)]
 
     # Periods whose windows are whole weeks, so an ISO week label means
     # something. MTD and YTD spans are not weeks and get no label.
