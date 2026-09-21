@@ -120,11 +120,16 @@ def period_windows(as_of, week_start='monday', through=None):
     not a Sunday. Six days of a new month is also a poor comparison against six
     days of the prior year, while a complete month is the natural unit.
 
-    **The same applies to YTD across a year boundary.** The week spanning New
-    Year reports the whole of the year that just ended, not the two or three
-    days of the new one — which would otherwise sit next to a complete December
-    and say far less. A complete year is likewise never reported otherwise,
-    since 31 December is rarely a Sunday.
+    **YTD ends wherever MTD ends.** Whenever the reported week closed a month,
+    year-to-date runs to that month end as well, so the two columns always
+    describe the same span and YTD is the sum of the months reported. Week 36
+    of 2026 gives MTD = the whole of August and YTD = 1 January to 31 August.
+
+    Across a year boundary this falls out of the same rule: the week spanning
+    New Year closes December, so YTD reports the whole of the year that just
+    ended rather than the two or three days of the new one — which would
+    otherwise sit next to a complete December and say far less. A complete year
+    is likewise never reported otherwise, since 31 December is rarely a Sunday.
     """
     week_begin, week_end = last_complete_week(as_of, week_start)
     windows = {
@@ -150,13 +155,23 @@ def period_windows(as_of, week_start='monday', through=None):
     windows['MTD'] = ((mtd_from, mtd_to),
                       (shift_year(mtd_from), shift_year(mtd_to)))
 
-    if week_begin.year != week_end.year and period_end <= week_end:
-        # A year ended inside the reported week — the same rule as the month,
-        # one level up. Report that year whole rather than the two or three
-        # days of the new one, which would otherwise sit next to a complete
-        # December and say far less.
+    if week_begin.month != week_end.month and period_end <= week_end:
+        # YTD ENDS WHERE MTD ENDS. The same condition as the month above, not a
+        # narrower year-only one: whenever the report is anchored to a week that
+        # closed a month, year-to-date runs to that month end too.
+        #
+        # Getting this wrong is subtle, because the figure still looks
+        # plausible. Week 36 of 2026 (31 Aug - 6 Sep) reported MTD as the whole
+        # of August while YTD ran to 6 September — so YTD carried six days the
+        # MTD beside it excluded, and was not the sum of the months shown. The
+        # two columns silently described different periods.
+        #
+        # This also SUBSUMES the year-boundary case rather than special-casing
+        # it: the week spanning New Year straddles December into January, so
+        # `month_end(week_begin)` is 31 December and the year is reported whole
+        # exactly as before. One rule, two effects.
         ytd_from = date(week_begin.year, 1, 1)
-        ytd_to = date(week_begin.year, 12, 31)
+        ytd_to = month_end(week_begin)
     else:
         ytd_from = period_end.replace(month=1, day=1)
         ytd_to = period_end
