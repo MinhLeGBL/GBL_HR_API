@@ -91,6 +91,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
+          # MUST match the production venv. CI on 3.12 against a 3.10 server
+          # let an f-string backslash — legal from 3.12, a SyntaxError before
+          # it — reach production and take the API down on 2026-09-16.
+          # The server venv was rebuilt on 3.12, so the two match again.
+          # If the server moves, change it here in the SAME PR.
           python-version: '3.12'
       - run: pip install -r requirements.txt
 

@@ -297,11 +297,23 @@ class TestFetchWindowCoverage:
                 assert end <= as_of, f'{label} ends after as-of'
 
     def test_early_january_still_reaches_back_to_the_prior_year(self):
-        # YTD's prior-year window is the earliest start once the week sheet
-        # compares adjacent weeks rather than reaching back a year.
+        # The earliest start is NOT reliably YTD's prior-year window. In early
+        # January, WTD's prior window — the same ISO week a year back — begins
+        # in the December before it, earlier than 1 January. Assuming YTD
+        # bounds the fetch would read those days as zero.
         windows = pr.period_windows(date(2026, 1, 1))
         fetch_from = min(start for w in windows.values() for start, _end in w)
-        assert fetch_from == date(2025, 1, 1) == windows['YTD'][1][0]
+        assert fetch_from == windows['WTD'][1][0]
+        assert fetch_from < windows['YTD'][1][0]
+
+    def test_the_fetch_span_covers_every_window(self):
+        # The property that actually matters, whichever window happens to be
+        # the extreme.
+        windows = pr.period_windows(date(2026, 1, 1))
+        start, end = pr.fetch_span(windows)
+        for cur, prior in windows.values():
+            for win in (cur, prior):
+                assert start <= win[0] and win[1] <= end
 
 
 class TestMetricColumns:

@@ -103,7 +103,11 @@ def to_plain_text(text: str) -> str:
         line = _HEADING_HASH.sub('', raw.rstrip())
         bullet = _BULLET.match(line.strip())
         if bullet:
-            out.append(f'- {_BOLD.sub(r"\1", bullet.group(1))}')
+            # Concatenation, not an f-string: a backslash inside an f-string
+            # EXPRESSION is a SyntaxError before Python 3.12 (PEP 701 relaxed
+            # it). Production runs 3.10, so the f-string form took the whole
+            # app down at import — this module is reached from `app.main`.
+            out.append('- ' + _BOLD.sub(r'\1', bullet.group(1)))
         else:
             out.append(_BOLD.sub(r'\1', line))
     return '\n'.join(out)

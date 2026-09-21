@@ -104,14 +104,31 @@ def update_draft(run_id):
 @periodic_report_bp.route('/runs/<int:run_id>/approve', methods=['POST'])
 @section_required(APPROVE)
 def approve_run(run_id):
-    """Approve a run and queue it for sending.
+    """Sign off the content. Does NOT send.
 
-    Body (optional): {send_mode: 'immediate' | 'scheduled'} — overrides the
-    configured default for this run only.
+    Approval and sending are separate decisions, so this takes no body and does
+    not require recipients — the list is edited independently and may be empty
+    at this moment.
+    """
+    return _respond(periodic_report_service.approve(run_id, user_id=g.sid))
+
+
+@periodic_report_bp.route('/runs/<int:run_id>/send', methods=['POST'])
+@section_required(APPROVE)
+def send_run(run_id):
+    """Queue an approved — or already sent — report for delivery.
+
+    One endpoint for both: sending the first time and sending again differ only
+    in what the row said beforehand.
+
+    Body (optional): {send_mode: 'immediate'|'scheduled', send_weekday: 0-6,
+    send_time: 'HH:MM'}. A schedule given here is saved as the new default, the
+    same way the recipient list is.
     """
     body = request.get_json(silent=True) or {}
-    return _respond(periodic_report_service.approve(
-        run_id, user_id=g.sid, send_mode=body.get('send_mode')))
+    return _respond(periodic_report_service.send(
+        run_id, user_id=g.sid, mode=body.get('send_mode'),
+        send_weekday=body.get('send_weekday'), send_time=body.get('send_time')))
 
 
 @periodic_report_bp.route('/runs/<int:run_id>/retry', methods=['POST'])

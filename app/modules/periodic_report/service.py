@@ -14,14 +14,17 @@ Oracle is live and moves during the day — a verification run once saw qty go
 would not be the numbers emailed. `generate_run` writes the aggregates once and
 every later read serves that payload.
 """
+import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from .aggregate import METRICS, aggregate, delta_for, is_unfavourable
-from .excel import SHEET_NAMES, build_workbook_bytes
+from .excel import build_workbook_bytes
 from .render import html_document, markdown_to_html, to_plain_text
-from .period import (PERIOD_LABELS, fetch_span, last_complete_week,
+from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
+                     fetch_span, last_complete_week,
                      period_windows, week_label)
 from .repository import PeriodicReportRepository
 
@@ -30,6 +33,18 @@ from .repository import PeriodicReportRepository
 # subunit in practice, and the exact figures survive in the stored workbook,
 # whose cells still hold the Decimals.
 _ROUND_TO = 2
+
+# The server clock is UTC; the business runs on Vietnam time. Every send time a
+# user picks is meant in THEIR timezone, so schedules are computed here and
+# stored as timezone-AWARE values. Naive `datetime.now()` on a UTC server
+# silently turned "00:30" into 00:30 UTC — 07:30 in Vietnam — and the browser
+# then faithfully displayed 07:30 for a time the user had typed as 00:30.
+REPORT_TZ = ZoneInfo(os.getenv('REPORT_TIMEZONE', 'Asia/Ho_Chi_Minh'))
+
+
+def now_local() -> datetime:
+    """Current time as an AWARE datetime in the report timezone."""
+    return datetime.now(REPORT_TZ)
 
 DEFAULT_SUBJECT_TEMPLATE = 'Báo cáo bán hàng định kỳ — Tuần {{week_no}}/{{week_year}}'
 
@@ -229,18 +244,26 @@ class PeriodicReportService:
             })
 
         return {
-            'label': SHEET_NAMES[label],
+            'label': PERIOD_TITLES[label],
             'current': self._window_payload(label, cur_win),
             'prior': self._window_payload(label, pri_win),
             'total': self._compare(cur_grand, pri_grand),
             'stores': stores,
         }
 
-    @staticmethod
-    def _window_payload(label, window):
+    # Periods whose windows are whole weeks, so an ISO week label means
+    # something. MTD and YTD spans are not weeks and get no label.
+    _WEEK_PERIODS = ('WOW', 'WTD')
+
+    @classmethod
+    def _window_payload(cls, label, window):
         start, end = window
         out = {'from': start.isoformat(), 'to': end.isoformat()}
-        if label == 'WOW':
+        if label in cls._WEEK_PERIODS:
+            # On WTD this is the whole point of the comparison: both sides
+            # carry their ISO label, so the page can say "Week 38 2026 vs
+            # Week 38 2025" rather than leaving the reader to check that the
+            # dates really are the same week a year apart.
             out['label'] = week_label(start)
         return out
 
@@ -273,6 +296,21 @@ class PeriodicReportService:
         other status is replaced, so a retry after a failure is safe.
         """
         as_of = as_of or date.today()
+        # Normalise to the canonical day for the week being reported: the day
+        # after that week ends. Runs are keyed by `as_of`, but EVERY day from
+        # Mon-Sun reports the same closed week — so a manual run on Wednesday
+        # used to create a SECOND row for a week that already had one, and the
+        # week selector showed it twice. Collapsing to the canonical day makes
+        # `ON CONFLICT (as_of)` replace the existing run, which is what "run it
+        # again for this week" should mean.
+        week_end = last_complete_week(as_of, week_start)[1]
+        as_of = week_end + timedelta(days=1)
+        # Default MTD/YTD to that same closing Sunday. Previously only the job
+        # passed `through`, so any other caller silently got windows running to
+        # the Monday — a day with almost no sales against a full prior-year day.
+        # The correct behaviour should not depend on the caller remembering.
+        if through is None:
+            through = week_end
 
         existing = self.repo.get_run_by_as_of(as_of)
         if existing and existing['status'] == 'sent':
@@ -324,6 +362,57 @@ class PeriodicReportService:
             commentary_error=commentary_error)
         return {'success': True, 'run_id': run_id, 'as_of': as_of.isoformat(),
                 'commentary_error': commentary_error}
+
+    def backfill_week(self, week_end: date, dept_rows, store_rows,
+                      week_start: str = 'monday') -> Dict[str, Any]:
+        """Store a past week as a `historical` report, from rows already fetched.
+
+        Used by the backfill script, which fetches Oracle ONCE for the whole
+        range and calls this per week — rather than issuing a full
+        history-spanning query per week against the live database.
+
+        Deliberately calls NO model. The analysis is paid for once per report,
+        by the Monday job; history is figures, workbook and template only. A
+        person can still write the analysis for any single week via Edit.
+
+        Never overwrites an existing run: weeks already generated — including
+        ones carrying a real, paid analysis — are left untouched.
+        """
+        as_of = week_end + timedelta(days=1)
+        if self.repo.get_run_by_as_of(as_of) is not None:
+            return {'success': True, 'skipped': True, 'as_of': as_of.isoformat()}
+
+        windows = period_windows(as_of, week_start, week_end)
+        fetch_from, fetch_to = fetch_span(windows)
+
+        # Narrow the shared rows to THIS week's own span. The figures would be
+        # unaffected either way (aggregation filters by window), but the
+        # workbook's Raw Data sheet shows every row it is given — and week 1's
+        # sheet must not contain months of data from after that week.
+        dept = [r for r in dept_rows if fetch_from <= r['day'] <= fetch_to]
+        store = [r for r in store_rows if fetch_from <= r['day'] <= fetch_to]
+
+        payload = self._snapshot_from_rows(
+            as_of, week_start, week_end, windows, fetch_from, fetch_to,
+            dept, store)
+        workbook = build_workbook_bytes(windows, dept, store)
+
+        settings = self.repo.get_settings() or {}
+        subject = render_template(
+            settings.get('subject_template') or DEFAULT_SUBJECT_TEMPLATE, payload)
+        body = render_template(
+            settings.get('body_template') or DEFAULT_BODY_TEMPLATE, payload, '')
+
+        run_id = self.repo.create_run(
+            as_of=as_of, week_start=week_start, through_date=week_end,
+            status='historical', payload=payload, workbook=workbook,
+            email_subject=subject, email_body=body, error=None,
+            # Not a failure — the analysis was deliberately not generated — so
+            # no error is recorded and the page raises no "could not be
+            # generated" notice.
+            commentary_error=None)
+        return {'success': True, 'skipped': False, 'run_id': run_id,
+                'as_of': as_of.isoformat()}
 
     # ==================================================================
     # Email draft
@@ -469,17 +558,18 @@ class PeriodicReportService:
                     'code': 'INVALID_INPUT'}
         if not self.repo.update_email_draft(run_id, subject, body):
             return {'success': False,
-                    'error': 'Only a run awaiting approval can be edited.',
+                    'error': 'Only a draft awaiting approval, or a historical '
+                             'report, can be edited.',
                     'code': 'INVALID_STATE'}
         return {'success': True}
 
-    def approve(self, run_id: int, user_id: int,
-                send_mode: Optional[str] = None) -> Dict[str, Any]:
-        """Approve a pending run and queue it.
+    def approve(self, run_id: int, user_id: int) -> Dict[str, Any]:
+        """Sign off the CONTENT. Does not send anything.
 
-        `send_mode` overrides the configured default for this run only:
-        'immediate' queues it for the next dispatcher tick, 'scheduled' queues
-        it for the configured weekday/time.
+        Approval and sending are separate decisions. Approving locks the
+        subject, body and figures; it deliberately does NOT require recipients,
+        because who receives the report is a standing list edited independently
+        and can legitimately be empty at this moment.
         """
         run = self.repo.get_run(run_id)
         if run is None:
@@ -488,25 +578,84 @@ class PeriodicReportService:
             return {'success': False,
                     'error': f"Run is {run['status']}, not awaiting approval.",
                     'code': 'INVALID_STATE'}
-        if not self.repo.list_recipients():
+        if not self.repo.approve_run(run_id, user_id):
+            # Lost a race with another approver between the read and the write.
             return {'success': False,
-                    'error': 'No active recipients are configured.',
+                    'error': 'Run is no longer awaiting approval.',
+                    'code': 'INVALID_STATE'}
+        return {'success': True, 'status': 'approved'}
+
+    def send(self, run_id: int, user_id: int, mode: Optional[str] = None,
+             send_weekday: Optional[int] = None,
+             send_time: Optional[str] = None) -> Dict[str, Any]:
+        """Queue an approved — or already sent — report for delivery.
+
+        One action for both: sending for the first time and sending again
+        differ only in what the row said beforehand. That is why there is one
+        Send button rather than a separate "send again".
+
+        `mode` is 'immediate' or 'scheduled'. A schedule supplied here is SAVED
+        as the new default, the same way the recipient list is — set it once and
+        it stays until changed.
+
+        Recipients ARE required here (unlike approval): a send with no visible
+        addressee is refused by the mailer anyway, so it is better refused now.
+        """
+        run = self.repo.get_run(run_id)
+        if run is None:
+            return {'success': False, 'error': 'Run not found', 'code': 'NOT_FOUND'}
+        # `historical` is a backfilled past week: nothing to approve (it was
+        # never a live draft), but it can be forwarded like any sent report.
+        if run['status'] not in ('approved', 'sent', 'historical'):
+            return {'success': False,
+                    'error': f"Run is {run['status']} — approve it before sending."
+                             if run['status'] == 'pending_approval' else
+                             f"Run is {run['status']} and cannot be sent now.",
+                    'code': 'INVALID_STATE'}
+
+        recipients = self.repo.list_recipients()
+        if not any(r['kind'] == 'to' for r in recipients):
+            return {'success': False,
+                    'error': 'Add at least one “To” recipient before sending.',
                     'code': 'NO_RECIPIENTS'}
 
         settings = self.repo.get_settings() or {}
-        mode = send_mode or settings.get('send_mode') or 'immediate'
+        mode = mode or settings.get('send_mode') or 'immediate'
         if mode not in ('immediate', 'scheduled'):
             return {'success': False, 'error': f'Unknown send mode: {mode}',
                     'code': 'INVALID_INPUT'}
 
-        send_at = (datetime.now() if mode == 'immediate'
-                   else next_send_time(datetime.now(),
+        if mode == 'scheduled':
+            # A schedule chosen at send time becomes the standing default, the
+            # same contract as the recipient list.
+            fields: Dict[str, Any] = {'send_mode': 'scheduled'}
+            if send_weekday is not None:
+                if not (isinstance(send_weekday, int) and 0 <= send_weekday <= 6):
+                    return {'success': False,
+                            'error': 'send_weekday must be 0-6 (Monday=0)',
+                            'code': 'INVALID_INPUT'}
+                fields['send_weekday'] = send_weekday
+            if send_time is not None:
+                try:
+                    fields['send_time'] = time.fromisoformat(send_time)
+                except (TypeError, ValueError):
+                    return {'success': False, 'error': 'send_time must be HH:MM',
+                            'code': 'INVALID_INPUT'}
+            merged = {**settings, **fields}
+            if merged.get('send_weekday') is None or merged.get('send_time') is None:
+                return {'success': False,
+                        'error': 'Scheduled sending needs both a weekday and a time.',
+                        'code': 'INVALID_INPUT'}
+            self.repo.update_settings(fields)
+            settings = merged
+
+        send_at = (now_local() if mode == 'immediate'
+                   else next_send_time(now_local(),
                                        settings.get('send_weekday'),
                                        settings.get('send_time')))
-        if not self.repo.approve_run(run_id, user_id, send_at):
-            # Lost a race with another approver between the read and the write.
+        if not self.repo.queue_run(run_id, user_id, send_at):
             return {'success': False,
-                    'error': 'Run is no longer awaiting approval.',
+                    'error': 'This report can no longer be queued.',
                     'code': 'INVALID_STATE'}
         return {'success': True, 'scheduled_send_at': send_at.isoformat(),
                 'send_mode': mode}
@@ -522,7 +671,7 @@ class PeriodicReportService:
         selects it, so a slow send that overruns the timer interval cannot have
         the next tick pick up the same run and email the report twice.
         """
-        now = now or datetime.now()
+        now = now or now_local()
         results = []
         for run_id in self.repo.claim_due_runs(now):
             results.append(self.send_run(run_id))
@@ -704,13 +853,19 @@ def next_send_time(now: datetime, weekday: Optional[int],
                    at: Optional[time]) -> datetime:
     """The next occurrence of `weekday` at `at`, strictly after `now`.
 
-    Falls back to `now` when either is unset, so an approval can never be queued
-    to a time that will not arrive.
+    `now` must be timezone-AWARE and the result carries the same zone, because
+    the weekday and time the user picked are meant in THEIR timezone. Combining
+    them into a naive value would let the server's own zone decide, which is how
+    "00:30" became 00:30 UTC (07:30 in Vietnam).
+
+    Falls back to `now` when either is unset, so a send can never be queued to a
+    time that will not arrive.
     """
     if weekday is None or at is None:
         return now
     days_ahead = (weekday - now.weekday()) % 7
-    candidate = datetime.combine(now.date() + timedelta(days=days_ahead), at)
+    candidate = datetime.combine(now.date() + timedelta(days=days_ahead), at,
+                                 tzinfo=now.tzinfo)
     if candidate <= now:
         candidate += timedelta(days=7)
     return candidate
@@ -723,7 +878,9 @@ def summary_lines(payload: Dict[str, Any]) -> str:
     the email against the attachment sees the same unit.
     """
     lines = []
-    for label in PERIOD_LABELS:
+    # COMMENTARY_LABELS: the email's summary lines mirror what the analysis
+    # discusses, and WTD is figures-only.
+    for label in COMMENTARY_LABELS:
         period = payload['periods'][label]
         total = period['total']
         sales = total['current'].get('total_sales')
