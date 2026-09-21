@@ -25,11 +25,13 @@ PAYLOAD = {
                 'current': {'total_sales': 3_961_000_000, 'bills': 113,
                             'qty_sold': 251, 'avg_discount_pct': 14.0,
                             'returns_value': 375_000_000,
+                            'qty_returned': 12,
                             'avg_unit_price': 17_300_000,
                             'avg_transaction_value': 38_400_000},
                 'prior': {'total_sales': 4_142_000_000, 'bills': 106,
                           'qty_sold': 270, 'avg_discount_pct': 27.3,
                           'returns_value': 122_000_000,
+                          'qty_returned': 4,
                           'avg_unit_price': 15_800_000,
                           'avg_transaction_value': 40_200_000},
                 'change': {

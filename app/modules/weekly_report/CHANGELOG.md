@@ -576,3 +576,26 @@ Used to give all 38 stored reports the WTD period and the weekday chart data:
 and 38 dropped from `sent` back to `pending_approval` — the send records in
 `weekly_report_sends` are untouched, but the page will ask for approval again.
 
+
+## 0.15.0 — 2026-09-21
+
+### Added
+- **`qty_returned` as a reported metric**, immediately after `returns_value` in
+  every block of every period — tables, workbook and the model's prompt (where
+  it is `Số lượng hàng trả lại`, formatted as a count).
+  - Already summed as a component since the module existed; only ever exposed
+    now. The value of what came back and how many items did are different
+    problems: 3 items at ~44m each this week against a 23m year-to-date
+    average is a fact the đồng figure alone conceals.
+  - Joins `LOWER_IS_BETTER` beside `returns_value` — more returned stock is a
+    loss whether measured in đồng or in items.
+
+### Note
+Eight metrics per block now widens a fully expanded sheet past what a 15-inch
+screen shows. It still fits because the prior block opens COLLAPSED (0.9.0),
+which hides one whole block — that change is now load-bearing rather than a
+convenience.
+
+Existing snapshots do not carry the column. Re-render with
+`--overwrite` for historical weeks and `--force --keep-analysis` for the rest.
+

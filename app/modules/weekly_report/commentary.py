@@ -43,13 +43,14 @@ METRIC_VI = {
     'avg_transaction_value': 'Giá trị trung bình mỗi hóa đơn',
     'avg_discount_pct':      'Tỷ lệ chiết khấu',
     'returns_value':         'Giá trị hàng trả lại',
+    'qty_returned':          'Số lượng hàng trả lại',
 }
 
 # How each figure is rendered for the model — the SAME unit the email declares
 # ("Đơn vị tiền: triệu đồng"), so a quoted number needs no conversion.
 _MONEY_0 = ('total_sales', 'returns_value')
 _MONEY_1 = ('avg_unit_price', 'avg_transaction_value')
-_COUNTS = ('qty_sold', 'bills')
+_COUNTS = ('qty_sold', 'bills', 'qty_returned')
 
 PERIOD_VI = {
     'WOW': 'TUẦN GẦN NHẤT',

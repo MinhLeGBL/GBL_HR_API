@@ -48,6 +48,7 @@ _LABELS = {
     'avg_transaction_value': 'Avg txn (VND m)',
     'avg_discount_pct':      'Discount %',
     'returns_value':         'Returns (VND m)',
+    'qty_returned':          'Qty returned',
 }
 
 METRIC_COLUMNS = [(_LABELS[key], key, unit) for key, unit in METRICS]
@@ -233,8 +234,11 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
     # ("1,050.0%"). Each width carries ~2 chars of headroom on top of that so
     # larger figures in future periods do not clip.
     #   px = round(width * 7) + 5
-    #   A(11) + B(10) + 2 value blocks(455px each) + delta block(476px)
-    #   = 82 + 75 + 910 + 476 = 1543px at 100% zoom
+    #   A(11) + B(10) + 2 value blocks(518px each) + delta block(539px)
+    #   = 82 + 75 + 1036 + 539 = 1732px at 100% zoom
+    # An eighth metric (qty_returned, 0.15.0) pushed this past the ~1380px a
+    # 15" MacBook shows. The prior block now opens COLLAPSED (0.9.0), which
+    # hides 518px of it, so the current figures and the deltas still fit.
     # Reference point: a 15" MacBook at default scaling gives ~1380px of grid,
     # which fits the two value blocks; the wider layouts (16" / "More Space")
     # give ~1700px+ and fit the delta block too.
@@ -247,6 +251,9 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
         'avg_transaction_value':  9,
         'avg_discount_pct':       8,
         'returns_value':          9,
+        # Counts, like qty_sold — but 'Qty returned' is a wider HEADING than
+        # its values, so the column is sized by the label rather than the data.
+        'qty_returned':          12,
     }
     DELTA_W = 9   # the whole delta block is percentages -- one width suffices
 
