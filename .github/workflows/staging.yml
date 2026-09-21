@@ -38,7 +38,32 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin deployment
           git checkout deployment
-          git merge origin/staging --no-ff -m "Auto-promote: staging tests passed"
+
+          # `docs/cr/*` is DELETED on deployment by the strip step below, so
+          # any later rename or edit of those files on staging is a
+          # rename/delete or modify/delete conflict and aborts the promote.
+          # That went unnoticed until docs/cr/periodic-report.md was renamed
+          # to weekly-report.md on 2026-09-21: every promote before it had
+          # left those files untouched, which merges cleanly against a
+          # deletion.
+          #
+          # Resolving by deleting is exactly what the next step does anyway.
+          # A conflict ANYWHERE ELSE still fails the job — silently committing
+          # an unresolved merge is how a half-merged tree reaches production.
+          if ! git merge origin/staging --no-ff \
+                 -m "Auto-promote: staging tests passed"; then
+            unresolved=$(git diff --name-only --diff-filter=U)
+            outside=$(echo "$unresolved" | grep -v '^docs/cr/' || true)
+            if [ -n "$outside" ]; then
+              echo "::error::Merge conflict outside docs/cr — not auto-resolving:"
+              echo "$outside"
+              exit 1
+            fi
+            echo "Resolved docs/cr conflicts by deleting (they are stripped anyway):"
+            echo "$unresolved"
+            git rm -r --quiet --ignore-unmatch docs/cr
+            git commit --no-edit
+          fi
 
       # Was a separate workflow (docs-janitor.yml) that pushed the cleanup to
       # staging. That could never work: staging is a protected branch requiring
