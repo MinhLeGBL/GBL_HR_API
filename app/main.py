@@ -17,6 +17,7 @@ from app.modules.handcarry.routes import handcarry_bp
 from app.modules.account_payable.routes import account_payable_bp
 from app.modules.reports.routes import reports_bp
 from app.modules.periodic_report.routes import periodic_report_bp
+from app.modules.pnl.routes import pnl_bp
 
 
 def create_app():
@@ -55,6 +56,7 @@ def create_app():
     app.register_blueprint(account_payable_bp)
     app.register_blueprint(reports_bp)
     app.register_blueprint(periodic_report_bp)
+    app.register_blueprint(pnl_bp)
 
     # Root endpoint
     @app.route('/')

@@ -21,6 +21,7 @@ jobs:
       handcarry: ${{ steps.changes.outputs.handcarry }}
       health: ${{ steps.changes.outputs.health }}
       periodic_report: ${{ steps.changes.outputs.periodic_report }}
+      pnl: ${{ steps.changes.outputs.pnl }}
       permissions: ${{ steps.changes.outputs.permissions }}
       reports: ${{ steps.changes.outputs.reports }}
       stores: ${{ steps.changes.outputs.stores }}
@@ -70,6 +71,10 @@ jobs:
               - 'app/modules/periodic_report/**'
               - 'tests/unit/modules/periodic_report/**'
               - 'scripts/reports/generate_periodic_report.py'
+            pnl:
+              - 'app/modules/pnl/**'
+              - 'tests/unit/modules/pnl/**'
+              - 'scripts/pnl/**'
               - 'tests/unit/scripts/**'
             permissions:
               - 'app/modules/permissions/**'
@@ -123,6 +128,7 @@ jobs:
           [ "${{ needs.detect.outputs.handcarry }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/handcarry"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
           [ "${{ needs.detect.outputs.periodic_report }}" = "true" ] && PATHS="$PATHS tests/unit/modules/periodic_report tests/unit/scripts"
+          [ "${{ needs.detect.outputs.pnl }}" = "true" ] && PATHS="$PATHS tests/unit/modules/pnl"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
           [ "${{ needs.detect.outputs.reports }}" = "true" ]     && PATHS="$PATHS tests/unit/modules/reports"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"

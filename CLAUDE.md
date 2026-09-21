@@ -49,6 +49,7 @@ tests/                     # Mirrors module structure
 | `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
 | `modules/reports` | `reports_bp` | `/api/v1/reports` | `ReportsService` | Read-only Oracle reports — two-period sale comparison (revenue/bills/avg + new-vs-returning), CR #78 |
 | `modules/periodic_report` | `periodic_report_bp` | `/api/v1/periodic-report` | `PeriodicReportService` | Weekly sales report — snapshot, .xlsx, email draft, approve-and-send workflow |
+| `modules/pnl` | `pnl_bp` | `/api/v1/pnl` | `PNLService` | Management P&L — FAST export import, month locking, statement by period and store |
 
 ## Import Rules
 

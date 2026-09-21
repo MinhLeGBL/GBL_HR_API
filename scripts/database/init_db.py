@@ -37,6 +37,7 @@ from app.modules.handcarry.service import HandCarryService
 from app.modules.account_payable.service import AccountPayableService
 from app.modules.reports.service import ReportsService
 from app.modules.periodic_report.service import PeriodicReportService
+from app.modules.pnl.service import PNLService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -69,6 +70,8 @@ INIT_STEPS = [
      ReportsService().init_database),
     ('Periodic Report (runs, recipients, settings, sends)',
      PeriodicReportService().init_database),
+    ('P&L (pnl_imports, pnl_facts, pnl_month_locks)',
+     PNLService().init_database),
 ]
 
 

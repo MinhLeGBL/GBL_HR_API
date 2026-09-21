@@ -131,7 +131,9 @@ class PermissionService:
                 ('HAND_CARRY', 'Hand Carry', 'Hand-carry UPC catalog under Commission (CR #57)'),
                 ('LIVE_COMPARISON', 'Live Sale Comparison', 'Two-period sale comparison report under Report (CR #78)'),
                 ('PERIODIC_REPORT', 'Periodic Report', 'Weekly sales report preview under Report'),
-                ('PERIODIC_REPORT_APPROVE', 'Periodic Report — Approve & Send', 'Edit the draft, approve, and manage recipients for the weekly sales email')
+                ('PERIODIC_REPORT_APPROVE', 'Periodic Report — Approve & Send', 'Edit the draft, approve, and manage recipients for the weekly sales email'),
+                ('PNL', 'P&L', 'Management P&L statement under Report'),
+                ('PNL_IMPORT', 'P&L — Import & Lock', 'Upload FAST exports and close a month')
                 ON CONFLICT (code) DO NOTHING
             ''')
 
@@ -165,6 +167,11 @@ class PermissionService:
             'HAND_CARRY': ['HR'],
             'PERIODIC_REPORT': ['BOD'],
             'PERIODIC_REPORT_APPROVE': ['BOD'],
+            # A P&L exposes payroll, G&A and company profit — a narrower
+            # audience than the sales report. Board sees it; accounting also
+            # imports it, since they produce the FAST export.
+            'PNL': ['BOD', 'ACC'],
+            'PNL_IMPORT': ['ACC'],
         }
         for section_code, depts in section_depts.items():
             for dept in depts:
@@ -185,6 +192,8 @@ class PermissionService:
             'HAND_CARRY': ['ADMIN', 'MANAGER', 'STAFF'],
             'PERIODIC_REPORT': ['ADMIN', 'MANAGER'],
             'PERIODIC_REPORT_APPROVE': ['ADMIN'],
+            'PNL': ['ADMIN'],
+            'PNL_IMPORT': ['ADMIN'],
         }
         for section_code, roles in section_roles.items():
             for role in roles:
