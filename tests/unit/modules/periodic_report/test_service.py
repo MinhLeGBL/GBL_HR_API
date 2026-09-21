@@ -62,8 +62,29 @@ def payload(service):
 
 
 class TestSnapshotShape:
-    def test_carries_all_three_periods(self, payload):
-        assert set(payload['periods']) == {'WOW', 'MTD', 'YTD'}
+    def test_carries_every_period(self, payload):
+        assert set(payload['periods']) == {'WTD', 'MTD', 'YTD', 'WOW'}
+
+    def test_wtd_compares_the_same_ISO_week_a_year_back(self, payload):
+        # Not calendar-date aligned like MTD and YTD: a week shifted by date
+        # lands on different weekdays and carries a different number of
+        # Saturdays.
+        wtd = payload['periods']['WTD']
+        assert wtd['current'] == payload['periods']['WOW']['current']
+        assert wtd['prior']['from'] == '2025-09-08'
+        assert wtd['prior']['to'] == '2025-09-14'
+
+    def test_both_wtd_sides_carry_their_ISO_week_label(self, payload):
+        # So the page can say "Week 37 2026 vs Week 37 2025" instead of
+        # leaving the reader to verify the dates are the same week.
+        wtd = payload['periods']['WTD']
+        assert wtd['current']['label'] == 'Week 37 2026'
+        assert wtd['prior']['label'] == 'Week 37 2025'
+
+    def test_MTD_and_YTD_windows_carry_no_week_label(self, payload):
+        for label in ('MTD', 'YTD'):
+            for side in ('current', 'prior'):
+                assert 'label' not in payload['periods'][label][side]
 
     def test_records_the_through_date_it_was_built_with(self, payload):
         assert payload['as_of'] == '2026-09-14'

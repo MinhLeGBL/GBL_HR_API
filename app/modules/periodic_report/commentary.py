@@ -26,7 +26,9 @@ Configuration (all optional):
 """
 import os
 
-from .period import PERIOD_LABELS
+# COMMENTARY_LABELS, not PERIOD_LABELS: WTD is a figures-only view and is
+# deliberately kept out of the analysis.
+from .period import COMMENTARY_LABELS
 
 DEFAULT_MODEL = 'claude-opus-5'
 DEFAULT_MAX_WORDS = 400
@@ -240,7 +242,7 @@ def notable_movements(payload):
     """
     out = []
     names = payload.get('store_names') or {}
-    for label in PERIOD_LABELS:
+    for label in COMMENTARY_LABELS:
         period = (payload.get('periods') or {}).get(label) or {}
         rows = []
         for store in period.get('stores') or []:
@@ -272,7 +274,7 @@ def build_prompt(payload, max_words: int = DEFAULT_MAX_WORDS) -> str:
     periods = payload.get('periods') or {}
     out: list = []
 
-    for label in PERIOD_LABELS:
+    for label in COMMENTARY_LABELS:
         period = periods.get(label)
         if not period:
             continue

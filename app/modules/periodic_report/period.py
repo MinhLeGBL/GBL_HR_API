@@ -31,7 +31,20 @@ DEPT_MERGE = {
 
 UNKNOWN_DEPT = 'UNKNOWN'
 
-PERIOD_LABELS = ('WOW', 'MTD', 'YTD')
+# Presentation order. WTD, MTD and YTD all compare against a year earlier;
+# WOW is the odd one out (week against the previous week) and sits last.
+PERIOD_LABELS = ('WTD', 'MTD', 'YTD', 'WOW')
+
+# The periods the written analysis covers. WTD is deliberately absent: it was
+# added as a figures-only view, and feeding it to the model would spend tokens
+# narrating a comparison nobody asked to have narrated.
+COMMENTARY_LABELS = ('WOW', 'MTD', 'YTD')
+
+# Display names for every period, used by the payload and so by the page's
+# tabs. Wider than `excel.SHEET_NAMES`, which covers only the workbook's three
+# sheets — WTD is an app-only view.
+PERIOD_TITLES = {'WTD': 'WTD', 'MTD': 'MTD', 'YTD': 'YTD',
+                 'WOW': 'Week by Week'}
 
 
 def merge_department(raw):
@@ -92,6 +105,35 @@ def last_complete_week(as_of, week_start='monday'):
     return end - timedelta(days=6), end
 
 
+def prior_iso_week(week_begin, week_end):
+    """The same ISO WEEK NUMBER one year earlier, as (from, to).
+
+    Not `shift_year`. MTD and YTD align on the calendar date, which is right
+    for a month or a year — but a week aligned by date drifts across weekdays,
+    so "the same week last year" would compare a Mon-Sun run against a Sun-Sat
+    one and carry a different number of Saturdays. Retail weeks are only
+    comparable weekday-for-weekday.
+
+    Week 38 of 2026 (14-20 Sep) therefore pairs with week 38 of 2025
+    (15-21 Sep), not with 14-20 Sep 2025.
+
+    The ISO week is taken from a day three into the week rather than from
+    `week_begin`, so this holds for a Sunday-start week too: the anchor stays
+    inside the ISO week that contains most of it, and the prior-year anchor is
+    placed on the same ISO weekday, preserving the offset.
+    """
+    anchor = week_begin + timedelta(days=3)
+    iso_year, iso_week, iso_weekday = anchor.isocalendar()
+    try:
+        prior_anchor = date.fromisocalendar(iso_year - 1, iso_week, iso_weekday)
+    except ValueError:
+        # The prior ISO year has no week 53 — most years have 52. Compare
+        # against its last week rather than failing or silently skipping.
+        prior_anchor = date.fromisocalendar(iso_year - 1, 52, iso_weekday)
+    prior_begin = prior_anchor - timedelta(days=3)
+    return prior_begin, prior_begin + (week_end - week_begin)
+
+
 def period_windows(as_of, week_start='monday', through=None):
     """Return {label: ((cur_from, cur_to), (prior_from, prior_to))} inclusive.
 
@@ -134,6 +176,8 @@ def period_windows(as_of, week_start='monday', through=None):
     week_begin, week_end = last_complete_week(as_of, week_start)
     windows = {
         'WOW': ((week_begin, week_end), previous_week_window(week_begin, week_end)),
+        # Same week, same weekday span, one year back — see prior_iso_week.
+        'WTD': ((week_begin, week_end), prior_iso_week(week_begin, week_end)),
     }
 
     period_end = as_of if through is None else through
