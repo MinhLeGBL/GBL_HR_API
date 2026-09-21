@@ -199,18 +199,19 @@ GBL_MASTER_API/                          GBL_MASTER_FRONTEND/
 - **CR files** (`docs/cr/*`) are written on their **own feature branch**. They do
   ride into `staging` on PR merges and stay there — that is expected, not a bug
   to chase. What is guaranteed is that they get no further.
-- **Auto-strip at promote** — the `promote` job in
-  [.github/workflows/staging.yml](.github/workflows/staging.yml) removes
-  `docs/cr/` after merging staging into `deployment` and before pushing it
-  (`docs(janitor): strip docs/cr from deployment [skip ci]`).
+- **Stripped on the SERVER, not on a branch.**
+  [.github/workflows/deploy.yml](.github/workflows/deploy.yml) removes
+  `docs/cr/` alongside `tests/` and `document/` after pulling. That is what
+  keeps CR files out of production, and it always was.
 
-  This used to be a separate `docs-janitor.yml` that pushed the cleanup to
-  `staging`. It could never work: `staging` is protected — a pull request and
-  the `test` check are both required — and `GITHUB_TOKEN` cannot bypass either,
-  so every run from 2026-09-16 onward died on `GH006 protected branch hook
-  declined`. `deployment` is unprotected, so the strip happens there instead.
-  Do not "fix" this by moving it back to staging or by adding a PAT; an expired
-  PAT is what broke the original job.
+  The promote job used to delete them from `deployment` as well. Do not
+  reinstate that: committing a deletion there permanently diverges `deployment`
+  from `staging` for those paths, so the next rename or edit of a CR file is a
+  rename/delete conflict that ABORTS the promote. It sat unnoticed for days
+  because the files happened not to change — then `docs/cr/periodic-report.md`
+  was renamed on 2026-09-21 and the promote stopped dead. `deployment` is a
+  deploy pointer nobody reads; the CR files living on it cost nothing.
+
 - **Strip at deploy** — [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
   removes `docs/cr/` server-side alongside `tests/` and `document/`. Belt-and-braces.
 - **Local sync helper** — after merging staging into your feature branch, run
