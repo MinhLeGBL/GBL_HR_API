@@ -13,7 +13,8 @@ over-counts. Store and grand totals use a separate document-grain count and are
 the authoritative bill figures. The same applies to average transaction value on
 department rows.
 """
-from collections import defaultdict
+from collections import Counter, defaultdict
+from datetime import timedelta
 from decimal import Decimal
 
 ZERO = Decimal(0)
@@ -147,3 +148,53 @@ def is_unfavourable(key, change):
     if change is None or change == 0:
         return False
     return change > 0 if key in LOWER_IS_BETTER else change < 0
+
+
+# Monday-first, matching `week_start='monday'` and every week label the report
+# produces. A Sunday-first chart would disagree with the week boundaries shown
+# everywhere else on the page.
+WEEKDAY_LABELS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+
+
+def weekday_averages(dept_rows, window):
+    """Average revenue per weekday across `window`.
+
+    Returns seven entries, Monday first, each with the weekday's total, how
+    many times it occurred, and the average.
+
+    Averaged over CALENDAR occurrences, not over days that happened to trade.
+    A Monday with no sales is a real zero and should pull the Monday average
+    down; counting only days with rows would quietly report the average of the
+    Mondays that went well.
+
+    Revenue is `sale_net - return_net`, the same `total_sales` the tables show,
+    so a reader can add the seven bars back up and land on the period total.
+    """
+    start, end = window
+
+    occurrences = Counter()
+    day = start
+    while day <= end:
+        occurrences[day.weekday()] += 1
+        day += timedelta(days=1)
+
+    totals = defaultdict(Decimal)
+    for r in dept_rows:
+        if start <= r['day'] <= end:
+            totals[r['day'].weekday()] += r['sale_net'] - r['return_net']
+
+    out = []
+    for weekday in range(7):
+        n = occurrences.get(weekday, 0)
+        total = totals.get(weekday, ZERO)
+        out.append({
+            'weekday': weekday,
+            'label': WEEKDAY_LABELS[weekday],
+            'total': total,
+            'occurrences': n,
+            # None, not zero: a window too short to contain this weekday has
+            # no average, and drawing a zero bar would assert trading happened
+            # and earned nothing.
+            'average': (total / n) if n else None,
+        })
+    return out

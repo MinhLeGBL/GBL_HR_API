@@ -915,3 +915,67 @@ class TestWeeksBetween:
     def test_every_week_is_monday_to_sunday(self):
         for begin, end in self._weeks(date(2026, 1, 1), date(2026, 9, 13)):
             assert begin.weekday() == 0 and end.weekday() == 6
+
+
+class TestWeekdayAverages:
+    """The figures behind the by-weekday chart on each tab."""
+
+    @staticmethod
+    def rows(*days):
+        from decimal import Decimal
+        return [{'day': d, 'sale_net': Decimal('100'), 'return_net': Decimal('10')}
+                for d in days]
+
+    def test_averages_over_calendar_occurrences_not_trading_days(self):
+        # Two Mondays in the window, only one of which traded. The Monday
+        # average must be halved, not reported as if the quiet Monday never
+        # happened — otherwise this reports the average of the Mondays that
+        # went well.
+        from datetime import date
+        from app.modules.weekly_report.aggregate import weekday_averages
+        window = (date(2026, 9, 7), date(2026, 9, 20))   # two full weeks
+        result = {w['label']: w for w in weekday_averages(
+            self.rows(date(2026, 9, 7)), window)}
+        assert result['Mon']['occurrences'] == 2
+        assert result['Mon']['total'] == 90
+        assert result['Mon']['average'] == 45
+
+    def test_a_weekday_absent_from_the_window_has_no_average(self):
+        # None, not zero: a zero bar would assert that trading happened and
+        # earned nothing.
+        from datetime import date
+        from app.modules.weekly_report.aggregate import weekday_averages
+        result = {w['label']: w for w in weekday_averages(
+            [], (date(2026, 9, 14), date(2026, 9, 16)))}   # Mon-Wed only
+        assert result['Thu']['occurrences'] == 0
+        assert result['Thu']['average'] is None
+        assert result['Mon']['average'] == 0        # occurred, earned nothing
+
+    def test_revenue_is_net_of_returns(self):
+        from datetime import date
+        from app.modules.weekly_report.aggregate import weekday_averages
+        result = {w['label']: w for w in weekday_averages(
+            self.rows(date(2026, 9, 14)), (date(2026, 9, 14), date(2026, 9, 14)))}
+        assert result['Mon']['average'] == 90      # 100 sale - 10 return
+
+    def test_monday_first(self):
+        from datetime import date
+        from app.modules.weekly_report.aggregate import weekday_averages
+        labels = [w['label'] for w in weekday_averages(
+            [], (date(2026, 9, 14), date(2026, 9, 20)))]
+        # Matches week_start='monday' and every week label the report prints.
+        assert labels == ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+    def test_the_seven_totals_sum_to_the_period_total(self, payload):
+        # The property that makes the chart trustworthy: a reader adding the
+        # bars back up lands on the number the table shows.
+        for label in ('WTD', 'MTD', 'YTD', 'WOW'):
+            block = payload['periods'][label]
+            summed = sum(w['total'] for w in block['weekdays']['current'])
+            assert abs(summed - block['total']['current']['total_sales']) < 1, label
+
+    def test_every_period_carries_both_sides(self, payload):
+        for label in ('WTD', 'MTD', 'YTD', 'WOW'):
+            weekdays = payload['periods'][label]['weekdays']
+            assert len(weekdays['current']) == 7
+            assert len(weekdays['prior']) == 7
