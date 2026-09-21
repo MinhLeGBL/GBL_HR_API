@@ -29,6 +29,16 @@ Usage:
     PYTHONPATH=. python scripts/jobs/periodic_report_generate.py
     PYTHONPATH=. python scripts/jobs/periodic_report_generate.py --as-of 2026-09-14
 
+Re-rendering a week the REPORT changed under — a new period, a corrected
+window, a new view — without paying for prose again or losing what is there:
+
+    PYTHONPATH=. python scripts/jobs/periodic_report_generate.py \
+        --as-of 2026-09-21 --force --keep-analysis
+
+`--force` is needed once a week has been sent. The record of what was actually
+emailed lives in `weekly_report_sends` and is untouched; only the run is
+rewritten.
+
 Exit codes:
     0 — a run was stored and is awaiting approval
     1 — generation failed (a `failed` run is recorded so the page can show why)
@@ -65,6 +75,13 @@ def main():
                         default='monday')
     parser.add_argument('--no-email-draft', action='store_true',
                         help='Skip drafting the email (figures only)')
+    parser.add_argument('--force', action='store_true',
+                        help='Re-render a week that has already been SENT. For '
+                             'when the report changed, not the data.')
+    parser.add_argument('--keep-analysis', action='store_true',
+                        help='Carry the stored analysis across verbatim '
+                             'instead of drafting. Implies --no-email-draft '
+                             'and costs no model call.')
     args = parser.parse_args()
 
     as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
@@ -78,9 +95,14 @@ def main():
     print(f'Periodic report: as-of {as_of}, reporting {week_begin} .. {week_end}, '
           f'MTD/YTD through {through}')
 
+    # --keep-analysis is about NOT writing new prose, so it implies the same
+    # thing --no-email-draft does; requiring both would be a trap.
+    draft = not (args.no_email_draft or args.keep_analysis)
+
     result = WeeklyReportService().generate_run(
         as_of=as_of, week_start=args.week_start, through=through,
-        draft_email=not args.no_email_draft)
+        draft_email=draft, force=args.force,
+        keep_analysis=args.keep_analysis)
 
     if not result.get('success'):
         print(f'FAILED: {result.get("error")}', file=sys.stderr)

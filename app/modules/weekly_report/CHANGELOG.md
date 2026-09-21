@@ -525,3 +525,31 @@ Computed at generation because the daily rows are not stored — the snapshot is
 all the page ever sees. Reports generated before this release carry no weekday
 block and never will; the page says so rather than drawing an empty chart.
 
+
+## 0.13.0 — 2026-09-21
+
+### Added
+- **`--force` and `--keep-analysis`** on the generate job, for re-rendering a
+  stored week because the REPORT changed rather than the data — a new period,
+  a corrected window, a new view.
+
+      PYTHONPATH=. python scripts/jobs/periodic_report_generate.py \
+          --as-of 2026-09-21 --force --keep-analysis
+
+  - `--force` lifts the guard on a week already `sent`. That guard exists so a
+    re-render cannot quietly replace the record of what was emailed; what
+    actually went out lives in `weekly_report_sends` and is untouched. It does
+    NOT open the `sending` window — recipients would get the old workbook
+    against a rewritten run, and no version of that is safe.
+  - `--keep-analysis` carries the stored subject and body across verbatim,
+    including human edits, and implies `--no-email-draft`. Re-rendering figures
+    should neither discard prose somebody paid for nor quietly spend a model
+    call replacing it. Refused alongside drafting, and refused when there is no
+    stored run to keep anything from.
+
+### Why
+Adding WTD and then the weekday chart each meant re-rendering a stored week
+without touching its prose. Both times that was done by hand-editing the
+database: stash the analysis, clear the status, regenerate, restore. Three
+occurrences is enough to make it a flag.
+
