@@ -17,7 +17,7 @@ from io import BytesIO
 
 from .aggregate import (LOWER_IS_BETTER, METRICS, ZERO_METRICS, aggregate,
                         delta)
-from .period import PERIOD_LABELS, week_label
+from .period import week_label
 
 MONEY_FORMAT = '#,##0,,'        # whole millions -- the aggregate totals
 MONEY_1DP_FORMAT = '#,##0.0,,'  # millions to 1dp -- the per-unit averages
@@ -63,6 +63,8 @@ _UNIT_FORMAT = {
     'pct': PCT_FORMAT,
 }
 
+# The sheets the workbook carries, in order. Deliberately NOT PERIOD_LABELS:
+# WTD is an app-only view, so the emailed attachment is unchanged by it.
 SHEET_NAMES = {'WOW': 'Week by Week', 'MTD': 'MTD', 'YTD': 'YTD'}
 
 
@@ -327,9 +329,11 @@ def build_workbook_object(windows, dept_rows, store_rows):
     wb = Workbook()
     wb.remove(wb.active)
 
-    for label in PERIOD_LABELS:
+    # Iterates the SHEETS, not every period: the payload carries WTD as well,
+    # and the workbook deliberately does not.
+    for label, sheet_name in SHEET_NAMES.items():
         cur_win, prior_win = windows[label]
-        ws = wb.create_sheet(SHEET_NAMES[label])
+        ws = wb.create_sheet(sheet_name)
         _write_period_sheet(
             ws, label, windows[label],
             aggregate(dept_rows, store_rows, cur_win),
