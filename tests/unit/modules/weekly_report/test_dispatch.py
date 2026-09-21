@@ -11,7 +11,7 @@ import pytest
 
 from app.core.mail.mailer import (DryRunMailer, MailError, build_message,
                                   get_mailer, mail_identity)
-from app.modules.periodic_report.service import PeriodicReportService
+from app.modules.weekly_report.service import WeeklyReportService
 
 XLSX = ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
@@ -119,7 +119,7 @@ class TestGetMailer:
 
 @pytest.fixture
 def service():
-    svc = PeriodicReportService()
+    svc = WeeklyReportService()
     svc.repo = MagicMock()
     svc.repo.get_run.return_value = {
         'id': 1, 'as_of': date(2026, 9, 14), 'status': 'sending',

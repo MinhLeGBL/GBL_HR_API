@@ -20,7 +20,7 @@ jobs:
       employees: ${{ steps.changes.outputs.employees }}
       handcarry: ${{ steps.changes.outputs.handcarry }}
       health: ${{ steps.changes.outputs.health }}
-      periodic_report: ${{ steps.changes.outputs.periodic_report }}
+      weekly_report: ${{ steps.changes.outputs.weekly_report }}
       permissions: ${{ steps.changes.outputs.permissions }}
       reports: ${{ steps.changes.outputs.reports }}
       stores: ${{ steps.changes.outputs.stores }}
@@ -66,9 +66,9 @@ jobs:
             health:
               - 'app/modules/health/**'
               - 'tests/unit/modules/health/**'
-            periodic_report:
-              - 'app/modules/periodic_report/**'
-              - 'tests/unit/modules/periodic_report/**'
+            weekly_report:
+              - 'app/modules/weekly_report/**'
+              - 'tests/unit/modules/weekly_report/**'
               - 'scripts/reports/generate_periodic_report.py'
               - 'tests/unit/scripts/**'
             permissions:
@@ -122,7 +122,7 @@ jobs:
           [ "${{ needs.detect.outputs.employees }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/employees"
           [ "${{ needs.detect.outputs.handcarry }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/handcarry"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
-          [ "${{ needs.detect.outputs.periodic_report }}" = "true" ] && PATHS="$PATHS tests/unit/modules/periodic_report tests/unit/scripts"
+          [ "${{ needs.detect.outputs.weekly_report }}" = "true" ] && PATHS="$PATHS tests/unit/modules/weekly_report tests/unit/scripts"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
           [ "${{ needs.detect.outputs.reports }}" = "true" ]     && PATHS="$PATHS tests/unit/modules/reports"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"

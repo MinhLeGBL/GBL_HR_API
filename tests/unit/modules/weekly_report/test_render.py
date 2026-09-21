@@ -1,9 +1,9 @@
-"""Unit tests for app.modules.periodic_report.render.
+"""Unit tests for app.modules.weekly_report.render.
 
 The draft is stored as lightly-marked text and rendered two ways at send time:
 HTML (where bold and bullets actually show) and a plain-text alternative.
 """
-from app.modules.periodic_report.render import (html_document,
+from app.modules.weekly_report.render import (html_document,
                                                 markdown_to_html,
                                                 to_plain_text)
 

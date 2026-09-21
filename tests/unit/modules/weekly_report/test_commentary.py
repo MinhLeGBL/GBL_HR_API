@@ -1,4 +1,4 @@
-"""Unit tests for app.modules.periodic_report.commentary.
+"""Unit tests for app.modules.weekly_report.commentary.
 
 The Anthropic call is mocked throughout — what is exercised is the figures block
 the model reads, the pre-computed derived facts, and the request shape.
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.modules.periodic_report import commentary as C
+from app.modules.weekly_report import commentary as C
 
 PAYLOAD = {
     'as_of': '2026-09-14',
@@ -202,7 +202,7 @@ class TestGenerateCommentary:
     def test_uses_opus_5_with_adaptive_thinking(self):
         client = self._client()
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'k'}, clear=False):
-            os.environ.pop('PERIODIC_REPORT_MODEL', None)
+            os.environ.pop('WEEKLY_REPORT_MODEL', None)
             with patch('anthropic.Anthropic', return_value=client):
                 C.generate_commentary(PAYLOAD)
         kwargs = client.messages.create.call_args.kwargs
@@ -239,7 +239,7 @@ class TestGenerateCommentary:
     def test_model_is_overridable_by_env(self):
         client = self._client()
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'k',
-                                     'PERIODIC_REPORT_MODEL': 'claude-sonnet-5'},
+                                     'WEEKLY_REPORT_MODEL': 'claude-sonnet-5'},
                         clear=False):
             with patch('anthropic.Anthropic', return_value=client):
                 C.generate_commentary(PAYLOAD)

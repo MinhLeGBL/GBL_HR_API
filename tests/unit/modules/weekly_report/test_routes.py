@@ -1,4 +1,4 @@
-"""Unit tests for app.modules.periodic_report.routes.
+"""Unit tests for app.modules.weekly_report.routes.
 
 Mocks the service and the auth middleware. Covers the HTTP layer: permission
 gating, status-code mapping, and the token-spend guard on regeneration.
@@ -9,10 +9,10 @@ import pytest
 
 from app.main import create_app
 
-SERVICE = 'app.modules.periodic_report.routes.periodic_report_service'
+SERVICE = 'app.modules.weekly_report.routes.weekly_report_service'
 VERIFY = 'app.core.auth.middleware.auth_service.verify_token'
 GET_USER = 'app.core.auth.middleware.auth_service.get_user_by_sid'
-BASE = '/api/v1/periodic-report'
+BASE = '/api/v1/weekly-report'
 
 
 PERMS = ('app.modules.permissions.service.PermissionService'
@@ -24,8 +24,8 @@ def grant_sections():
     """`section_required` resolves permissions from Postgres, which these unit
     tests do not have. Grant both sections by default; the test that checks
     refusal overrides this with its own patch."""
-    with patch(PERMS, return_value=[{'section_code': 'PERIODIC_REPORT'},
-                                    {'section_code': 'PERIODIC_REPORT_APPROVE'}]):
+    with patch(PERMS, return_value=[{'section_code': 'WEEKLY_REPORT'},
+                                    {'section_code': 'WEEKLY_REPORT'}]):
         yield
 
 
@@ -75,7 +75,7 @@ class TestNoGenerationOverHTTP:
     def test_no_route_reaches_the_commentary_generator(self):
         # Belt and braces: the module must not even import it.
         import inspect
-        from app.modules.periodic_report import routes
+        from app.modules.weekly_report import routes
         assert 'generate_commentary' not in inspect.getsource(routes)
         assert 'draft_email' not in inspect.getsource(routes)
 

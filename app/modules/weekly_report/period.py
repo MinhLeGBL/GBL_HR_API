@@ -1,4 +1,4 @@
-"""Period maths and department merging for the periodic sales report.
+"""Period maths and department merging for the weekly sales report.
 
 Pure functions, no I/O — the same logic the standalone generator
 (`scripts/reports/generate_periodic_report.py`) has used since Phase 1. The

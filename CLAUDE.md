@@ -48,7 +48,7 @@ tests/                     # Mirrors module structure
 | `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
 | `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
 | `modules/reports` | `reports_bp` | `/api/v1/reports` | `ReportsService` | Read-only Oracle reports — two-period sale comparison (revenue/bills/avg + new-vs-returning), CR #78 |
-| `modules/periodic_report` | `periodic_report_bp` | `/api/v1/periodic-report` | `PeriodicReportService` | Weekly sales report — snapshot, .xlsx, email draft, approve-and-send workflow |
+| `modules/weekly_report` | `weekly_report_bp` | `/api/v1/weekly-report` | `WeeklyReportService` | Weekly sales report — snapshot, .xlsx, email draft, approve-and-send workflow |
 
 ## Import Rules
 
@@ -233,6 +233,7 @@ GBL_MASTER_API/                          GBL_MASTER_FRONTEND/
 | `feature/handcarry*` | `cr/handcarry.md` |
 | `feature/account-payable*` | `cr/account-payable.md` |
 | `feature/live-comparison*` | `cr/live-comparison.md` |
+| `feature/weekly-report*` | `cr/weekly-report.md` |
 
 Same key for backend's outgoing CRs in this repo's `docs/cr/<feature>.md`.
 

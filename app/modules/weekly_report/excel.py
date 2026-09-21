@@ -1,4 +1,4 @@
-"""Excel rendering for the periodic sales report.
+"""Excel rendering for the weekly sales report.
 
 Produces the workbook that is both downloaded from the app and attached to the
 weekly email. `scripts/reports/generate_periodic_report.py` renders through this
