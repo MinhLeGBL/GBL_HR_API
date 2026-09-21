@@ -38,56 +38,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin deployment
           git checkout deployment
-
-          # `docs/cr/*` is DELETED on deployment by the strip step below, so
-          # any later rename or edit of those files on staging is a
-          # rename/delete or modify/delete conflict and aborts the promote.
-          # That went unnoticed until docs/cr/periodic-report.md was renamed
-          # to weekly-report.md on 2026-09-21: every promote before it had
-          # left those files untouched, which merges cleanly against a
-          # deletion.
-          #
-          # Resolving by deleting is exactly what the next step does anyway.
-          # A conflict ANYWHERE ELSE still fails the job — silently committing
-          # an unresolved merge is how a half-merged tree reaches production.
-          if ! git merge origin/staging --no-ff \
-                 -m "Auto-promote: staging tests passed"; then
-            unresolved=$(git diff --name-only --diff-filter=U)
-            outside=$(echo "$unresolved" | grep -v '^docs/cr/' || true)
-            if [ -n "$outside" ]; then
-              echo "::error::Merge conflict outside docs/cr — not auto-resolving:"
-              echo "$outside"
-              exit 1
-            fi
-            echo "Resolved docs/cr conflicts by deleting (they are stripped anyway):"
-            echo "$unresolved"
-            git rm -r --quiet --ignore-unmatch docs/cr
-            git commit --no-edit
-          fi
-
-      # Was a separate workflow (docs-janitor.yml) that pushed the cleanup to
-      # staging. That could never work: staging is a protected branch requiring
-      # a pull request and the `test` check, and GITHUB_TOKEN cannot bypass
-      # either — every run since 2026-09-16 failed on `GH006 protected branch
-      # hook declined`. A PAT could push through, but it is what broke the job
-      # in the first place when it expired.
-      #
-      # `deployment` is not protected, so the strip happens here instead. CR
-      # files still ride into staging on feature merges and stay there; what
-      # matters is that they never reach deployment or the server, and this
-      # runs before the push that promotes. deploy.yml also strips docs/cr/
-      # server-side, so that remains the backstop.
-      #
-      # `git rm` stages its own deletions — no `git add -A`, which has twice
-      # swept stray files into a commit in these repos.
-      - name: Strip docs/cr from deployment
-        run: |
-          if [ -n "$(git ls-files docs/cr)" ]; then
-            git rm -r --quiet docs/cr
-            git commit -m "docs(janitor): strip docs/cr from deployment [skip ci]"
-          else
-            echo "No docs/cr files tracked on deployment — nothing to strip."
-          fi
+          git merge origin/staging --no-ff -m "Auto-promote: staging tests passed"
 
       - name: Push deployment
         run: git push origin deployment
