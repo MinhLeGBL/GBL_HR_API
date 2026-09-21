@@ -979,3 +979,75 @@ class TestWeekdayAverages:
             weekdays = payload['periods'][label]['weekdays']
             assert len(weekdays['current']) == 7
             assert len(weekdays['prior']) == 7
+
+
+class TestReRenderFlags:
+    """Re-rendering a stored week because the REPORT changed, not the data."""
+
+    @staticmethod
+    def _service(existing):
+        from unittest.mock import MagicMock
+        from app.modules.weekly_report.service import WeeklyReportService
+        s = WeeklyReportService()
+        s.repo = MagicMock()
+        s.repo.get_run_by_as_of.return_value = existing
+        return s
+
+    def test_a_sent_week_is_refused_without_force(self):
+        s = self._service({'status': 'sent'})
+        r = s.generate_run(as_of=date(2026, 9, 21))
+        assert r['code'] == 'ALREADY_SENT'
+        assert '--force' in r['error']
+        s.repo.fetch_sales.assert_not_called()
+
+    def test_force_lets_a_sent_week_be_re_rendered(self):
+        s = self._service({'status': 'sent', 'email_subject': 'S',
+                           'email_body': 'B'})
+        s.repo.fetch_sales.return_value = ([], [])
+        s.repo.create_run.return_value = 7
+        r = s.generate_run(as_of=date(2026, 9, 21), force=True,
+                           draft_email=False)
+        assert r['success'] is True
+
+    def test_force_does_NOT_open_the_mid_send_window(self):
+        # A dispatcher holding the run is the one case with no safe answer:
+        # recipients would get the old workbook against a rewritten run.
+        s = self._service({'status': 'sending'})
+        r = s.generate_run(as_of=date(2026, 9, 21), force=True)
+        assert r['code'] == 'INVALID_STATE'
+
+    def test_keep_analysis_carries_the_prose_across_verbatim(self):
+        s = self._service({'status': 'sent', 'email_subject': 'Subject kept',
+                           'email_body': 'Body kept, including human edits'})
+        s.repo.fetch_sales.return_value = ([], [])
+        s.repo.create_run.return_value = 7
+        s.generate_run(as_of=date(2026, 9, 21), force=True,
+                       draft_email=False, keep_analysis=True)
+        kwargs = s.repo.create_run.call_args.kwargs
+        assert kwargs['email_subject'] == 'Subject kept'
+        assert kwargs['email_body'] == 'Body kept, including human edits'
+
+    def test_keep_analysis_never_calls_the_model(self, monkeypatch):
+        s = self._service({'status': 'sent', 'email_subject': 'S',
+                           'email_body': 'B'})
+        s.repo.fetch_sales.return_value = ([], [])
+        s.repo.create_run.return_value = 7
+        called = []
+        monkeypatch.setattr(s, 'draft_email',
+                            lambda *a, **k: called.append(1) or ('x', 'y', None))
+        s.generate_run(as_of=date(2026, 9, 21), force=True,
+                       draft_email=False, keep_analysis=True)
+        assert called == []
+
+    def test_keep_analysis_and_draft_email_together_are_refused(self):
+        # Contradictory: one carries prose across, the other writes new prose.
+        s = self._service({'status': 'pending_approval'})
+        r = s.generate_run(as_of=date(2026, 9, 21), keep_analysis=True,
+                           draft_email=True)
+        assert r['code'] == 'INVALID_INPUT'
+
+    def test_keep_analysis_with_nothing_stored_is_refused(self):
+        s = self._service(None)
+        r = s.generate_run(as_of=date(2026, 9, 21), keep_analysis=True,
+                           draft_email=False)
+        assert r['code'] == 'NOT_FOUND'

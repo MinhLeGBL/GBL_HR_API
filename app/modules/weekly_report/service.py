@@ -305,12 +305,24 @@ class WeeklyReportService:
     def generate_run(self, as_of: Optional[date] = None,
                      week_start: str = 'monday',
                      through: Optional[date] = None,
-                     draft_email: bool = True) -> Dict[str, Any]:
+                     draft_email: bool = True,
+                     force: bool = False,
+                     keep_analysis: bool = False) -> Dict[str, Any]:
         """Produce and store this week's run. Called by the Monday job.
 
         A run already `sent` is never overwritten — regenerating after the email
         has gone out would silently replace the record of what was sent. Any
         other status is replaced, so a retry after a failure is safe.
+
+        `force` lifts that guard, for re-rendering a stored week because the
+        REPORT changed rather than the data — a new period, a corrected window,
+        a new view. What was actually emailed survives either way:
+        `weekly_report_sends` holds that record, and this only rewrites the run.
+
+        `keep_analysis` carries the existing subject and body across instead of
+        drafting. Re-rendering figures should neither discard prose somebody
+        paid for and may have edited, nor quietly spend a model call replacing
+        it.
         """
         as_of = as_of or date.today()
         # Normalise to the canonical day for the week being reported: the day
@@ -330,19 +342,31 @@ class WeeklyReportService:
             through = week_end
 
         existing = self.repo.get_run_by_as_of(as_of)
-        if existing and existing['status'] == 'sent':
+        if existing and existing['status'] == 'sent' and not force:
             return {'success': False,
-                    'error': f'The report for {as_of} has already been sent.',
+                    'error': f'The report for {as_of} has already been sent. '
+                             'Pass --force to re-render it anyway.',
                     'code': 'ALREADY_SENT'}
         if existing and existing['status'] == 'sending':
             # A dispatcher is mid-send. Replacing the row now would reset it to
             # pending_approval underneath that send, and the recipients would
-            # get the OLD workbook against a run that claims to hold new
-            # figures. It is a seconds-wide window, but a confusing one.
+            # get the OLD workbook against a run claiming to hold new figures.
+            # Not even `force` opens this one — no version of it is safe.
             return {'success': False,
                     'error': 'This report is being sent right now — try again '
                              'in a moment.',
                     'code': 'INVALID_STATE'}
+        if keep_analysis and draft_email:
+            return {'success': False,
+                    'error': 'keep_analysis and draft_email are contradictory: '
+                             'one carries the existing prose across, the other '
+                             'writes new prose.',
+                    'code': 'INVALID_INPUT'}
+        if keep_analysis and not existing:
+            return {'success': False,
+                    'error': f'No stored report for {as_of}, so there is no '
+                             'analysis to keep.',
+                    'code': 'NOT_FOUND'}
 
         windows = period_windows(as_of, week_start, through)
         fetch_from, fetch_to = fetch_span(windows)
@@ -371,6 +395,9 @@ class WeeklyReportService:
         commentary_error = None
         if draft_email:
             subject, body, commentary_error = self.draft_email(payload)
+        elif keep_analysis:
+            # Verbatim, including any human edits. No model call.
+            subject, body = existing['email_subject'], existing['email_body']
 
         run_id = self.repo.create_run(
             as_of=as_of, week_start=week_start, through_date=through,
