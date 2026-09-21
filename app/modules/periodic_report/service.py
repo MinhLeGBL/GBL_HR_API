@@ -21,9 +21,10 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from .aggregate import METRICS, aggregate, delta_for, is_unfavourable
-from .excel import SHEET_NAMES, build_workbook_bytes
+from .excel import build_workbook_bytes
 from .render import html_document, markdown_to_html, to_plain_text
-from .period import (PERIOD_LABELS, fetch_span, last_complete_week,
+from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
+                     fetch_span, last_complete_week,
                      period_windows, week_label)
 from .repository import PeriodicReportRepository
 
@@ -243,18 +244,26 @@ class PeriodicReportService:
             })
 
         return {
-            'label': SHEET_NAMES[label],
+            'label': PERIOD_TITLES[label],
             'current': self._window_payload(label, cur_win),
             'prior': self._window_payload(label, pri_win),
             'total': self._compare(cur_grand, pri_grand),
             'stores': stores,
         }
 
-    @staticmethod
-    def _window_payload(label, window):
+    # Periods whose windows are whole weeks, so an ISO week label means
+    # something. MTD and YTD spans are not weeks and get no label.
+    _WEEK_PERIODS = ('WOW', 'WTD')
+
+    @classmethod
+    def _window_payload(cls, label, window):
         start, end = window
         out = {'from': start.isoformat(), 'to': end.isoformat()}
-        if label == 'WOW':
+        if label in cls._WEEK_PERIODS:
+            # On WTD this is the whole point of the comparison: both sides
+            # carry their ISO label, so the page can say "Week 38 2026 vs
+            # Week 38 2025" rather than leaving the reader to check that the
+            # dates really are the same week a year apart.
             out['label'] = week_label(start)
         return out
 
@@ -869,7 +878,9 @@ def summary_lines(payload: Dict[str, Any]) -> str:
     the email against the attachment sees the same unit.
     """
     lines = []
-    for label in PERIOD_LABELS:
+    # COMMENTARY_LABELS: the email's summary lines mirror what the analysis
+    # discusses, and WTD is figures-only.
+    for label in COMMENTARY_LABELS:
         period = payload['periods'][label]
         total = period['total']
         sales = total['current'].get('total_sales')
