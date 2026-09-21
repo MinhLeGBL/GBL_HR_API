@@ -9,7 +9,8 @@ ADDED: the `through` clamp that ends MTD and YTD on the last closed day, and
 from datetime import date
 
 from app.modules.periodic_report.period import (fetch_span, last_complete_week,
-                                                period_windows, shift_year)
+                                                month_end, period_windows,
+                                                shift_year)
 
 
 class TestLastCompleteWeek:
@@ -172,9 +173,18 @@ class TestMonthEndStraddle:
         cur, _ = self._mtd(date(2026, 6, 1))
         assert cur == (date(2026, 5, 1), date(2026, 5, 31))
 
-    def test_YTD_is_untouched_by_the_straddle(self):
+    def test_YTD_ends_where_MTD_ends(self):
+        # Originally YTD was left alone by a month straddle, so week 36 showed
+        # MTD = the whole of August beside YTD running to 6 September. YTD then
+        # carried six days the MTD excluded and was not the sum of the months
+        # reported — two columns silently describing different spans.
         w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
-        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 9, 6))
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 8, 31))
+        assert w['YTD'][0][1] == w['MTD'][0][1]
+
+    def test_the_prior_year_side_ends_there_too(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        assert w['YTD'][1] == (date(2025, 1, 1), date(2025, 8, 31))
 
     def test_the_week_window_is_untouched_by_the_straddle(self):
         w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
@@ -222,9 +232,34 @@ class TestYearEndStraddle:
         assert cur == (date(2026, 1, 1), date(2026, 1, 11))
         assert prior == (date(2025, 1, 1), date(2025, 1, 11))
 
-    def test_a_month_end_that_is_not_a_year_end_leaves_YTD_alone(self):
+    def test_a_month_end_that_is_not_a_year_end_still_ends_YTD(self):
+        # The year rule is not a special case: it is the month rule reaching
+        # December. So an ordinary month end moves YTD as well.
         cur, _ = self._w(date(2026, 9, 7))['YTD']       # week 31 Aug - 6 Sep
-        assert cur == (date(2026, 1, 1), date(2026, 9, 6))
+        assert cur == (date(2026, 1, 1), date(2026, 8, 31))
+
+    def test_the_year_boundary_falls_out_of_the_month_rule(self):
+        # Week 29 Dec - 4 Jan closes December, so month_end(week_begin) is
+        # 31 December and the year is reported whole — the same code path.
+        cur, prior = self._w(date(2026, 1, 5))['YTD']
+        assert cur == (date(2025, 1, 1), date(2025, 12, 31))
+        assert prior == (date(2024, 1, 1), date(2024, 12, 31))
+
+    def test_YTD_and_MTD_agree_in_every_straddling_week_of_a_year(self):
+        # The invariant, swept across a whole year rather than spot-checked:
+        # whenever a week closes a month, both columns end on that month end.
+        from datetime import timedelta
+        day = date(2026, 1, 1)
+        checked = 0
+        while day < date(2027, 1, 1):
+            begin, end = last_complete_week(day)
+            if begin.month != end.month:
+                w = period_windows(day, 'monday', end)
+                assert w['MTD'][0][1] == w['YTD'][0][1] == month_end(begin), day
+                assert w['YTD'][0][0] == date(begin.year, 1, 1), day
+                checked += 1
+            day += timedelta(days=7)
+        assert checked >= 11        # one per month boundary a week can straddle
 
     def test_an_ad_hoc_later_cutoff_still_wins(self):
         # Same guard as the month: asking for a later cut-off means asking for
