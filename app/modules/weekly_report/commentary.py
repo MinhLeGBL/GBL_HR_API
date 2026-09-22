@@ -26,7 +26,7 @@ Configuration (all optional):
 """
 import os
 
-# COMMENTARY_LABELS, not PERIOD_LABELS: WTD is a figures-only view and is
+# COMMENTARY_LABELS, not PERIOD_LABELS: WOW is a page-only view and is
 # deliberately kept out of the analysis.
 from .period import COMMENTARY_LABELS
 
@@ -35,13 +35,21 @@ DEFAULT_MAX_WORDS = 400
 
 # Vietnamese names for the figures, so the model does not have to invent
 # terminology or echo internal keys into the email.
+#
+# `avg_discount_pct` is "giảm giá", NOT "chiết khấu" (changed 2026-09-22).
+# Both translate as "discount" in a dictionary, but they are not
+# interchangeable in the trade: "chiết khấu" is the trade/settlement discount
+# between a supplier and a buyer, while what this figure measures is the
+# markdown off the retail ticket that a shopper sees. Fashion retail says
+# "giảm giá". The word the model is handed is the word it writes, so this is
+# the only place the email's vocabulary is decided.
 METRIC_VI = {
     'total_sales':           'Doanh thu',
     'qty_sold':              'Sản lượng',
     'bills':                 'Số hóa đơn',
     'avg_unit_price':        'Giá bán trung bình mỗi sản phẩm',
     'avg_transaction_value': 'Giá trị trung bình mỗi hóa đơn',
-    'avg_discount_pct':      'Tỷ lệ chiết khấu',
+    'avg_discount_pct':      'Tỷ lệ giảm giá',
     'returns_value':         'Giá trị hàng trả lại',
     'qty_returned':          'Số lượng hàng trả lại',
 }
@@ -52,8 +60,11 @@ _MONEY_0 = ('total_sales', 'returns_value')
 _MONEY_1 = ('avg_unit_price', 'avg_transaction_value')
 _COUNTS = ('qty_sold', 'bills', 'qty_returned')
 
+# The current side of WTD is the same week WOW reported, so the section is
+# still "the latest week" — only the baseline moved from the previous week to
+# the same week a year earlier. The header spells the baseline out.
 PERIOD_VI = {
-    'WOW': 'TUẦN GẦN NHẤT',
+    'WTD': 'TUẦN GẦN NHẤT',
     'MTD': 'LŨY KẾ THÁNG',
     'YTD': 'LŨY KẾ TỪ ĐẦU NĂM',
 }
@@ -70,9 +81,11 @@ tập đoàn bán lẻ hàng cao cấp tại Việt Nam. Người đọc là Ban
 NHIỆM VỤ
 Viết đúng BA phần được đánh số, theo thứ tự từ tuần gần nhất đến lũy kế năm:
 
-1. Tuần gần nhất (Tuần X so với Tuần Y)
+1. Tuần gần nhất (Tuần X năm nay so với Tuần X năm trước)
 2. Lũy kế tháng M (dd/mm–dd/mm)
 3. Lũy kế từ đầu năm (dd/mm – dd/mm)
+
+CẢ BA PHẦN đều so sánh với CÙNG KỲ NĂM TRƯỚC. Phần 1 so sánh tuần gần nhất với ĐÚNG tuần đó của năm trước (Tuần 38 so với Tuần 38), KHÔNG phải với tuần liền trước. Đừng mô tả phần 1 như một so sánh "so với tuần trước".
 
 Tiêu đề phần 3 có thể thêm một mệnh đề ngắn nêu kết luận chính, ví dụ \
 "— cho thấy tháng 9 đang đi ngược xu hướng cả năm", khi dữ liệu thực sự cho \
@@ -87,8 +100,8 @@ trị mỗi hóa đơn giảm 4.6% và sản lượng giảm 7.0%."
 - Nêu rõ "Điểm tích cực:" khi có diễn biến tốt, và "Cần lưu ý:" khi có điều \
 cần chú ý. Dùng đúng hai cụm từ này.
 - ĐỊNH VỊ vấn đề theo thời gian bằng cách so sánh tuần với lũy kế tháng. \
-Ví dụ: nếu tỷ lệ chiết khấu cả tháng cao hơn hẳn tuần gần nhất, điều đó nghĩa \
-là chiết khấu cao tập trung ở đầu tháng và đã được siết lại.
+Ví dụ: nếu tỷ lệ giảm giá cả tháng cao hơn hẳn tuần gần nhất, điều đó nghĩa \
+là mức giảm giá cao tập trung ở đầu tháng và đã được siết lại.
 - Nêu MỨC ĐỘ TẬP TRUNG khi phần "SỐ LIỆU ĐÃ TÍNH SẴN" cho thấy một tuần chiếm \
 tỷ trọng lớn trong cả kỳ.
 - Ở phần 3, so sánh CƠ CẤU tăng trưởng cả năm với tháng hiện tại — chúng có thể \
@@ -101,8 +114,8 @@ tỷ lệ cần thiết đều đã có sẵn trong phần "SỐ LIỆU ĐÃ TÍ
 - KHÔNG suy đoán nguyên nhân bên ngoài dữ liệu: không nhắc đến chương trình \
 khuyến mãi, thời tiết, đối thủ, nhà cung cấp hay sự kiện nào không có trong số \
 liệu. Chỉ giải thích bằng chính các cấu phần của số liệu.
-- Tỷ lệ chiết khấu GIẢM là tốt; TĂNG là xấu. Hàng trả lại GIẢM là tốt; TĂNG là \
-xấu. Đừng mô tả việc chiết khấu giảm như một diễn biến tiêu cực.
+- Tỷ lệ giảm giá GIẢM là tốt; TĂNG là xấu. Hàng trả lại GIẢM là tốt; TĂNG là \
+xấu. Đừng mô tả việc tỷ lệ giảm giá đi xuống như một diễn biến tiêu cực.
 - Số hóa đơn theo ngành hàng là "số hóa đơn CÓ CHỨA ngành hàng đó" nên KHÔNG \
 cộng lại thành tổng cửa hàng. Không bao giờ cộng chúng.
 - Đơn vị tiền là TRIỆU ĐỒNG, đúng như các con số được cung cấp. Không đổi đơn vị.
@@ -114,7 +127,7 @@ phải phần trăm.
 ĐỊNH DẠNG — bám sát mẫu của công ty
 - Viết bằng tiếng Việt.
 - Mỗi phần bắt đầu bằng một dòng tiêu đề in đậm, theo đúng mẫu:
-  **1. Tuần gần nhất (Tuần 37 so với Tuần 36)**
+  **1. Tuần gần nhất (Tuần 38/2026 so với Tuần 38/2025)**
   **2. Lũy kế tháng 9 (01–15/09)**
   **3. Lũy kế từ đầu năm (01/01 – 15/09)**
 - Dưới mỗi tiêu đề là 2-4 GẠCH ĐẦU DÒNG, mỗi dòng bắt đầu bằng "- ".
@@ -179,13 +192,24 @@ def _vi_date(iso, with_year=False):
         return iso or '?'
 
 
-def _vi_week(label):
-    """'Week 37 2026' -> 'Tuần 37'. The figures block is Vietnamese; an English
-    label inside it invites the model to echo it into the email."""
+def _vi_week(label, with_year=False):
+    """'Week 37 2026' -> 'Tuần 37', or 'Tuần 37/2026' when the year matters.
+
+    The figures block is Vietnamese; an English label inside it invites the
+    model to echo it into the email.
+
+    The year is not optional decoration on WTD: both sides are week 38, and
+    without it the header reads "Tuần 38 so với Tuần 38" — the same week
+    compared with itself.
+    """
     if not label:
         return ''
     parts = str(label).split()
-    return f'Tuần {parts[1]}' if len(parts) >= 2 else str(label)
+    if len(parts) < 2:
+        return str(label)
+    if with_year and len(parts) >= 3:
+        return f'Tuần {parts[1]}/{parts[2]}'
+    return f'Tuần {parts[1]}'
 
 
 def _share(part, whole):
@@ -206,31 +230,35 @@ def derived_facts(payload):
     """
     facts = []
     periods = payload.get('periods') or {}
-    wow = (periods.get('WOW') or {}).get('total') or {}
+    # WTD, not WOW. Numerically these are the same figures — WTD and WOW share
+    # an identical CURRENT window (the reported week); only their baselines
+    # differ, and every fact here is built from the current side alone. Reading
+    # WTD keeps this tied to a period the analysis actually discusses.
+    wtd = (periods.get('WTD') or {}).get('total') or {}
     mtd = (periods.get('MTD') or {}).get('total') or {}
-    if not wow or not mtd:
+    if not wtd or not mtd:
         return facts
 
-    wow_cur = wow.get('current') or {}
+    wtd_cur = wtd.get('current') or {}
     mtd_cur = mtd.get('current') or {}
 
     for key, label in (('returns_value', 'hàng trả lại'),
                        ('total_sales', 'doanh thu')):
-        share = _share(wow_cur.get(key), mtd_cur.get(key))
+        share = _share(wtd_cur.get(key), mtd_cur.get(key))
         if share is not None:
             facts.append(
                 f'  - {label.capitalize()} của tuần gần nhất '
-                f'({_fmt(key, wow_cur.get(key))}) chiếm {share:.1f}% '
+                f'({_fmt(key, wtd_cur.get(key))}) chiếm {share:.1f}% '
                 f'{label} lũy kế tháng ({_fmt(key, mtd_cur.get(key))}).')
 
-    w_disc = wow_cur.get('avg_discount_pct')
+    w_disc = wtd_cur.get('avg_discount_pct')
     m_disc = mtd_cur.get('avg_discount_pct')
     if w_disc is not None and m_disc is not None:
         gap = w_disc - m_disc
         direction = ('thấp hơn' if gap < 0 else 'cao hơn')
         facts.append(
-            f'  - Tỷ lệ chiết khấu tuần gần nhất ({w_disc:.1f}%) {direction} '
-            f'tỷ lệ chiết khấu lũy kế tháng ({m_disc:.1f}%) '
+            f'  - Tỷ lệ giảm giá tuần gần nhất ({w_disc:.1f}%) {direction} '
+            f'tỷ lệ giảm giá lũy kế tháng ({m_disc:.1f}%) '
             f'{abs(gap):.1f} điểm.')
     return facts
 
@@ -256,7 +284,7 @@ def notable_movements(payload):
 
             if disc is not None and abs(disc) >= DISCOUNT_PP_THRESHOLD:
                 rows.append(
-                    f'    - {code} ({names.get(code, code)}): tỷ lệ chiết khấu '
+                    f'    - {code} ({names.get(code, code)}): tỷ lệ giảm giá '
                     f'{pri_disc:.1f}% → {cur_disc:.1f}% ({disc:+.1f} điểm)'
                     + (f', doanh thu {sales:+.1f}%' if sales is not None else ''))
             elif sales is not None and abs(sales) >= SALES_PCT_THRESHOLD:
@@ -287,11 +315,17 @@ def build_prompt(payload, max_words: int = DEFAULT_MAX_WORDS) -> str:
         if not cur.get('from') or not period.get('total'):
             continue
         header = f'{PERIOD_VI[label]}: '
-        if label == 'WOW':
-            header += (f"{_vi_week(cur.get('label'))} "
-                       f"({_vi_date(cur.get('from'))}–{_vi_date(cur.get('to'))})"
-                       f" so với {_vi_week(pri.get('label'))} "
-                       f"({_vi_date(pri.get('from'))}–{_vi_date(pri.get('to'))})")
+        if label == 'WTD':
+            # Same shape as MTD and YTD — "so với cùng kỳ năm trước" — because
+            # it IS the same comparison now. The ISO week number is what makes
+            # the two sides comparable, so it leads on both.
+            header += (f"{_vi_week(cur.get('label'), True)} "
+                       f"({_vi_date(cur.get('from'), True)}–"
+                       f"{_vi_date(cur.get('to'), True)})"
+                       f" so với cùng kỳ năm trước "
+                       f"{_vi_week(pri.get('label'), True)} "
+                       f"({_vi_date(pri.get('from'), True)}–"
+                       f"{_vi_date(pri.get('to'), True)})")
         else:
             # The prior side is a DIFFERENT YEAR, so it carries the year —
             # without it both ranges read "01/09–13/09" and look identical.

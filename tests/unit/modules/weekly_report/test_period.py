@@ -9,8 +9,42 @@ ADDED: the `through` clamp that ends MTD and YTD on the last closed day, and
 from datetime import date
 
 from app.modules.weekly_report.period import (fetch_span, last_complete_week,
-                                                month_end, period_windows,
-                                                shift_year)
+                                                month_end, order_stores,
+                                                period_windows, shift_year,
+                                                STORE_ORDER)
+
+
+class TestStoreOrder:
+    """The board's reading order, not the alphabet."""
+
+    def test_the_order_is_the_one_the_board_asked_for(self):
+        assert STORE_ORDER == ('HQ', 'RWP', 'RHN', 'RWR', 'RWT', 'RWD')
+
+    def test_stores_come_back_in_that_order_whatever_order_they_go_in(self):
+        assert order_stores({'RWD', 'HQ', 'RWT', 'RHN', 'RWR', 'RWP'}) == [
+            'HQ', 'RWP', 'RHN', 'RWR', 'RWT', 'RWD']
+
+    def test_it_is_not_alphabetical(self):
+        # The distinction the whole change exists for: alphabetical puts HQ
+        # beside RHN and RWP last.
+        codes = list(STORE_ORDER)
+        assert order_stores(codes) != sorted(codes)
+
+    def test_a_store_that_did_not_trade_is_simply_absent(self):
+        # A closed or not-yet-open store must not appear as an empty row.
+        assert order_stores({'HQ', 'RWT'}) == ['HQ', 'RWT']
+
+    def test_an_unlisted_store_goes_last_rather_than_vanishing(self):
+        # A new store, or a code Oracle returns that nobody has added here yet,
+        # must end up somewhere a human will notice — never dropped from the
+        # report, and never an exception on a Monday morning.
+        assert order_stores({'RWT', 'ZZZ', 'HQ'}) == ['HQ', 'RWT', 'ZZZ']
+
+    def test_several_unlisted_stores_are_alphabetical_among_themselves(self):
+        assert order_stores({'BBB', 'AAA', 'HQ'}) == ['HQ', 'AAA', 'BBB']
+
+    def test_no_stores_at_all_is_an_empty_list(self):
+        assert order_stores(set()) == []
 
 
 class TestLastCompleteWeek:
