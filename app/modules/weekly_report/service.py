@@ -25,7 +25,7 @@ from .aggregate import (METRICS, aggregate, delta_for, is_unfavourable,
 from .excel import build_workbook_bytes
 from .render import html_document, markdown_to_html, to_plain_text
 from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
-                     fetch_span, last_complete_week,
+                     fetch_span, last_complete_week, order_stores,
                      period_windows, week_label)
 from .repository import WeeklyReportRepository
 
@@ -56,7 +56,7 @@ DEFAULT_SUBJECT_TEMPLATE = 'Báo cáo bán hàng định kỳ — Tuần {{week_
 # by the model, through `{{commentary}}` — everything around it is template.
 DEFAULT_BODY_TEMPLATE = """Dear all,
 
-Đính kèm là báo cáo bán hàng định kỳ, gồm ba phần: Tuần {{week_no}} so với Tuần {{prior_week_no}}, lũy kế tháng {{month_no}} ({{mtd_range}}) và lũy kế từ đầu năm, chia theo cửa hàng và ngành hàng. (Đơn vị tiền: triệu đồng, chưa bao gồm VAT.)
+Đính kèm là báo cáo bán hàng định kỳ, gồm ba phần: Tuần {{week_no}}/{{week_year}} so với Tuần {{prior_week_no}}/{{prior_week_year}}, lũy kế tháng {{month_no}} ({{mtd_range}}) và lũy kế từ đầu năm, chia theo cửa hàng và ngành hàng. (Đơn vị tiền: triệu đồng, chưa bao gồm VAT.)
 
 Xin tóm tắt các điểm chính, theo thứ tự từ tuần gần nhất đến lũy kế năm:
 
@@ -233,7 +233,7 @@ class WeeklyReportService:
         pri_dept, pri_store, pri_grand, _ = pri_data
 
         stores = []
-        for store in sorted(set(cur_store) | set(pri_store)):
+        for store in order_stores(set(cur_store) | set(pri_store)):
             depts = sorted({d for (s, d) in cur_dept if s == store} |
                            {d for (s, d) in pri_dept if s == store})
             stores.append({
@@ -980,7 +980,13 @@ def render_template(template: str, payload: Dict[str, Any],
     Available placeholders:
       {{week_no}}        '37'                    ISO week of the reported week
       {{week_year}}      '2026'                  ISO year of that week
-      {{prior_week_no}}  '36'                    the comparison week
+      {{prior_week_no}}  '37'                    the comparison week — since
+                                                 2026-09-22 the SAME ISO week
+                                                 a year earlier, so it equals
+                                                 {{week_no}}; pair it with
+                                                 {{prior_week_year}} or the
+                                                 sentence says "37 vs 37"
+      {{prior_week_year}} '2025'                 year of the comparison week
       {{week_range}}     '07/09–13/09'           the reported week
       {{month_no}}       '9'                     month the MTD window sits in
       {{mtd_range}}      '01/09–13/09'
@@ -995,13 +1001,18 @@ def render_template(template: str, payload: Dict[str, Any],
     template must not take down the Monday run.
     """
     periods = payload.get('periods') or {}
-    wow = periods.get('WOW') or {'current': {}, 'prior': {}}
+    # WTD, not WOW. The week placeholders describe the comparison the email
+    # announces and the analysis makes, and that is year-on-year since
+    # 2026-09-22. WTD and WOW share an identical CURRENT window, so {{week_no}}
+    # and {{week_range}} are unchanged by this; only the PRIOR side moves, from
+    # the previous week to the same week a year earlier.
+    wtd = periods.get('WTD') or {'current': {}, 'prior': {}}
     mtd = periods.get('MTD') or {'current': {}}
     ytd = periods.get('YTD') or {'current': {}}
-    cur, pri = wow.get('current', {}), wow.get('prior', {})
+    cur, pri = wtd.get('current', {}), wtd.get('prior', {})
 
     week_no, week_year = _iso_week(cur.get('from', ''))
-    prior_week_no, _ = _iso_week(pri.get('from', ''))
+    prior_week_no, prior_week_year = _iso_week(pri.get('from', ''))
     mtd_from = (mtd.get('current') or {}).get('from', '')
     # The month comes from the MTD window, not from `as_of`: a run on Monday the
     # 1st reports the month that just ended, so taking it from `as_of` would
@@ -1016,7 +1027,8 @@ def render_template(template: str, payload: Dict[str, Any],
         'week_no': week_no,
         'week_year': week_year,
         'prior_week_no': prior_week_no,
-        'week_range': _range(wow),
+        'prior_week_year': prior_week_year,
+        'week_range': _range(wtd),
         'month_no': month_no,
         'mtd_range': _range(mtd),
         'ytd_range': _range(ytd),

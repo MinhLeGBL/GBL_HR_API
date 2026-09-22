@@ -31,20 +31,48 @@ DEPT_MERGE = {
 
 UNKNOWN_DEPT = 'UNKNOWN'
 
-# Presentation order. WTD, MTD and YTD all compare against a year earlier;
-# WOW is the odd one out (week against the previous week) and sits last.
+# Store display order, on the board's instruction (2026-09-22). Not alphabetical
+# — alphabetical put HQ next to RHN and buried RWP at the end, which matches no
+# way anyone here reads the business.
+#
+# ONE order for the page and the workbook both. They used to sort independently
+# (`sorted(...)` in three places); a reader comparing the attachment against the
+# screen has to trust that row three is the same store in both.
+STORE_ORDER = ('HQ', 'RWP', 'RHN', 'RWR', 'RWT', 'RWD')
+
+
+def order_stores(codes):
+    """`codes` in display order: the listed stores first, then any others.
+
+    A code that is not in STORE_ORDER sorts after every code that is, then
+    alphabetically among its peers. A store opening — or a typo'd code coming
+    back from Oracle — must show up at the end where someone will notice it,
+    never vanish from the report and never raise.
+    """
+    rank = {code: i for i, code in enumerate(STORE_ORDER)}
+    return sorted(codes, key=lambda c: (rank.get(c, len(rank)), c))
+
+# Presentation order. WTD, MTD and YTD all compare against a year earlier and
+# are the three the analysis and the workbook carry; WOW is the odd one out
+# (week against the previous week), page-only, and sits last.
 PERIOD_LABELS = ('WTD', 'MTD', 'YTD', 'WOW')
 
-# The periods the written analysis covers. WTD is deliberately absent: it was
-# added as a figures-only view, and feeding it to the model would spend tokens
-# narrating a comparison nobody asked to have narrated.
-COMMENTARY_LABELS = ('WOW', 'MTD', 'YTD')
+# The periods the written analysis and the emailed workbook cover.
+#
+# WTD, not WOW, since 2026-09-22 — readers said the year-on-year week is the
+# more useful one, and it makes all three parts of the analysis the SAME
+# comparison: this period against the same period a year earlier. Previously
+# part 1 was week-over-week while parts 2 and 3 were year-over-year, which the
+# model had to be told about and the reader had to remember.
+#
+# WOW is still a tab on the page; it is simply no longer narrated or exported.
+COMMENTARY_LABELS = ('WTD', 'MTD', 'YTD')
 
 # Display names for every period, used by the payload and so by the page's
 # tabs. Wider than `excel.SHEET_NAMES`, which covers only the workbook's three
-# sheets — WTD is an app-only view.
-PERIOD_TITLES = {'WTD': 'WTD', 'MTD': 'MTD', 'YTD': 'YTD',
-                 'WOW': 'Week by Week'}
+# sheets — WOW is a page-only view.
+PERIOD_TITLES = {'WTD': 'Week to date', 'MTD': 'Month to date',
+                 'YTD': 'Year to date', 'WOW': 'Week by Week'}
 
 
 def merge_department(raw):

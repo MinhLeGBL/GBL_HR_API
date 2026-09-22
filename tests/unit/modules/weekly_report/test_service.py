@@ -61,6 +61,47 @@ def payload(service):
     return service.build_snapshot(date(2026, 9, 14), 'monday', date(2026, 9, 13))
 
 
+class TestStoreOrderInThePayload:
+    """The page renders `period.stores` in payload order, so the order the
+    board reads on screen is decided here."""
+
+    CODES = ('RWD', 'RHN', 'HQ', 'RWT', 'RWR', 'RWP')   # deliberately scrambled
+
+    def _payload(self):
+        dept = [{'day': date(2026, 9, 8), 'store_code': c, 'store_name': c,
+                 'department': 'RTW', 'sale_net': D('100'),
+                 'return_net': D('0'), 'sale_gross': D('120'),
+                 'qty_sold': D('1'), 'qty_returned': D('0'), 'dept_bills': 1}
+                for c in self.CODES]
+        store = [{'day': date(2026, 9, 8), 'store_code': c, 'bills': 1}
+                 for c in self.CODES]
+        svc = WeeklyReportService()
+        svc.repo = MagicMock()
+        svc.repo.fetch_sales.return_value = (dept, store)
+        return svc.build_snapshot(date(2026, 9, 14), 'monday', date(2026, 9, 13))
+
+    def test_stores_are_in_the_boards_order_not_the_alphabet(self):
+        payload = self._payload()
+        for label in ('WTD', 'MTD', 'YTD', 'WOW'):
+            codes = [s['store'] for s in payload['periods'][label]['stores']]
+            assert codes == ['HQ', 'RWP', 'RHN', 'RWR', 'RWT', 'RWD'], label
+
+    def test_the_order_does_not_follow_the_input(self):
+        # Oracle returns rows in whatever order it likes; the report's order
+        # must not depend on that.
+        payload = self._payload()
+        codes = [s['store'] for s in payload['periods']['WTD']['stores']]
+        assert codes != list(self.CODES)
+        assert codes != sorted(self.CODES)
+
+    def test_every_period_agrees(self):
+        # A reader switching tabs must not find the rows rearranged.
+        payload = self._payload()
+        orders = {label: [s['store'] for s in payload['periods'][label]['stores']]
+                  for label in ('WTD', 'MTD', 'YTD', 'WOW')}
+        assert len(set(map(tuple, orders.values()))) == 1
+
+
 class TestSnapshotShape:
     def test_carries_every_period(self, payload):
         assert set(payload['periods']) == {'WTD', 'MTD', 'YTD', 'WOW'}
@@ -176,7 +217,8 @@ class TestChangePolarity:
 
 class TestRenderTemplate:
     def test_substitutes_every_documented_placeholder(self, payload):
-        tpl = ('{{week_no}}|{{week_year}}|{{prior_week_no}}|{{week_range}}|'
+        tpl = ('{{week_no}}|{{week_year}}|{{prior_week_no}}|'
+               '{{prior_week_year}}|{{week_range}}|'
                '{{month_no}}|{{mtd_range}}|{{ytd_range}}|{{week_label}}|'
                '{{as_of}}|{{through}}|{{summary}}|{{commentary}}')
         out = render_template(tpl, payload, 'COMMENT')
@@ -185,7 +227,10 @@ class TestRenderTemplate:
 
     def test_fills_the_vietnamese_opening_sentence(self, payload):
         out = render_template(DEFAULT_BODY_TEMPLATE, payload, 'PHÂN TÍCH')
-        assert 'Tuần 37 so với Tuần 36' in out
+        # Year-on-year since 2026-09-22, so BOTH weeks carry their year. The
+        # sentence announces the comparison the analysis then makes; if it said
+        # "Tuần 37 so với Tuần 36" the email would contradict its own contents.
+        assert 'Tuần 37/2026 so với Tuần 37/2025' in out
         assert 'lũy kế tháng 9 (01/09–13/09)' in out
         assert 'triệu đồng, chưa bao gồm VAT' in out
         assert 'PHÂN TÍCH' in out
@@ -203,7 +248,19 @@ class TestRenderTemplate:
 
     def test_week_numbers_are_iso(self, payload):
         assert render_template('{{week_no}}/{{week_year}}', payload) == '37/2026'
-        assert render_template('{{prior_week_no}}', payload) == '36'
+        # The comparison week is the SAME week a year back, so the number
+        # matches and only the year distinguishes them. A template quoting
+        # {{prior_week_no}} alone now reads "37 so với 37" — which is exactly
+        # why {{prior_week_year}} exists and the default template uses it.
+        assert render_template('{{prior_week_no}}', payload) == '37'
+        assert render_template('{{prior_week_year}}', payload) == '2025'
+
+    def test_the_week_window_is_unchanged_by_the_switch(self, payload):
+        # WTD and WOW share an identical CURRENT window, so the week the email
+        # names is the same week it always named. Only the baseline moved.
+        assert (payload['periods']['WTD']['current']
+                == payload['periods']['WOW']['current'])
+        assert render_template('{{week_range}}', payload) == '07/09–13/09'
 
     def test_unknown_placeholder_is_left_alone_rather_than_raising(self, payload):
         # A typo in a template must not take down the Monday run.

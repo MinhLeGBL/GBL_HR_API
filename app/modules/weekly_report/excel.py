@@ -17,7 +17,7 @@ from io import BytesIO
 
 from .aggregate import (LOWER_IS_BETTER, METRICS, ZERO_METRICS, aggregate,
                         delta)
-from .period import week_label
+from .period import order_stores, week_label
 
 MONEY_FORMAT = '#,##0,,'        # whole millions -- the aggregate totals
 MONEY_1DP_FORMAT = '#,##0.0,,'  # millions to 1dp -- the per-unit averages
@@ -53,9 +53,36 @@ _LABELS = {
 
 METRIC_COLUMNS = [(_LABELS[key], key, unit) for key, unit in METRICS]
 
+# The company's own palette, lifted from the "P&L overview" sheet of the Runway
+# Company Overview deck so the attachment looks like the rest of the reporting
+# rather than like a different tool's output.
+#
+# Four warm tones carrying a HIERARCHY, which is the part worth copying — the
+# deck uses no borders at all, so depth is read entirely from fill:
+#
+#   BRAND_DARK    header band, and the grand-total row   (white bold text)
+#   BRAND_BEIGE   subtotal rows                          (black bold text)
+#   BRAND_LIGHT   secondary / recessive blocks           (black bold text)
+#   white         detail lines
+#
+# Mapped onto this sheet: department rows are detail, each store's TOTAL is a
+# subtotal, and ALL STORES is the grand total — the same three levels the deck's
+# P&L has, so the two read the same way.
+BRAND_DARK = '5A483E'
+BRAND_BEIGE = 'DCD0BC'
+BRAND_LIGHT = 'EDE7DC'
+BRAND_ON_DARK = 'FFFFFF'
+
 # Only unfavourable moves are coloured; favourable ones keep the default text
 # colour, so the eye goes straight to the problems.
 BAD_COLOUR = 'C00000'
+
+# The same signal on the dark grand-total row. C00000 on BRAND_DARK is a 1.33:1
+# contrast ratio — effectively invisible, which would have silently dropped the
+# warning from the single most-read row on the sheet. FF9C9C gives 4.31:1 there
+# and is the candidate furthest from white (2.00:1), so a red figure and a
+# normal one do not blur into each other.
+BAD_ON_DARK = 'FF9C9C'
 
 _UNIT_FORMAT = {
     'money': MONEY_FORMAT,
@@ -65,16 +92,22 @@ _UNIT_FORMAT = {
 }
 
 # The sheets the workbook carries, in order. Deliberately NOT PERIOD_LABELS:
-# WTD is an app-only view, so the emailed attachment is unchanged by it.
-SHEET_NAMES = {'WOW': 'Week by Week', 'MTD': 'MTD', 'YTD': 'YTD'}
+# WOW is a page-only view and is not exported. It held the first sheet until
+# 2026-09-22, when readers said the year-on-year week was the more useful one;
+# swapping it for WTD also makes all three sheets the same comparison, so a
+# reader moving between them never has to check which baseline they are on.
+SHEET_NAMES = {'WTD': 'WTD', 'MTD': 'MTD', 'YTD': 'YTD'}
 
 
 def _write_period_sheet(ws, label, windows, cur_data, prior_data):
     from openpyxl.styles import Alignment, Font, PatternFill
 
     bold = Font(bold=True)
-    total_fill = PatternFill('solid', fgColor='FFF2CC')
-    grand_fill = PatternFill('solid', fgColor='E2EFDA')
+    white_bold = Font(bold=True, color=BRAND_ON_DARK)
+    # A store's TOTAL is a subtotal; ALL STORES is the grand total. Same two
+    # levels, same two tones as the deck's P&L.
+    total_fill = PatternFill('solid', fgColor=BRAND_BEIGE)
+    grand_fill = PatternFill('solid', fgColor=BRAND_DARK)
 
     (c_from, c_to), (p_from, p_to) = windows
 
@@ -82,13 +115,23 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
     pri_dept, pri_store, pri_grand, pri_names = prior_data
     store_names = {**pri_names, **store_names}
 
-    if label == 'WOW':
-        title = 'Week by Week'
+    if label == 'WTD':
+        # Both sides are weeks, so they are named by their ISO week rather than
+        # by dates: "Week 38 2026 vs Week 38 2025" states the comparison, where
+        # two date ranges a year apart leave the reader to verify it.
+        title = label
         headline = f'{week_label(c_from)}  vs  {week_label(p_from)}'
-        alignment_note = ('Latest COMPLETE week against the week before it (the '
-                          'current partial week is excluded). Both sides are whole '
-                          'weeks on the same weekdays. This sheet is week-over-week, '
-                          'NOT year-over-year — MTD and YTD compare against last year.')
+        # The week number comes from the sheet's own window. A hardcoded
+        # example ("week 38 against week 38") reads as a contradiction on any
+        # other week's sheet, which is exactly how a reader loses trust in a
+        # note that is otherwise correct.
+        iso_week = c_from.isocalendar().week
+        alignment_note = (f'Latest COMPLETE week against the SAME ISO week a year '
+                          f'earlier — week {iso_week} against week {iso_week} (the '
+                          f'current partial week is excluded). Both sides are whole '
+                          f'Monday-to-Sunday weeks, so the weekday mix matches; the '
+                          f'calendar dates therefore differ by a day or two, which '
+                          f'is expected.')
     else:
         title = label
         headline = f'{c_from} to {c_to}  vs  {p_from} to {p_to}'
@@ -99,8 +142,10 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
     ws['A2'] = (f'{c_from} ({c_from:%a}) to {c_to} ({c_to:%a})   vs   '
                 f'{p_from} ({p_from:%a}) to {p_to} ({p_to:%a})')
     ws['A2'].font = Font(size=10)
+    # The legend follows the row order, so a reader can run down it and find
+    # the stores in the order they are about to meet them.
     legend = '   '.join(f'{code} = {store_names[code]}'
-                        for code in sorted(store_names))
+                        for code in order_stores(store_names))
     ws['A4'] = f'Stores:   {legend}'
     ws['A4'].font = Font(italic=True, size=9)
 
@@ -121,26 +166,32 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
     ws.merge_cells(start_row=top, start_column=1, end_row=sub, end_column=1)
     ws.merge_cells(start_row=top, start_column=2, end_row=sub, end_column=2)
 
-    if label == 'WOW':
-        cur_block = f'Latest week — {week_label(c_from)}'
-        pri_block = f'Prior week — {week_label(p_from)}'
+    if label == 'WTD':
+        cur_block = f'Current — {week_label(c_from)} ({c_from} to {c_to})'
+        pri_block = f'Prior year — {week_label(p_from)} ({p_from} to {p_to})'
     else:
         cur_block = f'Current — {c_from} to {c_to}'
         pri_block = f'Prior year — {p_from} to {p_to}'
 
     width = len(METRIC_COLUMNS)
+    # Three tones rather than one flat band: the prior block opens COLLAPSED, so
+    # the common view is Current next to Δ with nothing between them. Giving
+    # each block its own tone keeps that boundary visible whether the middle
+    # block is showing or not. Dark for the figures being reported, light for
+    # the comparison, beige for what is derived from the two.
     blocks = [
-        (cur_block, PatternFill('solid', fgColor='DDEBF7')),
-        (pri_block, PatternFill('solid', fgColor='EDEDED')),
-        ('Δ %   (red = unfavourable)', PatternFill('solid', fgColor='FFF2CC')),
+        (cur_block, PatternFill('solid', fgColor=BRAND_DARK), white_bold),
+        (pri_block, PatternFill('solid', fgColor=BRAND_LIGHT), bold),
+        ('Δ %   (red = unfavourable)',
+         PatternFill('solid', fgColor=BRAND_BEIGE), bold),
     ]
 
-    for b, (block_label, fill) in enumerate(blocks):
+    for b, (block_label, fill, block_font) in enumerate(blocks):
         start = 3 + b * width
         ws.merge_cells(start_row=top, start_column=start,
                        end_row=top, end_column=start + width - 1)
         c = ws.cell(top, start, block_label)
-        c.font = bold
+        c.font = block_font
         c.fill = fill
         c.alignment = Alignment(horizontal='center')
         is_delta_block = b == len(blocks) - 1
@@ -149,16 +200,25 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
             # there would misdescribe it.
             text = metric_label.replace(' (VND m)', '') if is_delta_block else metric_label
             sc = ws.cell(sub, start + i, text)
-            sc.font = bold
+            sc.font = block_font
             sc.fill = fill
             sc.alignment = Alignment(horizontal='center', wrap_text=True)
 
-    def emit(row, store_label, dept_label, cur_m, pri_m, fill=None):
+    def emit(row, store_label, dept_label, cur_m, pri_m, fill=None,
+             font=None, bad_colour=BAD_COLOUR):
+        """One row. `font` and `bad_colour` travel WITH `fill`.
+
+        They have to: a filled row's text colour is a property of the fill it
+        sits on, and so is the shade of red that stays legible there. Leaving
+        the font hardcoded is how black text ends up on the dark grand-total
+        row — it renders, so nothing fails, and nobody can read it.
+        """
+        font = font or bold
         a = ws.cell(row, 1, store_label)
         b = ws.cell(row, 2, dept_label)
         if fill:
             a.fill = b.fill = fill
-            a.font = b.font = bold
+            a.font = b.font = font
         cur_m = cur_m or ZERO_METRICS
         pri_m = pri_m or ZERO_METRICS
         for i, (_lbl, key, unit) in enumerate(METRIC_COLUMNS):
@@ -184,7 +244,8 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
                     bad = (val > 0) if key in LOWER_IS_BETTER else (val < 0)
                 if fill:
                     cell.fill = fill
-                    cell.font = Font(bold=True, color=BAD_COLOUR) if bad else bold
+                    cell.font = (Font(bold=True, color=bad_colour) if bad
+                                 else font)
                 elif bad:
                     cell.font = Font(color=BAD_COLOUR)
         return row + 1
@@ -199,7 +260,7 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
     ws.sheet_properties.outlinePr.applyStyles = False
 
     row = sub + 1
-    all_stores = sorted(set(cur_store) | set(pri_store))
+    all_stores = order_stores(set(cur_store) | set(pri_store))
     for store in all_stores:
         depts = sorted({d for (s, d) in cur_dept if s == store} |
                        {d for (s, d) in pri_dept if s == store})
@@ -223,7 +284,8 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
 
         row += 1   # spacer between stores, deliberately left at level 0
 
-    emit(row, 'ALL STORES', 'TOTAL', cur_grand, pri_grand, grand_fill)
+    emit(row, 'ALL STORES', 'TOTAL', cur_grand, pri_grand, grand_fill,
+         font=white_bold, bad_colour=BAD_ON_DARK)
 
     from openpyxl.utils import get_column_letter
 
@@ -298,7 +360,7 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
 
 
 def _write_raw_sheet(ws, dept_rows):
-    from openpyxl.styles import Font
+    from openpyxl.styles import Font, PatternFill
 
     # Whole VND here, not millions: a single day x store x department row is
     # often under a million and would round to "0".
@@ -306,9 +368,12 @@ def _write_raw_sheet(ws, dept_rows):
                'Sale net (VND, ex-VAT)', 'Return net (VND, ex-VAT)',
                'Sale gross (VND, list, ex-VAT)',
                'Qty sold', 'Qty returned', 'Bills containing dept']
+    # Same header band as the period sheets — it is one workbook, and a reader
+    # who lands here from a tab should not feel they changed documents.
     for i, h in enumerate(headers, start=1):
         c = ws.cell(1, i, h)
-        c.font = Font(bold=True)
+        c.font = Font(bold=True, color=BRAND_ON_DARK)
+        c.fill = PatternFill('solid', fgColor=BRAND_DARK)
 
     for r, row in enumerate(sorted(dept_rows,
                                    key=lambda x: (x['day'], x['store_code'], x['department'])),

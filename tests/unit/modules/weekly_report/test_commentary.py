@@ -15,12 +15,15 @@ PAYLOAD = {
     'through': '2026-09-13',
     'store_names': {'RWD': 'RUNWAY DIAMOND', 'RWT': 'RUNWAY TAKASHIMAYA'},
     'periods': {
-        'WOW': {
-            'label': 'Week by Week',
+        'WTD': {
+            'label': 'Week to date',
             'current': {'from': '2026-09-07', 'to': '2026-09-13',
                         'label': 'Week 37 2026'},
-            'prior': {'from': '2026-08-31', 'to': '2026-09-06',
-                      'label': 'Week 36 2026'},
+            # The SAME ISO week a year earlier — not the week before. Week 37 of
+            # 2025 runs 08/09-14/09, a day offset from 2026's, which is exactly
+            # why both sides carry their year in the header.
+            'prior': {'from': '2025-09-08', 'to': '2025-09-14',
+                      'label': 'Week 37 2025'},
             'total': {
                 'current': {'total_sales': 3_961_000_000, 'bills': 113,
                             'qty_sold': 251, 'avg_discount_pct': 14.0,
@@ -131,6 +134,69 @@ class TestFiguresBlock:
             assert name in prompt
 
 
+class TestWhichPeriodsAreNarrated:
+    """Which periods the analysis covers is a decision, not a detail.
+
+    Swapped from WOW to WTD on 2026-09-22: readers said the year-on-year week
+    was the more useful one, and it makes all three parts the same comparison.
+    """
+
+    def test_the_analysis_covers_wtd_mtd_and_ytd(self):
+        assert C.COMMENTARY_LABELS == ('WTD', 'MTD', 'YTD')
+
+    def test_week_over_week_is_not_narrated(self):
+        # WOW is still a tab on the page; it is simply not in the email. If it
+        # is ever put back, that should be a deliberate edit here.
+        assert 'WOW' not in C.COMMENTARY_LABELS
+        assert 'WOW' not in C.PERIOD_VI
+
+    def test_part_one_compares_against_the_same_week_last_year(self):
+        prompt = C.build_prompt(PAYLOAD)
+        line = next(l for l in prompt.splitlines() if l.startswith('TUẦN GẦN NHẤT'))
+        assert 'so với cùng kỳ năm trước' in line
+        assert 'Tuần 37/2026' in line and 'Tuần 37/2025' in line
+
+    def test_both_weeks_carry_their_year(self):
+        # Without the year the header reads "Tuần 37 so với Tuần 37" — the same
+        # week compared with itself, which tells the reader nothing.
+        assert C._vi_week('Week 37 2026', True) == 'Tuần 37/2026'
+        assert C._vi_week('Week 37 2026') == 'Tuần 37'
+
+    def test_the_model_is_told_part_one_is_not_week_over_week(self):
+        # The prompt used to say "Tuần X so với Tuần Y" and the model was free
+        # to read that as the previous week. Left alone it would narrate the
+        # right figures under the wrong baseline.
+        assert 'KHÔNG phải với tuần liền trước' in C.SYSTEM_PROMPT
+        assert 'CẢ BA PHẦN đều so sánh với CÙNG KỲ NĂM TRƯỚC' in C.SYSTEM_PROMPT
+
+    def test_a_payload_without_wtd_produces_no_week_section(self):
+        # Tolerance, not a crash: commentary is best-effort, and a partial
+        # payload should still yield an analysis of the blocks it does have.
+        payload = {**PAYLOAD, 'periods': {k: v for k, v in PAYLOAD['periods'].items()
+                                          if k != 'WTD'}}
+        prompt = C.build_prompt(payload)
+        assert 'TUẦN GẦN NHẤT' not in prompt
+        assert 'LŨY KẾ THÁNG' in prompt
+
+
+class TestTradeVocabulary:
+    """The email's Vietnamese is the company's own; the model writes the words
+    it is handed."""
+
+    def test_discount_is_giam_gia_not_chiet_khau(self):
+        # "chiết khấu" is the supplier/settlement discount; this figure is the
+        # markdown off the retail ticket, which fashion retail calls "giảm giá".
+        # Both dictionaries say "discount", which is exactly how the wrong one
+        # gets used for months without anyone noticing.
+        assert C.METRIC_VI['avg_discount_pct'] == 'Tỷ lệ giảm giá'
+
+    def test_the_word_appears_nowhere_in_what_the_model_reads(self):
+        surfaces = C.SYSTEM_PROMPT + C.build_prompt(PAYLOAD) + '\n'.join(
+            C.derived_facts(PAYLOAD) + C.notable_movements(PAYLOAD))
+        assert 'chiết khấu' not in surfaces
+        assert 'giảm giá' in surfaces
+
+
 class TestDerivedFacts:
     """The house style quotes cross-period ratios. They are computed here so the
     model never has to divide in prose."""
@@ -154,7 +220,7 @@ class TestDerivedFacts:
 
     def test_a_zero_denominator_is_skipped_not_divided_by(self):
         payload = {'periods': {
-            'WOW': {'total': {'current': {'returns_value': 10.0, 'total_sales': 5.0},
+            'WTD': {'total': {'current': {'returns_value': 10.0, 'total_sales': 5.0},
                               'prior': {}, 'change': {}}},
             'MTD': {'total': {'current': {'returns_value': 0, 'total_sales': 0},
                               'prior': {}, 'change': {}}},
@@ -179,7 +245,7 @@ class TestNotableMovements:
     def test_says_so_explicitly_when_nothing_crosses_the_threshold(self):
         # A quiet week must not be padded with manufactured significance.
         quiet = {'store_names': {}, 'periods': {
-            'WOW': {'stores': []}, 'MTD': {'stores': []}, 'YTD': {'stores': []}}}
+            'WTD': {'stores': []}, 'MTD': {'stores': []}, 'YTD': {'stores': []}}}
         assert C.notable_movements(quiet) == []
         assert 'không có cửa hàng nào vượt ngưỡng' in C.build_prompt(quiet)
 
