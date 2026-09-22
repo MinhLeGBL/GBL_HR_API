@@ -655,3 +655,113 @@ That is why a rejected certificate is reported separately from "could not reach"
 A `0` there is the whole diagnosis. (On macOS python.org builds, the fix is to
 run `Install Certificates.command`, or to point `SSL_CERT_FILE` at
 `certifi.where()`. The Linux server uses the system bundle and is unaffected.)
+
+
+## 0.17.0 — 2026-09-22
+
+### Changed
+- **The analysis and the emailed workbook now cover WTD instead of WOW.**
+  Readers said the year-on-year week is the more useful comparison.
+  `COMMENTARY_LABELS` is `('WTD', 'MTD', 'YTD')` and `SHEET_NAMES` is
+  `{'WTD', 'MTD', 'YTD'}`.
+  - **All three parts are now the same comparison** — this period against the
+    same period a year earlier. Part 1 used to be week-over-week while parts 2
+    and 3 were year-over-year; the model had to be told about the mismatch and
+    the reader had to keep track of it.
+  - **WOW is unchanged and still a tab on the page.** It is simply no longer
+    narrated or exported. `PERIOD_LABELS` still carries all four, and
+    `period_windows()` still computes the WOW window.
+  - The WTD sheet names the ISO week on both sides (`Week 38 2026 vs Week 38
+    2025`) rather than two date ranges, and its note warns that the calendar
+    dates differ by a day or two — both sides are whole Monday-to-Sunday weeks,
+    so the weekday mix matches and the dates cannot.
+- **The model is told explicitly that part 1 is NOT week-over-week.** The prompt
+  said "Tuần X so với Tuần Y", which it was free to read as the previous week.
+  Left alone it would have narrated the right figures under the wrong baseline —
+  the kind of error that reads perfectly plausibly.
+- **`{{prior_week_no}}` now resolves to the same number as `{{week_no}}`**,
+  because the comparison week IS week N, a year earlier. New placeholder
+  `{{prior_week_year}}`, and `DEFAULT_BODY_TEMPLATE`'s opening sentence becomes
+  `Tuần {{week_no}}/{{week_year}} so với Tuần {{prior_week_no}}/{{prior_week_year}}`.
+  Without both years the email announces "Tuần 38 so với Tuần 38".
+
+### ⚠ Requires a data migration — the template is NOT in git
+The live template lives in `periodic_report_settings.body_template`, so
+deploying the code alone leaves the email announcing the wrong comparison.
+Run, from the server:
+
+    PYTHONPATH=. .venv/bin/python \
+        scripts/database/migrate_weekly_report_yoy_template.py --apply
+
+Dry run by default; `--apply` writes. It rewrites ONLY the exact sentence it
+knows, so a hand-edited template is left alone and printed for a human to judge,
+and it is idempotent. Checked against production 2026-09-22: the stored template
+is the unmodified default, so it matches.
+
+### Note
+Existing snapshots carry the OLD store order — the row order is baked into the
+stored payload, not applied on read. Re-render to pick up the new one.
+
+Otherwise existing snapshots are unaffected — they store figures, not sheets,
+and WTD has been in every payload since 0.13.0. But a stored run's WORKBOOK and ANALYSIS
+were rendered under the old rules and still carry Week by Week. Re-render with
+`--force --keep-analysis` to swap the sheet while keeping the prose, or plain
+`--force` to have the analysis rewritten year-on-year as well.
+
+### Changed — the workbook wears the company's own colours
+- **The palette is lifted from the "P&L overview" sheet of the Runway Company
+  Overview deck**, so the attachment looks like the rest of the reporting rather
+  than like a different tool's output. Four warm tones, no borders:
+  `5A483E` dark (header band + grand total, white bold), `DCD0BC` beige
+  (subtotals), `EDE7DC` light (the recessive block), white (detail lines).
+  Replaces the old blue/grey/yellow/green.
+- **The hierarchy is what was actually copied.** The deck uses no borders at
+  all — depth is read entirely from fill. Mapped onto this sheet: department
+  rows are detail, a store's TOTAL is a subtotal, ALL STORES is the grand
+  total. The same three levels the deck's P&L has, so the two read alike.
+- The three column blocks keep three distinct tones rather than one flat band.
+  The prior block opens COLLAPSED, so the usual view is Current beside Δ with
+  nothing between them, and a single tone would lose that boundary.
+- `Raw Data`'s header gets the same band. It is one workbook.
+
+#### The red warning had to be re-chosen for the dark row
+`C00000` on `5A483E` is a **1.33:1** contrast ratio — it renders, so nothing
+fails, and the unfavourable-move warning would have silently vanished from the
+single most-read row on the sheet. The grand total now uses `FF9C9C`: **4.31:1**
+on the dark fill, and the candidate furthest from white (**2.00:1**) so a red
+figure and an ordinary one do not blur together. Every lighter row keeps
+`C00000`, which still reads at 4.25:1 on beige and 6.48:1 on white.
+
+`emit()` now takes the font and the red shade ALONGSIDE the fill, because both
+are properties of the fill a row sits on. Leaving the font hardcoded is exactly
+how black text ends up on a dark row.
+
+### Changed — store order
+- **Stores are now listed HQ, RWP, RHN, RWR, RWT, RWD** on the page, in the
+  workbook and in the workbook's store legend. The board's reading order;
+  alphabetical put HQ beside RHN and buried RWP at the end.
+- **One order, defined once** (`period.order_stores`). The page and the sheet
+  used to sort independently — `sorted(...)` in three separate places — so a
+  reader comparing the attachment against the screen had to take on trust that
+  row three was the same store in both. The analysis picks it up too, since
+  `notable_movements` walks the same list.
+- An unlisted code sorts after every listed one, then alphabetically. A store
+  opening, or a code Oracle returns that nobody has added to `STORE_ORDER` yet,
+  lands at the end where someone will notice it — never dropped from the report
+  and never an exception on a Monday morning. Checked against 21 months of live
+  data: the six codes are exactly the six that trade.
+
+### Changed — trade vocabulary
+- **"chiết khấu" → "giảm giá"** throughout the analysis. Both translate as
+  "discount", but they are not interchangeable in the trade: "chiết khấu" is the
+  supplier/settlement discount, while this figure measures the markdown off the
+  retail ticket that a shopper sees, which fashion retail calls "giảm giá".
+  Every surface the model reads — `METRIC_VI`, the system prompt, the derived
+  facts and the store movements — uses the new word, because the word the model
+  is handed is the word it writes.
+
+### Added
+- `TestWhichSheetsTheWorkbookCarries` and `TestWhichPeriodsAreNarrated`. The
+  existing sheet tests parametrise over `SHEET_NAMES`, so they followed this
+  change silently — swapping a period in or out failed nothing. Which periods
+  are exported and narrated is a decision and now has tests of its own.
