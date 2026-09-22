@@ -599,3 +599,59 @@ convenience.
 Existing snapshots do not carry the column. Re-render with
 `--overwrite` for historical weeks and `--force --keep-analysis` for the rest.
 
+
+
+## 0.16.0 — 2026-09-22
+
+### Added
+- **The sent email now appears in the company mailbox's Sent folder.**
+  `app/core/mail/sent_folder.py` — after a successful SMTP send the message is
+  also filed into the mailbox over IMAP.
+  - SMTP delivers a message; it never files a copy anywhere. The Sent folder
+    lives on the IMAP server, and the only thing that ever puts a message there
+    is a client doing a second step after sending — an IMAP `APPEND`. Outlook,
+    Thunderbird and Apple Mail all do both halves, which is why mail sent by
+    hand appeared in Sent and mail sent by this tool did not. (Gmail is the
+    exception people remember; it files SMTP sends itself, because the send
+    passes through Google's own servers.)
+  - **The folder is discovered, not guessed** — the RFC 6154 `\Sent`
+    special-use flag first, then `Sent` / `INBOX.Sent` / `Sent Items` and the
+    rest by name. A guess would file the copy somewhere nobody reads.
+  - **Best effort, never fatal.** By the time it runs the mail is already
+    delivered; a failure means a missing copy, not a failed send, and raising
+    would make a retry email the board twice. Failures come back in the send
+    detail (`sent via …; no Sent copy (<reason>)`), which is stored in
+    `weekly_report_sends` and shown on the page.
+  - Carries its own socket timeout, for the same reason: a mailbox that accepts
+    the connection and then stops talking must not hang the dispatch job over a
+    cosmetic copy.
+  - Bcc recipients do not appear in the copy — bcc is envelope-only and never a
+    header, and writing it in to make the copy fuller would expose the hidden
+    recipients to everyone. The full envelope stays in `weekly_report_sends`.
+  - **No `.env` change needed**: `IMAP_HOST` falls back to `SMTP_HOST` and the
+    credentials to `SMTP_USER` / `SMTP_PASSWORD`. Override any of them —
+    `IMAP_PORT` (993), `IMAP_SECURITY`, `IMAP_SENT_FOLDER`, `IMAP_TIMEOUT` — or
+    set `MAIL_FILE_SENT=false` to switch the whole thing off.
+- `scripts/jobs/mail_sent_folder_check.py` — proves login, lists the mailbox's
+  folders and names the one that would be chosen. **Sends nothing**, so it is
+  safe against the live mailbox; `--append-test` additionally files one
+  throwaway message to prove the `APPEND` itself.
+
+### Note
+Only applies to mail sent from here from now on. Reports already emailed have no
+Sent copy and cannot be given one retroactively.
+
+**`mail.globallink.vn` needs no TLS special-casing.** Verified from outside: IMAP
+993 and SMTP 587 STARTTLS both present a valid RapidSSL/DigiCert certificate for
+the host, chaining to DigiCert Global Root G2. If you ever see
+`CERTIFICATE_VERIFY_FAILED — self-signed certificate in certificate chain` from
+this server, **suspect the client, not the mailbox**: a Python whose trust store
+is empty fails exactly that way against every host alive, including google.com.
+That is why a rejected certificate is reported separately from "could not reach"
+— they point at different machines. Check with:
+
+    python -c "import ssl; print(len(ssl.create_default_context().get_ca_certs()))"
+
+A `0` there is the whole diagnosis. (On macOS python.org builds, the fix is to
+run `Install Certificates.command`, or to point `SSL_CERT_FILE` at
+`certifi.where()`. The Linux server uses the system bundle and is unaffected.)

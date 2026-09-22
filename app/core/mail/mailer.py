@@ -18,6 +18,10 @@ Environment
   SMTP_FROM         envelope/from address (default: SMTP_USER)
   SMTP_FROM_NAME    display name (default: 'GBL Master')
   SMTP_TIMEOUT      socket timeout in seconds (default: 30)
+
+After a successful send the message is also filed in the mailbox's Sent folder
+over IMAP — SMTP alone leaves no Sent copy. That step is best-effort and has its
+own settings; see `sent_folder.py`.
 """
 import os
 import smtplib
@@ -25,6 +29,8 @@ import ssl
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from typing import Iterable, List, Optional, Sequence
+
+from .sent_folder import file_as_sent
 
 
 class MailError(RuntimeError):
@@ -136,7 +142,14 @@ class SMTPMailer(Mailer):
             raise MailError(f'SMTP error talking to {self.host}:{self.port}: {e}')
         except OSError as e:
             raise MailError(f'Could not reach {self.host}:{self.port}: {e}')
-        return f'sent via {self.host}:{self.port} to {len(envelope_to)} recipient(s)'
+        detail = f'sent via {self.host}:{self.port} to {len(envelope_to)} recipient(s)'
+
+        # The mail is already delivered. Filing the Sent copy is a separate
+        # IMAP conversation that may fail on its own — and if it does, the
+        # right outcome is a missing copy, NOT a MailError that makes the
+        # caller retry and send the whole thing twice.
+        filed, reason = file_as_sent(message)
+        return detail if filed else f'{detail}; no Sent copy ({reason})'
 
 
 def _infer_security(port: int) -> str:
