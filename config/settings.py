@@ -6,7 +6,12 @@ from dotenv import load_dotenv
 
 # Env file loading is handled by config/database.py which is imported first.
 # This fallback ensures settings work even if database.py wasn't imported yet.
-_env = os.getenv('FLASK_ENV', 'development')
+# Same rule as config/database.py, which normally runs first and has already
+# pinned FLASK_ENV. Duplicated rather than imported to keep this a fallback
+# that works even when database.py has not been imported.
+from config.database import _default_env  # noqa: E402
+
+_env = _default_env()
 _env_file = f'.env.{_env}'
 if os.path.exists(_env_file):
     load_dotenv(_env_file)

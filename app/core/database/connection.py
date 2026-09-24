@@ -4,26 +4,57 @@ import threading
 import oracledb
 from config.database import DATABASE_CONFIG, POSTGRES_CONFIG, SSH_CONFIG
 
+# Set once per process: oracledb.init_oracle_client() must not be called twice.
+_thick_initialised = False
+_thick_lock = threading.Lock()
+
+
+def _instant_client_dir():
+    """Where Instant Client lives, or None to run in thin mode.
+
+    ORACLE_CLIENT_MODE=thin skips it entirely. Thin mode needs no Oracle
+    libraries at all and supports Oracle 12.1 and later, which covers both
+    production (12.1.0.2) and the local development container — so a new
+    machine can run the app with nothing installed but Python.
+
+    ORACLE_LIB_DIR names a directory explicitly. The defaults below are the
+    paths that happen to exist on the two machines this has run on; they are
+    a convenience, not a contract, which is why a missing one no longer raises.
+    """
+    if (os.getenv('ORACLE_CLIENT_MODE') or '').strip().lower() == 'thin':
+        return None
+    override = os.getenv('ORACLE_LIB_DIR')
+    if override:
+        return override or None
+
+    if platform.system() == "Darwin" and platform.machine() == "x86_64":
+        return os.path.join(os.environ.get("HOME", ""), "Downloads",
+                            "instantclient_19_16")
+    if platform.system() == "Windows":
+        return r"E:\Oracle\instantclient_23_4"
+    if platform.system() == "Linux":
+        for d in ("/opt/oracle/instantclient_19_30",
+                  "/opt/oracle/instantclient_19_16"):
+            if os.path.exists(d):
+                return d
+        return "/opt/oracle/instantclient_19_30"
+    return None
+
+
 def get_oracle_connection():
     try:
-        d = None
-        if platform.system() == "Darwin" and platform.machine() == "x86_64":  # macOS
-            d = os.environ.get("HOME") + ("/Downloads/instantclient_19_16")
-        elif platform.system() == "Windows":
-            d = r"E:\Oracle\instantclient_23_4"
-        elif platform.system() == "Linux":
-            # For Linux, check for different Oracle versions
-            if os.path.exists("/opt/oracle/instantclient_19_30"):
-                d = "/opt/oracle/instantclient_19_30"
-            elif os.path.exists("/opt/oracle/instantclient_19_16"):
-                d = "/opt/oracle/instantclient_19_16"
-            else:
-                d = "/opt/oracle/instantclient_19_30"  # Default to 19.30
+        global _thick_initialised
+        d = _instant_client_dir()
 
-        if d and os.path.exists(d):
-            oracledb.init_oracle_client(lib_dir=d)
-        elif d:
-            raise FileNotFoundError(f"Oracle Instant Client not found at: {d}")
+        # A missing Instant Client is no longer fatal. It used to raise, which
+        # meant a machine without it at one hardcoded path could not run the
+        # app at all — and thin mode would have worked fine. Falling through
+        # to thin is strictly better than refusing to start.
+        if d and os.path.exists(d) and not _thick_initialised:
+            with _thick_lock:
+                if not _thick_initialised:
+                    oracledb.init_oracle_client(lib_dir=d)
+                    _thick_initialised = True
 
         conn = oracledb.connect(
             user=DATABASE_CONFIG['username'],
@@ -174,6 +205,22 @@ def _start_ssh_tunnel():
         return None
 
 
+def _autocommit_requested():
+    """Whether PG connections should commit each statement on its own.
+
+    Set by `scripts/database/init_db.py` and nothing else. Schema creation runs
+    a long series of independent, idempotent CREATE TABLE IF NOT EXISTS
+    statements; in one transaction a single failure aborts the lot and rolls
+    back even the tables that succeeded. Against an established database that
+    never mattered, because nothing failed. Against an EMPTY one — a new
+    developer machine, or rebuilding the server from nothing — the module
+    foreign keys are circular, so something always fails and the whole pass is
+    discarded. Committing per statement lets a second pass finish the job.
+    """
+    return (os.getenv('PG_AUTOCOMMIT') or '').strip().lower() in (
+        'true', '1', 'yes', 'on')
+
+
 def _make_pg_connection(host, port):
     """Create a PostgreSQL connection, trying psycopg2 then psycopg3.
 
@@ -186,22 +233,28 @@ def _make_pg_connection(host, port):
         psycopg2 = None
 
     if psycopg2 is not None:
-        return psycopg2.connect(
+        conn = psycopg2.connect(
             host=host,
             port=port,
             database=POSTGRES_CONFIG['database'],
             user=POSTGRES_CONFIG['username'],
             password=POSTGRES_CONFIG['password'],
         )
+        if _autocommit_requested():
+            conn.autocommit = True
+        return conn
 
     import psycopg
-    return psycopg.connect(
+    conn = psycopg.connect(
         host=host,
         port=port,
         dbname=POSTGRES_CONFIG['database'],
         user=POSTGRES_CONFIG['username'],
         password=POSTGRES_CONFIG['password'],
     )
+    if _autocommit_requested():
+        conn.autocommit = True
+    return conn
 
 
 def get_postgres_connection():
