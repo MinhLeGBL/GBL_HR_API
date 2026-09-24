@@ -102,6 +102,13 @@ credentials.json
 .env
 .env.development
 .env.production
+# Local development. Its committed counterpart is .env.development.example,
+# which carries the same (throwaway) container passwords. This one is ignored
+# because it is the file a real ANTHROPIC_API_KEY eventually gets pasted into.
+.env.local
+# Production credentials, reached deliberately by FLASK_ENV=remote. The one
+# file here that holds live secrets.
+.env.remote
 
 # Temporary files
 temp/
@@ -114,9 +121,19 @@ tmp/
 document/reports/
 document/samples/
 document/screenshots/
-README.md
+# The ROOT readme only. A bare `README.md` matches at every depth, which
+# silently swallowed scripts/dev/README.md — the setup guide a new machine
+# needs most. It had already been worked around twice with `git add -f`
+# (the root one and scripts/jobs/), which is the tell.
+/README.md
 docs/
 
 # Development scripts
 deploy-*.sh
 debug_*.py
+
+# Development database seed bundles — extracted from production.
+# Pseudonymised, but still real sales, inventory and payroll figures. These
+# move between machines by hand, never through git.
+dev/seed/
+*.tar.gz

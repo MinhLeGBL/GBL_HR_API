@@ -9,8 +9,49 @@ ValueError at startup if missing.
 import os
 from dotenv import load_dotenv
 
-# Load the correct env file based on FLASK_ENV
-_env = os.getenv('FLASK_ENV', 'development')
+def _default_env():
+    """Which .env file to load when FLASK_ENV is not set.
+
+    'development', which since 2026-09-24 means THE LOCAL CONTAINERS, not the
+    company's live database over an SSH tunnel. Development needs no network,
+    no VPN and no tunnel.
+
+    `.env.local` is still honoured if present, for a machine set up before the
+    rename; it is no longer created.
+
+    Production is reachable only by asking for it: FLASK_ENV=remote, which
+    loads `.env.remote`. That is the only file holding live credentials, and it
+    is named `remote` rather than `production` on purpose — several scripts in
+    scripts/jobs/ default to FLASK_ENV=production, so that name would let a
+    bare `python scripts/jobs/<anything>.py` on a laptop quietly reach the live
+    database.
+
+    The server is unaffected: it has neither file, so this returns
+    'development', finds no `.env.development` there, and loads plain `.env`
+    exactly as before.
+    """
+    explicit = os.getenv('FLASK_ENV')
+    if explicit:
+        return explicit
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.exists(os.path.join(here, '.env.local')):
+        return 'local'          # pre-rename machines
+    return 'development'
+
+
+# Load the correct env file.
+#
+# FLASK_ENV is deliberately NOT pinned here. An earlier version called
+# os.environ.setdefault('FLASK_ENV', _env) at this point, which broke the
+# SERVER: load_dotenv() does not overwrite a variable that already exists, so
+# pinning 'development' first meant the server's own `.env`, which says
+# FLASK_ENV=production, could never take effect. The app then believed it was
+# in development while serving production traffic — silently, because nothing
+# reads FLASK_ENV loudly.
+#
+# `_default_env()` decides WHICH FILE to read. What that file says about
+# FLASK_ENV then stands.
+_env = _default_env()
 _env_file = f'.env.{_env}'
 if os.path.exists(_env_file):
     load_dotenv(_env_file)
