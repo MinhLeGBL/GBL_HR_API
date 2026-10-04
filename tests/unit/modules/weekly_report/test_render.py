@@ -3,8 +3,10 @@
 The draft is stored as lightly-marked text and rendered two ways at send time:
 HTML (where bold and bullets actually show) and a plain-text alternative.
 """
-from app.modules.weekly_report.render import (html_document,
+from app.modules.weekly_report.render import (SIGNATURE, html_document,
                                                 markdown_to_html,
+                                                signature_html,
+                                                signature_text,
                                                 to_plain_text)
 
 
@@ -102,3 +104,49 @@ class TestEmptyInput:
         assert markdown_to_html('') == ''
         assert to_plain_text('') == ''
         assert markdown_to_html(None) == ''
+
+
+class TestSignature:
+    """The sender's mail-server signature, appended at send time.
+
+    It lives in code rather than in the draft or the stored body_template, so a
+    deploy ships it and neither an edit in the textarea nor a model-written
+    draft can drop it.
+    """
+
+    def test_html_carries_every_field(self):
+        html = signature_html()
+        for key in ('name', 'title', 'company', 'phone', 'address'):
+            assert SIGNATURE[key] in html
+
+    def test_email_is_a_mailto_link(self):
+        html = signature_html()
+        assert f'href="mailto:{SIGNATURE["email"]}"' in html
+
+    def test_name_is_bold_and_title_is_muted(self):
+        html = signature_html()
+        assert 'font-weight:700' in html.split(SIGNATURE['name'])[0]
+        assert '#5f6368' in html.split(SIGNATURE['title'])[0]
+
+    def test_styles_stay_inline_like_the_rest_of_the_email(self):
+        assert '<style' not in signature_html()
+
+    def test_plain_text_keeps_the_separator_and_the_fields(self):
+        text = signature_text()
+        assert text.lstrip().startswith('---')
+        for key in ('name', 'title', 'company', 'email', 'phone', 'address'):
+            assert SIGNATURE[key] in text
+
+    def test_vietnamese_survives_escaping(self):
+        # escape() must not mangle the diacritics in the name or address.
+        html = signature_html()
+        assert 'Lê Minh' in html
+        assert 'Phó giám đốc' in html
+        assert 'Đặng Tất' in html
+
+    def test_appends_after_the_draft_without_swallowing_it(self):
+        draft = 'Dear all,\n\nBest regards,\n'
+        combined = html_document(markdown_to_html(draft) + signature_html())
+        assert 'Dear all,' in combined
+        assert SIGNATURE['name'] in combined
+        assert combined.index('Dear all,') < combined.index(SIGNATURE['name'])
