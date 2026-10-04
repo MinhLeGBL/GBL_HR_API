@@ -1,6 +1,7 @@
 """
 GBL Master API - Main Application Entry Point
 """
+import os
 from flask import Flask, jsonify
 from flask_cors import CORS
 from app.modules.employees.routes import hr_employee_bp
@@ -46,6 +47,20 @@ def create_app():
     app.register_blueprint(store_bp)
     app.register_blueprint(commission_bp)
     app.register_blueprint(auth_bp)
+
+    # Development sign-in, registered ONLY when explicitly enabled on a local
+    # database — so in production these URLs do not exist and 404 like any
+    # other unknown path. See app/modules/auth/dev_auth.py for the three
+    # conditions and why it still goes through bcrypt.
+    from app.modules.auth.dev_auth import dev_auth_bp, dev_auth_status
+    _dev_ok, _dev_why = dev_auth_status()
+    if _dev_ok:
+        app.register_blueprint(dev_auth_bp)
+        print(f'[DEV AUTH] account picker at /api/v1/auth/dev/accounts '
+              f'— {_dev_why}')
+    elif (os.getenv('DEV_AUTH_BYPASS') or '').strip():
+        # Asked for and refused: say so, or it looks like the flag did nothing.
+        print(f'[DEV AUTH] NOT enabled — {_dev_why}')
     app.register_blueprint(permission_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(user_bp)
