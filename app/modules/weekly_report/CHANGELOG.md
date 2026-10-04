@@ -814,3 +814,50 @@ is. One source of truth across both repos.
 - `TestSignature` in `tests/unit/modules/weekly_report/test_render.py`, 7 cases,
   and `TestSignatureInSettings` in `test_service.py`, 3 cases.
   Full suite: **1293 passed**.
+
+---
+
+## 0.18.1 — 2026-10-04
+
+Correctness fixes in shipped code, found reviewing #74. None of these were
+introduced by that PR — all four files were byte-identical to `staging` at
+the time, and remain so after `0.18.0` merged.
+
+### Fixed — the WTD note contradicted its own header in a 53-week year
+`prior_week_window` falls back to the prior year's **week 52** when that year
+has no week 53, but `excel.py` printed the CURRENT week number on both sides of
+the note. **2026 is a 53-week ISO year**, so the week of 2026-12-28 would have
+shipped a sheet headed `Week 53 2026 vs Week 52 2025` over a note reading
+`week 53 against week 53`. The note now reads the prior side from the window
+actually used and explains the fallback when the two differ.
+
+`period.py`'s fallback branch had no test at all. Now covered by
+`TestFiftyThreeWeekYear` (3 cases) and `TestWtdNoteOnAFiftyThreeWeekYear` (4).
+
+### Fixed — the migration script hid its own connection failure
+`scripts/database/migrate_weekly_report_yoy_template.py` called
+`get_postgres_connection()`, which returns **None** on failure rather than
+raising — the trap `repository.py:63` documents. With no guard the first use
+raised `AttributeError`, and `finally: conn.close()` then raised a SECOND
+`AttributeError` that replaced it. A run against an unreachable database
+produced neither documented exit code and no usable message. Now guarded, with
+a new **exit code 2** for "could not reach the database".
+
+### Fixed — the CLI script described a sheet the workbook does not contain
+`scripts/reports/generate_periodic_report.py` still looped `WOW` and printed
+`[... week over week]`, and its docstring still called the first sheet
+"Week by Week". The workbook has carried WTD since `0.17.0`. CLAUDE.md names
+this script as the live-data validation path, so its summary disagreeing with
+the file it had just written was the worst possible place for the drift.
+
+### Fixed — an inverted comment in `excel.py`
+`build_workbook_object` said "the payload carries WTD as well, and the workbook
+deliberately does not". Exactly backwards: the payload carries **WOW**, and the
+workbook's week sheet IS WTD.
+
+### Not changed — `PERIOD_TITLES['WTD'] = 'Week to date'`
+Reported alongside the above: the window is the last COMPLETE week, so "to
+date" misdescribes it, and `excel.py` says as much on the sheet. Left alone
+deliberately — it is a user-facing tab label chosen in `0.17.0`, mirrored in
+the frontend's `constants.ts`, and renaming it is a product decision rather
+than a fix.

@@ -126,8 +126,21 @@ def _write_period_sheet(ws, label, windows, cur_data, prior_data):
         # other week's sheet, which is exactly how a reader loses trust in a
         # note that is otherwise correct.
         iso_week = c_from.isocalendar().week
-        alignment_note = (f'Latest COMPLETE week against the SAME ISO week a year '
-                          f'earlier — week {iso_week} against week {iso_week} (the '
+        # Read the prior side's week from the window actually used, not from
+        # `iso_week`. They are normally equal, but `prior_week_window` falls
+        # back to week 52 when the prior ISO year has no week 53 — so in a
+        # 53-week year (2026 is one) the headline correctly said
+        # "Week 53 2026 vs Week 52 2025" while this note claimed
+        # "week 53 against week 53".
+        prior_iso_week = p_from.isocalendar().week
+        if prior_iso_week == iso_week:
+            which = f'the SAME ISO week a year earlier — week {iso_week} ' \
+                    f'against week {iso_week}'
+        else:
+            which = (f'the nearest ISO week a year earlier — week {iso_week} '
+                     f'against week {prior_iso_week}, because that year has no '
+                     f'week {iso_week}')
+        alignment_note = (f'Latest COMPLETE week against {which} (the '
                           f'current partial week is excluded). Both sides are whole '
                           f'Monday-to-Sunday weeks, so the weekday mix matches; the '
                           f'calendar dates therefore differ by a day or two, which '
@@ -401,8 +414,8 @@ def build_workbook_object(windows, dept_rows, store_rows):
     wb = Workbook()
     wb.remove(wb.active)
 
-    # Iterates the SHEETS, not every period: the payload carries WTD as well,
-    # and the workbook deliberately does not.
+    # Iterates the SHEETS, not every period: the payload carries WOW as well,
+    # and the workbook deliberately does not — the workbook's week sheet is WTD.
     for label, sheet_name in SHEET_NAMES.items():
         cur_win, prior_win = windows[label]
         ws = wb.create_sheet(sheet_name)

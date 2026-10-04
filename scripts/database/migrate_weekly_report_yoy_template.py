@@ -33,6 +33,7 @@ Usage:
 Exit codes:
     0 — migrated, or already migrated, or nothing to do
     1 — the template has been customised and needs a human
+    2 — could not reach the database
 """
 import argparse
 import os
@@ -62,6 +63,17 @@ def main():
     args = parser.parse_args()
 
     conn = get_postgres_connection()
+    # get_postgres_connection() returns None on failure rather than raising —
+    # same contract as the Oracle one, documented at repository.py:63. Without
+    # this guard the first use raised AttributeError, and `finally: conn.close()`
+    # then raised a SECOND AttributeError that replaced it, so a migration run
+    # against an unreachable database reported neither of the exit codes above
+    # and gave no usable message.
+    if conn is None:
+        print('Could not connect to the database. Check FLASK_ENV and the '
+              'matching .env file, and that the host is reachable.',
+              file=sys.stderr)
+        return 2
     try:
         with conn.cursor() as cur:
             cur.execute('SELECT body_template FROM periodic_report_settings '

@@ -312,3 +312,34 @@ class TestYearEndStraddle:
         for cur, prior in w.values():
             for win in (cur, prior):
                 assert start <= win[0] and win[1] <= end
+
+
+class TestFiftyThreeWeekYear:
+    """A 53-week ISO year has no counterpart week in a 52-week prior year.
+
+    `prior_week_window` falls back to the prior year's LAST week. The path was
+    uncovered, and the workbook's alignment note silently claimed both sides
+    were the same week number because of it. 2026 is a 53-week year, so this
+    fires at the end of this year, not in some distant edge case.
+    """
+
+    def test_week_53_compares_against_week_52_of_the_prior_year(self):
+        # ISO week 53 of 2026 is 2026-12-28..2027-01-03; 2025 has only 52.
+        (cur_from, _), (prior_from, _) = period_windows(
+            date(2027, 1, 4), 'monday')['WTD']
+        assert cur_from.isocalendar().week == 53
+        assert prior_from.isocalendar().week == 52
+        assert prior_from.isocalendar().year == 2025
+
+    def test_the_fallback_keeps_a_whole_week_on_both_sides(self):
+        (cur_from, cur_to), (prior_from, prior_to) = period_windows(
+            date(2027, 1, 4), 'monday')['WTD']
+        assert (cur_to - cur_from).days == 6
+        assert (prior_to - prior_from).days == 6
+        # Same weekday on both sides, so the trading-day mix still matches.
+        assert cur_from.weekday() == prior_from.weekday()
+
+    def test_an_ordinary_week_still_matches_its_own_number(self):
+        (cur_from, _), (prior_from, _) = period_windows(
+            date(2026, 9, 21), 'monday')['WTD']
+        assert cur_from.isocalendar().week == prior_from.isocalendar().week == 38
