@@ -11,6 +11,11 @@ Both are attached to the same message (multipart/alternative), so the reader's
 client picks. That is why the draft is NOT stored as HTML: one source of truth
 that is editable, with both wire formats derived from it.
 
+The sender's signature is appended by signature_html() / signature_text() rather
+than living in the draft. The app speaks SMTP directly, so it never passes
+through the webmail client that would otherwise append it, and keeping it out of
+the draft means it cannot be edited away by accident or re-written by the model.
+
 The supported subset is deliberately tiny — bold, bullets, paragraphs. It is not
 a Markdown implementation and does not try to be. Everything is HTML-escaped
 BEFORE any markup is inserted, so a stray `<` in an edited draft cannot break
@@ -78,6 +83,66 @@ def markdown_to_html(text: str) -> str:
     flush_items()
     flush_para()
     return '\n'.join(blocks)
+
+
+# The sender's mail-server signature, reproduced so the SMTP path matches what
+# the webmail client appends. One sender identity for this report, so these are
+# literals rather than configuration.
+SIGNATURE = {
+    'name': 'Lê Minh',
+    'title': 'Phó giám đốc',
+    'company': 'Globallink',
+    'email': 'minhle@globallink.vn',
+    'phone': '0903951092',
+    'address': '20 Đặng Tất, Phường Tân Định, TP.HCM',
+}
+
+_SIG_SEP_STYLE = 'margin:18px 0 12px 0;color:#9aa0a6'
+_SIG_NAME_STYLE = 'margin:0 0 3px 0;font-size:15px;font-weight:700;color:#1a1a1a'
+_SIG_MUTED_STYLE = 'margin:0;color:#5f6368'
+_SIG_TABLE_STYLE = 'margin:12px 0 0 0;border-collapse:collapse'
+_SIG_LABEL_STYLE = ('padding:0 14px 2px 0;font-weight:700;color:#1a1a1a;'
+                    'vertical-align:top;white-space:nowrap')
+_SIG_VALUE_STYLE = 'padding:0 0 2px 0;color:#1a1a1a;vertical-align:top'
+_SIG_LINK_STYLE = 'color:#1a73e8;text-decoration:none'
+
+
+def signature_html() -> str:
+    """The signature as an HTML fragment, styled to match the mail client."""
+    s = SIGNATURE
+    email = escape(s['email'])
+    rows = [
+        ('Email', f'<a href="mailto:{email}" style="{_SIG_LINK_STYLE}">{email}</a>'),
+        ('Phone', escape(s['phone'])),
+        ('Address', escape(s['address'])),
+    ]
+    cells = ''.join(
+        f'<tr><td style="{_SIG_LABEL_STYLE}">{escape(label)}:</td>'
+        f'<td style="{_SIG_VALUE_STYLE}">{value}</td></tr>'
+        for label, value in rows
+    )
+    return (
+        f'<p style="{_SIG_SEP_STYLE}">---</p>'
+        f'<p style="{_SIG_NAME_STYLE}">{escape(s["name"])}</p>'
+        f'<p style="{_SIG_MUTED_STYLE}">{escape(s["title"])}</p>'
+        f'<p style="{_SIG_MUTED_STYLE}">{escape(s["company"])}</p>'
+        f'<table style="{_SIG_TABLE_STYLE}" cellpadding="0" cellspacing="0">'
+        f'{cells}</table>'
+    )
+
+
+def signature_text() -> str:
+    """The signature as plain text, column-aligned like the HTML table."""
+    s = SIGNATURE
+    return (
+        '\n---\n\n'
+        f'{s["name"]}\n'
+        f'{s["title"]}\n'
+        f'{s["company"]}\n\n'
+        f'Email:   {s["email"]}\n'
+        f'Phone:   {s["phone"]}\n'
+        f'Address: {s["address"]}'
+    )
 
 
 def html_document(fragment: str) -> str:
