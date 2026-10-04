@@ -1152,3 +1152,33 @@ class TestBackfillOverwrite:
             s = self._service(None)
             s.backfill_week(date(2026, 3, 1), [], [], overwrite=overwrite)
             s.repo.create_run.assert_called_once()
+
+
+class TestSignatureInSettings:
+    """`/settings` carries the signature so the preview has one source for it.
+
+    It is served from `render.SIGNATURE`, not the settings row: the sender
+    identity is fixed, and duplicating the strings in the frontend is what this
+    field exists to avoid.
+    """
+
+    def test_settings_carry_the_signature(self, service):
+        from app.modules.weekly_report.render import SIGNATURE
+        result = service.get_settings()
+        assert result['success'] is True
+        assert result['settings']['signature'] == dict(SIGNATURE)
+
+    def test_the_signature_is_a_copy_not_the_module_constant(self, service):
+        # A caller mutating the response must not edit every later send.
+        from app.modules.weekly_report.render import SIGNATURE
+        served = service.get_settings()['settings']['signature']
+        served['name'] = 'someone else'
+        assert SIGNATURE['name'] != 'someone else'
+
+    def test_the_signature_cannot_be_written_through_settings(self, service):
+        # It is derived from code; a PUT carrying it must be ignored, not stored.
+        service.repo.update_settings.return_value = True
+        service.update_settings({'signature': {'name': 'impostor'},
+                                 'send_mode': 'immediate'})
+        saved = service.repo.update_settings.call_args[0][0]
+        assert 'signature' not in saved

@@ -23,7 +23,8 @@ from zoneinfo import ZoneInfo
 from .aggregate import (METRICS, aggregate, delta_for, is_unfavourable,
                         weekday_averages)
 from .excel import build_workbook_bytes
-from .render import html_document, markdown_to_html, to_plain_text
+from .render import (SIGNATURE, html_document, markdown_to_html,
+                     signature_html, signature_text, to_plain_text)
 from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
                      fetch_span, last_complete_week, order_stores,
                      period_windows, week_label)
@@ -772,12 +773,13 @@ class WeeklyReportService:
                     run['workbook'],
                 ))
             # The draft is stored as lightly-marked text; both wire formats
-            # are derived from it so they can never disagree.
+            # are derived from it so they can never disagree. The signature is
+            # appended here rather than stored in the draft — see render.py.
             draft = run['email_body'] or ''
             message = build_message(
                 subject=run['email_subject'] or '',
-                body=to_plain_text(draft),
-                html=html_document(markdown_to_html(draft)),
+                body=to_plain_text(draft) + signature_text(),
+                html=html_document(markdown_to_html(draft) + signature_html()),
                 to=buckets['to'], cc=buckets['cc'], bcc=buckets['bcc'],
                 from_addr=from_addr, from_name=from_name,
                 attachments=attachments)
@@ -836,6 +838,11 @@ class WeeklyReportService:
             **s,
             'send_time': s['send_time'].isoformat() if s['send_time'] else None,
             'updated_at': s['updated_at'].isoformat() if s['updated_at'] else None,
+            # Read-only, and from code rather than the settings row: the sender
+            # identity is fixed, and the preview needs it to show what is
+            # actually sent. `update_settings` ignores it — see the field list
+            # there. One source of truth, so the two repos cannot drift.
+            'signature': dict(SIGNATURE),
         }}
 
     def update_settings(self, body: Any) -> Dict[str, Any]:
