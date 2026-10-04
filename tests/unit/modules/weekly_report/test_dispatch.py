@@ -11,6 +11,7 @@ import pytest
 
 from app.core.mail.mailer import (DryRunMailer, MailError, build_message,
                                   get_mailer, mail_identity)
+from app.modules.weekly_report.render import LOGO_CID
 from app.modules.weekly_report.service import WeeklyReportService
 
 XLSX = ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -257,3 +258,59 @@ class TestMultipartBody:
                  if p.get_filename()]
         assert 'periodic_report_2026-09-14.xlsx' in names
 
+
+
+class TestInlineLogo:
+    """The signature logo rides inside the HTML part as a cid: image.
+
+    Added as an ordinary attachment it would arrive as a second file beside the
+    .xlsx and every `src="cid:..."` would render as a broken box; a remote
+    https: src is blocked by default in Gmail and Outlook, and a data: URI is
+    stripped by Gmail. Inline is the only placement that renders unprompted.
+    """
+
+    def _sent(self, service):
+        mailer = DryRunMailer()
+        with patch('app.core.mail.get_mailer', return_value=mailer):
+            service.send_run(1)
+        return mailer.sent[0][0]
+
+    def _parts(self, msg):
+        return {p.get_content_type(): p for p in msg.walk()}
+
+    def test_the_logo_is_inline_not_an_attachment(self, service):
+        msg = self._sent(service)
+        img = self._parts(msg)['image/png']
+        assert img.get_content_disposition() == 'inline'
+        assert img.get('Content-ID') == f'<{LOGO_CID}>'
+
+    def test_the_logo_sits_inside_the_html_part(self, service):
+        # multipart/related is what binds the cid to the markup; if the image
+        # were a sibling of the alternative instead, the reference would not
+        # resolve in most clients.
+        msg = self._sent(service)
+        related = self._parts(msg)['multipart/related']
+        inner = {p.get_content_type() for p in related.walk()}
+        assert 'text/html' in inner
+        assert 'image/png' in inner
+
+    def test_the_workbook_is_still_a_real_attachment(self, service):
+        # The logo must not turn the .xlsx into an inline part, nor vice versa.
+        msg = self._sent(service)
+        xlsx = [p for p in msg.walk()
+                if p.get_filename() and p.get_filename().endswith('.xlsx')]
+        assert len(xlsx) == 1
+        assert xlsx[0].get_content_disposition() == 'attachment'
+
+    def test_the_html_references_the_same_cid_that_was_attached(self, service):
+        msg = self._sent(service)
+        parts = self._parts(msg)
+        html = parts['text/html'].get_content()
+        cid = parts['image/png'].get('Content-ID').strip('<>')
+        assert f'src="cid:{cid}"' in html
+
+    def test_the_plain_part_carries_no_image_reference(self, service):
+        msg = self._sent(service)
+        plain = self._parts(msg)['text/plain'].get_content()
+        assert 'cid:' not in plain
+        assert 'Global Link Corporation' in plain

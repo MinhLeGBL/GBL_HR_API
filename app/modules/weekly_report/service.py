@@ -24,7 +24,8 @@ from .aggregate import (METRICS, aggregate, delta_for, is_unfavourable,
                         weekday_averages)
 from .excel import build_workbook_bytes
 from .render import (SIGNATURE, html_document, markdown_to_html,
-                     signature_html, signature_text, to_plain_text)
+                     signature_html, signature_logo, signature_text,
+                     to_plain_text)
 from .period import (COMMENTARY_LABELS, PERIOD_LABELS, PERIOD_TITLES,
                      fetch_span, last_complete_week, order_stores,
                      period_windows, week_label)
@@ -776,13 +777,20 @@ class WeeklyReportService:
             # are derived from it so they can never disagree. The signature is
             # appended here rather than stored in the draft — see render.py.
             draft = run['email_body'] or ''
+            # The logo rides INSIDE the HTML part as a cid: image, not as
+            # an attachment — see build_message. When the file is missing the
+            # helper returns None and the signature renders without the image
+            # column rather than emitting a broken <img>.
+            logo = signature_logo()
             message = build_message(
                 subject=run['email_subject'] or '',
                 body=to_plain_text(draft) + signature_text(),
-                html=html_document(markdown_to_html(draft) + signature_html()),
+                html=html_document(markdown_to_html(draft)
+                                   + signature_html(with_logo=logo is not None)),
                 to=buckets['to'], cc=buckets['cc'], bcc=buckets['bcc'],
                 from_addr=from_addr, from_name=from_name,
-                attachments=attachments)
+                attachments=attachments,
+                inline_images=[logo] if logo else [])
             detail = get_mailer().send(message, envelope)
         except (MailError, Exception) as e:   # noqa: BLE001
             error = str(e)
