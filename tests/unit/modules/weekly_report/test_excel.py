@@ -349,3 +349,41 @@ class TestRawDataSheetIsUntouched:
     def test_raw_sheet_has_no_hidden_columns(self, workbook):
         ws = workbook['Raw Data']
         assert not any(d.hidden for d in ws.column_dimensions.values())
+
+
+class TestWtdNoteOnAFiftyThreeWeekYear:
+    """The note must not claim "same week" when the windows disagree.
+
+    `prior_week_window` falls back to week 52 when the prior ISO year has no
+    week 53. A1 reported that correctly ("Week 53 2026 vs Week 52 2025") while
+    A3 read "week 53 against week 53" — the header and the note contradicting
+    each other on the same figures.
+    """
+
+    @pytest.fixture(scope='class')
+    def workbook_53(self):
+        days = ([date(2026, 12, d) for d in range(20, 32)] +
+                [date(2025, 12, d) for d in range(20, 32)])
+        dept_rows = [_dept_row(d, s, dep)
+                     for d in days for s in ('S1',) for dep in ('Alpha',)]
+        store_rows = [{'day': d, 'store_code': 'S1', 'bills': 5} for d in days]
+        windows = period_windows(date(2027, 1, 4), 'monday', date(2027, 1, 3))
+        return load_workbook(BytesIO(
+            build_workbook_bytes(windows, dept_rows, store_rows)))
+
+    def test_the_note_names_both_week_numbers(self, workbook_53):
+        note = workbook_53['WTD']['A3'].value
+        assert 'week 53 against week 52' in note
+        assert 'week 53 against week 53' not in note
+
+    def test_the_note_explains_why_they_differ(self, workbook_53):
+        assert 'has no week 53' in workbook_53['WTD']['A3'].value
+
+    def test_the_note_agrees_with_the_headline(self, workbook_53):
+        ws = workbook_53['WTD']
+        assert 'Week 53 2026' in ws['A1'].value
+        assert 'Week 52 2025' in ws['A1'].value
+        assert 'week 53 against week 52' in ws['A3'].value
+
+    def test_an_ordinary_week_still_says_SAME(self, workbook):
+        assert 'SAME ISO week' in workbook['WTD']['A3'].value

@@ -1,5 +1,5 @@
 """
-Periodic sales Excel report: week-over-week, plus MTD / YTD against last year.
+Periodic sales Excel report: WTD, MTD and YTD, each against last year.
 
 Command-line front end for `app.modules.weekly_report`. The logic lives in the
 module — this script parses arguments, runs one Oracle fetch and writes the
@@ -9,11 +9,11 @@ command produces.
 
 Periods (`--as-of` defaults to today)
 -------------------------------------
-  WOW  "Week by Week" — the LAST COMPLETE week against THE WEEK BEFORE IT.
-       Run in week 38 and it reports week 37 vs week 36, Monday to Sunday
-       (`--week-start sunday` shifts the week boundary). The partial current
-       week is never included, so both sides are always whole weeks.
-       This window does NOT compare against last year; MTD and YTD do.
+  WTD  "Week to date" — the LAST COMPLETE week against THE SAME ISO WEEK A
+       YEAR EARLIER. Run in week 38 and it reports week 38 of this year vs
+       week 38 of last (`--week-start sunday` shifts the week boundary). The
+       partial current week is never included, so both sides are whole weeks.
+       All three sheets therefore make the same year-on-year comparison.
   MTD  1st of month .. as-of (inclusive)
   YTD  1st of January .. as-of (inclusive)
 
@@ -25,14 +25,17 @@ side of the comparison carries a full trading day, which understates MTD and YTD
 
 Comparison windows differ by sheet:
 
-- **WOW compares consecutive weeks** — a flat 7-day shift back, so the two sides
-  are adjacent whole weeks on the same weekdays. No ISO-week or leap-year
-  handling is needed. An earlier revision compared the same ISO week one year
-  earlier; that was replaced because the week sheet is for reading momentum
-  week to week, which a year-ago week cannot show.
+- **WTD compares the same ISO week a year apart** — whole Monday-to-Sunday
+  weeks on both sides, so the weekday mix matches and the calendar dates differ
+  by a day or two. Where the prior ISO year has no week 53, its last week is
+  used instead and the sheet says so.
 - **MTD and YTD are calendar-date aligned against the PRIOR YEAR** — the
   identical month/day range one year earlier. Feb 29 in a leap-year `as-of`
   maps to Feb 28 of the prior (non-leap) year.
+
+A WOW (week-over-week) window is still computed and carried in the payload, but
+it is NOT written to the workbook and is not reported here — the sheets are
+WTD, MTD and YTD.
 
 `--week-start sunday` shifts the week boundary, but week *numbering* in labels
 stays ISO (Monday-based), so a Sunday-start week is labelled by the ISO week
@@ -96,10 +99,13 @@ def main():
     fetch_from, fetch_to = fetch_span(windows)
     print(f'as-of {as_of} (week starts {args.week_start})'
           + (f', MTD/YTD through {through}' if through else ''))
-    for label in ('WOW', 'MTD', 'YTD'):
+    # The SHEETS the workbook actually carries. `windows` also holds WOW,
+    # which is deliberately not written — printing it here described a sheet
+    # the reader would then fail to find in the file this script just wrote.
+    for label in ('WTD', 'MTD', 'YTD'):
         (cf, ct), (pf, pt) = windows[label]
-        suffix = (f'   [{week_label(cf)} vs {week_label(pf)}, week over week]'
-                  if label == 'WOW' else '')
+        suffix = (f'   [{week_label(cf)} vs {week_label(pf)}, year on year]'
+                  if label == 'WTD' else '')
         print(f'  {label}: {cf} .. {ct}   vs   {pf} .. {pt}{suffix}')
     print(f'fetching {fetch_from} .. {fetch_to} ...')
 
