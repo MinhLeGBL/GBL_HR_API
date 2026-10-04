@@ -861,3 +861,76 @@ date" misdescribes it, and `excel.py` says as much on the sheet. Left alone
 deliberately — it is a user-facing tab label chosen in `0.17.0`, mirrored in
 the frontend's `constants.ts`, and renaming it is a product decision rather
 than a fix.
+
+
+---
+
+## 0.19.0 — 2026-10-04
+
+### Changed — the signature follows the company template issued 2026-10-02
+Company line, then name, then the contact rows. Replaces the `---` separator
+and the name/title/company stack from `0.18.0`.
+
+- **The job title is gone.** The issued template carries none, and the point of
+  adopting it was that every signature in the company should match.
+- **`Home:` added** — `www.runwayvietnam.com`.
+- **Address in English**, as the template has it. Same place.
+- **"Corporation" is spelt correctly here.** The issued template misspells it
+  "Coporation"; departing from it was agreed with the sender.
+
+### Added — the Runway logo, inline
+Left of the text block, with the vertical rule part of the image rather than a
+CSS cell border — borders on table cells are the first thing Outlook's renderer
+disagrees about, and a rule landing a few pixels out looks like a defect.
+
+`app/core/mail/mailer.py` gained an `inline_images` parameter: `(cid, mime,
+bytes)` tuples added to the HTML part with `add_related`, which turns it into
+`multipart/related` and binds the `cid:` to the markup. **This had to be built
+— `build_message` could only produce downloadable attachments**, so a logo
+added the old way would have arrived as a second file beside the .xlsx with a
+broken image where it should have been.
+
+Inline is the only placement that renders unprompted: a remote `https:` src is
+blocked by default in Gmail and Outlook, and a `data:` URI is stripped by Gmail
+outright.
+
+Resulting structure, pinned by `TestInlineLogo`:
+
+```
+multipart/mixed
+├── multipart/alternative
+│   ├── text/plain
+│   └── multipart/related
+│       ├── text/html
+│       └── image/png  cid:runway-logo  inline
+└── .xlsx  attachment
+```
+
+### Changed — only the website is a link
+The **email address is plain text**, not a `mailto:`. Clients style a real
+anchor blue and underlined, which reads as "click me" on an address nobody
+needs to click — anyone replying uses Reply — and an automated message carrying
+live links is the shape spam filters score hardest. The **website keeps its
+link**: it is the company's own site and following it is the point of listing
+it. Verified `https://www.runwayvietnam.com` serves a valid certificate and
+redirects HTTP to HTTPS itself, so the href is `https:`.
+
+Exactly one anchor in the signature, pinned by a test.
+
+### Notes
+- The logo ships as the **JPEG that was supplied**, not re-encoded. Converting
+  it to PNG tripled the size — 5.6 KB to 17.7 KB — and bought nothing: the
+  source is greyscale with no alpha channel, so there was no transparency to
+  preserve, and every client that renders a PNG renders a JPEG. The image is
+  embedded in every message rather than fetched once, so that size is paid per
+  email.
+- `signature_logo()` returns `None` when the file is missing, and
+  `signature_html(with_logo=False)` drops the image column. Missing art must
+  never stop the week's figures going out.
+- Laid out with tables, not flex or float: Outlook renders Word's HTML engine,
+  which supports neither.
+- `GET /settings` carries the new shape — `title` gone, `home` added. The
+  frontend reads it from there, so the two cannot drift.
+- Plain text keeps the fields under a `--` rule and carries no image
+  placeholder; `[image]` tells a reader nothing.
+- Full suite: **1314 passed**.

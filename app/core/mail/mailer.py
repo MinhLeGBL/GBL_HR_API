@@ -41,10 +41,21 @@ def build_message(*, subject: str, body: str, to: Sequence[str],
                   cc: Sequence[str] = (), bcc: Sequence[str] = (),
                   from_addr: str, from_name: str = '',
                   attachments: Iterable[tuple] = (),
+                  inline_images: Iterable[tuple] = (),
                   html: Optional[str] = None) -> EmailMessage:
     """Assemble a message with optional binary attachments.
 
     `attachments` is an iterable of (filename, mime_type, bytes).
+
+    `inline_images` is an iterable of (cid, mime_type, bytes) embedded INSIDE
+    the HTML part and referenced as `<img src="cid:...">`. They are not
+    attachments: they carry Content-Disposition: inline, so a client shows them
+    in place rather than listing them as files to download.
+
+    Inline is the only placement that reliably renders. A remote `https://` src
+    is blocked by default in Gmail and Outlook, leaving a broken box until the
+    reader clicks "show images", and a base64 `data:` URI is stripped outright
+    by Gmail.
 
     When `html` is given the message is multipart/alternative: `body` is the
     plain-text part and `html` the rich one, and the reader's client picks. The
@@ -69,6 +80,18 @@ def build_message(*, subject: str, body: str, to: Sequence[str],
         # to multipart/alternative with the plain part first, which is the
         # order clients expect (last part wins, so HTML is preferred).
         msg.add_alternative(html, subtype='html')
+
+        # Images attach to the HTML PART, not the message: add_related turns
+        # that part into multipart/related, which is what binds a cid: to the
+        # markup referencing it. Adding them to the message instead would make
+        # them ordinary attachments sitting beside the .xlsx, and every
+        # `src="cid:..."` would render as a broken image.
+        if inline_images:
+            html_part = msg.get_payload()[-1]
+            for cid, mime_type, payload in inline_images:
+                maintype, _, subtype = mime_type.partition('/')
+                html_part.add_related(payload, maintype=maintype,
+                                      subtype=subtype, cid=f'<{cid}>')
 
     for filename, mime_type, payload in attachments:
         maintype, _, subtype = mime_type.partition('/')
