@@ -765,3 +765,52 @@ how black text ends up on a dark row.
   existing sheet tests parametrise over `SHEET_NAMES`, so they followed this
   change silently — swapping a period in or out failed nothing. Which periods
   are exported and narrated is a decision and now has tests of its own.
+
+---
+
+## 0.18.0 — 2026-10-02
+
+### Added — the sender's signature on every report email
+- `render.signature_html()` / `render.signature_text()` reproduce the signature
+  the sender keeps on the mail server, and `dispatch` appends them to the HTML
+  and plain-text parts respectively.
+
+**Why it was missing.** The signature is configured in the webmail client, and
+the client appends it as the message is composed there. This app speaks SMTP
+directly to the same mailbox, so nothing was ever in the composing path to add
+it — every report has gone out unsigned.
+
+**Why it lives in code and not in the draft.** Two earlier traps argued for it:
+- `body_template` lives in the **database**, so putting the signature there
+  would mean a migration on every environment and a code change that ships
+  nothing (the trap `0.17.0` hit with the WTD wording).
+- The draft is model-written and human-editable. A signature in the draft is one
+  the model can paraphrase and an editor can delete by accident. Appended at
+  send time it is neither.
+
+It is also deliberately outside what approval freezes: approval signs off the
+figures and the wording, and the sender's own contact details are not that.
+
+### Added — `GET /settings` carries `signature`
+The preview promises "the email exactly as it will be sent", and the signature
+is not part of `email_body`, so the frontend has to render it too. Rather than
+let it keep a second copy of the strings — two places to edit, and a preview
+free to disagree with the message — `/settings` now serves the signature as a
+read-only `signature` object, built from the same `render.SIGNATURE` the email
+is. One source of truth across both repos.
+
+- It is **not** a settings-row column and **not** writable: `update_settings`
+  builds its fields from an explicit allowlist, so a `signature` in a `PUT`
+  body is ignored rather than stored. Pinned by a test.
+- Served as `dict(SIGNATURE)` — a copy, so a caller mutating the response
+  cannot reach back into every later send. Also pinned by a test.
+
+### Notes
+- Styles are inline, matching the rest of the email — Gmail ignores `<style>`.
+- The contact rows are a `<table>` rather than aligned text, so the values line
+  up in clients that collapse runs of spaces.
+- Every field is `escape()`d before insertion, as everywhere else in `render.py`.
+  Verified the Vietnamese survives it — `Lê Minh`, `Phó giám đốc`, `Đặng Tất`.
+- `TestSignature` in `tests/unit/modules/weekly_report/test_render.py`, 7 cases,
+  and `TestSignatureInSettings` in `test_service.py`, 3 cases.
+  Full suite: **1293 passed**.
