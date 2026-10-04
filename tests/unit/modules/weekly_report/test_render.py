@@ -167,8 +167,16 @@ class TestSignature:
     def test_signature_logo_returns_bytes_for_the_shipped_file(self):
         cid, mime, payload = signature_logo()
         assert cid == LOGO_CID
-        assert mime == 'image/png'
-        assert payload.startswith(b'\x89PNG')
+        assert mime == 'image/jpeg'
+        assert payload.startswith(b'\xff\xd8\xff')   # JPEG SOI marker
+
+    def test_the_logo_is_the_supplied_file_not_a_re_encode(self):
+        # Re-encoding the supplied JPEG as PNG tripled it (5.6 KB -> 17.7 KB)
+        # for no gain — greyscale, no alpha, and every client that renders one
+        # renders the other. The image ships in EVERY email, so the size is
+        # paid per message.
+        _, _, payload = signature_logo()
+        assert len(payload) < 8_000
 
     def test_a_missing_logo_drops_the_image_rather_than_breaking_it(self):
         # Missing art must never stop the week's figures going out, and an

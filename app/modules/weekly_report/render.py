@@ -108,9 +108,14 @@ SIGNATURE = {
 # them. The rule is part of the image rather than a CSS border: borders on
 # table cells are the first thing Outlook's renderer disagrees about, and a
 # one-pixel line that lands in the wrong place looks like a defect.
-LOGO_PATH = Path(__file__).resolve().parent / 'assets' / 'runway_logo.png'
+# Kept as the JPEG that was supplied. Re-encoding it as PNG tripled the size
+# (5.6 KB -> 17.7 KB) and bought nothing: the source is greyscale with no alpha
+# channel, so there was no transparency to preserve, and every mail client that
+# renders a PNG renders a JPEG. The cost is per-message, since the image is
+# embedded in each email rather than fetched once.
+LOGO_PATH = Path(__file__).resolve().parent / 'assets' / 'runway_logo.jpg'
 LOGO_CID = 'runway-logo'
-LOGO_MIME = 'image/png'
+LOGO_MIME = 'image/jpeg'
 LOGO_WIDTH = 150          # display px; the file is 330 wide, so it stays sharp
 LOGO_HEIGHT = 117         # 330x257 held to ratio — stated so clients reserve
                           # the space before the image loads

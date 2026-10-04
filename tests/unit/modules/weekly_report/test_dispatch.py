@@ -280,7 +280,7 @@ class TestInlineLogo:
 
     def test_the_logo_is_inline_not_an_attachment(self, service):
         msg = self._sent(service)
-        img = self._parts(msg)['image/png']
+        img = self._parts(msg)['image/jpeg']
         assert img.get_content_disposition() == 'inline'
         assert img.get('Content-ID') == f'<{LOGO_CID}>'
 
@@ -292,7 +292,7 @@ class TestInlineLogo:
         related = self._parts(msg)['multipart/related']
         inner = {p.get_content_type() for p in related.walk()}
         assert 'text/html' in inner
-        assert 'image/png' in inner
+        assert 'image/jpeg' in inner
 
     def test_the_workbook_is_still_a_real_attachment(self, service):
         # The logo must not turn the .xlsx into an inline part, nor vice versa.
@@ -306,7 +306,7 @@ class TestInlineLogo:
         msg = self._sent(service)
         parts = self._parts(msg)
         html = parts['text/html'].get_content()
-        cid = parts['image/png'].get('Content-ID').strip('<>')
+        cid = parts['image/jpeg'].get('Content-ID').strip('<>')
         assert f'src="cid:{cid}"' in html
 
     def test_the_plain_part_carries_no_image_reference(self, service):

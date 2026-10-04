@@ -918,7 +918,13 @@ redirects HTTP to HTTPS itself, so the href is `https:`.
 Exactly one anchor in the signature, pinned by a test.
 
 ### Notes
-- `signature_logo()` returns `None` when the PNG is missing, and
+- The logo ships as the **JPEG that was supplied**, not re-encoded. Converting
+  it to PNG tripled the size — 5.6 KB to 17.7 KB — and bought nothing: the
+  source is greyscale with no alpha channel, so there was no transparency to
+  preserve, and every client that renders a PNG renders a JPEG. The image is
+  embedded in every message rather than fetched once, so that size is paid per
+  email.
+- `signature_logo()` returns `None` when the file is missing, and
   `signature_html(with_logo=False)` drops the image column. Missing art must
   never stop the week's figures going out.
 - Laid out with tables, not flex or float: Outlook renders Word's HTML engine,
