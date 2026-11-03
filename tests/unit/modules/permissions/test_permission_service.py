@@ -385,7 +385,10 @@ class TestGetUserPermissionsV2:
         assert 'COMMISSION_DATA' in codes
 
     @patch('app.modules.permissions.service.get_postgres_connection')
-    def test_dept_and_role_match(self, mock_get_conn, service):
+    def test_dept_match_grants(self, mock_get_conn, service):
+        """Rule 5 is the department alone. It used to be department AND role;
+        the access page has no role field, so requiring a role match would have
+        meant every department grant matched nobody."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
@@ -395,8 +398,7 @@ class TestGetUserPermissionsV2:
             [('DASHBOARD', 'Dashboard'), ('COMMISSION_DATA', 'Commission Data')],
             [],                        # no exclusions
             [],                        # no inclusions
-            [('COMMISSION_DATA',)],    # dept match
-            [('COMMISSION_DATA',)],    # role match
+            [('COMMISSION_DATA',)],    # dept match — and that is enough
         ]
 
         result = service.get_user_permissions_v2(
@@ -406,8 +408,11 @@ class TestGetUserPermissionsV2:
         codes = [p['section_code'] for p in result]
         assert 'COMMISSION_DATA' in codes
 
+    @pytest.mark.parametrize('role', ['manager', 'staff'])
     @patch('app.modules.permissions.service.get_postgres_connection')
-    def test_dept_match_without_role_denied(self, mock_get_conn, service):
+    def test_role_is_not_consulted(self, mock_get_conn, service, role):
+        """The same department grant admits every non-admin role, and no query
+        against `section_roles` is made at all."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
@@ -415,18 +420,42 @@ class TestGetUserPermissionsV2:
 
         mock_cursor.fetchall.side_effect = [
             [('DASHBOARD', 'Dashboard'), ('COMMISSION_DATA', 'Commission Data')],
-            [],                        # no exclusions
-            [],                        # no inclusions
-            [('COMMISSION_DATA',)],    # dept match
-            [],                        # NO role match
+            [],
+            [],
+            [('COMMISSION_DATA',)],
         ]
 
         result = service.get_user_permissions_v2(
-            user_sid=100, user_role='staff', department_code='HR'
+            user_sid=100, user_role=role, department_code='HR'
+        )
+
+        assert 'COMMISSION_DATA' in [p['section_code'] for p in result]
+        executed = ' '.join(str(c) for c in mock_cursor.execute.call_args_list)
+        assert 'section_roles' not in executed
+
+    @patch('app.modules.permissions.service.get_postgres_connection')
+    def test_dept_mismatch_still_denied(self, mock_get_conn, service):
+        """Dropping the role half widened rule 5; it did not remove it. A user
+        outside the granted department still gets nothing."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        mock_cursor.fetchall.side_effect = [
+            [('DASHBOARD', 'Dashboard'), ('COMMISSION_DATA', 'Commission Data')],
+            [],
+            [],
+            [],                        # the user's department grants nothing
+        ]
+
+        result = service.get_user_permissions_v2(
+            user_sid=100, user_role='manager', department_code='LOG'
         )
 
         codes = [p['section_code'] for p in result]
         assert 'COMMISSION_DATA' not in codes
+        assert 'DASHBOARD' in codes     # rule 2 is untouched
 
     @patch('app.modules.permissions.service.get_postgres_connection')
     def test_no_connection_returns_empty(self, mock_get_conn, service):
