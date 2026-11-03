@@ -347,3 +347,275 @@ class TestDeleteUser:
         resp = client.delete(self.URL, headers=_auth_headers())
 
         assert resp.status_code == 403
+
+
+# ===========================================================================
+# The single-admin invariant
+#
+# Admin bypasses every permission check (PermissionService resolution rule 1),
+# so granting the role through the API grants everything. There is exactly one
+# admin account and it is changed by a direct database operation — see the
+# module docstring in app/modules/auth/user_routes.py.
+# ===========================================================================
+
+class TestAdminRoleNotAssignable:
+    """`role: admin` is refused on create and update, for every caller."""
+
+    CREATE_URL = '/api/v1/users'
+    UPDATE_URL = '/api/v1/users/100000010'
+
+    def _body(self, role):
+        return {
+            'email': 'new@test.com', 'full_name': 'New User',
+            'password': 'secret123', 'role': role,
+        }
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.create_user')
+    def test_create_admin_refused_even_for_an_admin(
+            self, mock_create, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        res = client.post(self.CREATE_URL, json=self._body('admin'),
+                          headers=_auth_headers())
+        assert res.status_code == 403
+        assert 'cannot be assigned' in res.get_json()['error']
+        # Refused before it reaches the service.
+        mock_create.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.create_user')
+    def test_create_admin_refused_case_insensitively(
+            self, mock_create, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        for value in ('Admin', 'ADMIN', ' admin '):
+            res = client.post(self.CREATE_URL, json=self._body(value),
+                              headers=_auth_headers())
+            assert res.status_code == 403, value
+        mock_create.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.create_user')
+    def test_create_manager_still_allowed(
+            self, mock_create, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_create.return_value = {'success': True, 'user': {'sid': 2}}
+        res = client.post(self.CREATE_URL, json=self._body('manager'),
+                          headers=_auth_headers())
+        assert res.status_code == 201
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_promotion_to_admin_refused(
+            self, mock_update, mock_get_user, mock_verify, client):
+        """The escalation path that used to exist: an IT manager promoting
+        themselves or anyone else to admin."""
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='IT')
+        res = client.put(self.UPDATE_URL, json={'role': 'admin'},
+                         headers=_auth_headers())
+        assert res.status_code == 403
+        assert 'cannot be assigned' in res.get_json()['error']
+        mock_update.assert_not_called()
+
+
+class TestAdminRowProtected:
+    """The admin row cannot be stripped of its powers through the API: with the
+    role ungrantable, any of these would leave zero admins for good."""
+
+    URL = '/api/v1/users/100000001'
+
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_admin_cannot_be_demoted(
+            self, mock_update, mock_lookup, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_lookup.return_value = True
+        res = client.put(self.URL, json={'role': 'manager'}, headers=_auth_headers())
+        assert res.status_code == 403
+        assert 'role cannot be changed' in res.get_json()['error']
+        mock_update.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_admin_cannot_be_deactivated(
+            self, mock_update, mock_lookup, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_lookup.return_value = True
+        res = client.put(self.URL, json={'is_active': False}, headers=_auth_headers())
+        assert res.status_code == 403
+        assert 'cannot be deactivated' in res.get_json()['error']
+        mock_update.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_admin_may_still_be_reactivated(
+            self, mock_update, mock_lookup, mock_get_user, mock_verify, client):
+        """Only deactivation is blocked — is_active=True must stay possible."""
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_lookup.return_value = True
+        mock_update.return_value = {'success': True, 'user': {'sid': 100000001}}
+        res = client.put(self.URL, json={'is_active': True}, headers=_auth_headers())
+        assert res.status_code == 200
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_admin_department_may_still_change(
+            self, mock_update, mock_lookup, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_lookup.return_value = True
+        mock_update.return_value = {'success': True, 'user': {'sid': 100000001}}
+        res = client.put(self.URL, json={'department_id': 400000003},
+                         headers=_auth_headers())
+        assert res.status_code == 200
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.delete_user')
+    def test_admin_cannot_be_deleted_by_someone_else(
+            self, mock_delete, mock_lookup, mock_get_user, mock_verify, client):
+        """The self-delete check only stops the admin deleting itself. This is
+        anyone ELSE deleting it, which the self-check never covered."""
+        mock_verify.return_value = {
+            'sid': 100000010, 'email': 'it@test.com', 'role': 'manager',
+            'role_code': 'MANAGER', 'type': 'access',
+        }
+        mock_get_user.return_value = {
+            'sid': 100000010, 'role': 'manager', 'role_code': 'MANAGER',
+            'department_id': 400000003, 'department_code': 'IT',
+            'department': {'id': 400000003, 'code': 'IT', 'name': 'IT'},
+        }
+        mock_lookup.return_value = True
+        res = client.delete(self.URL, headers=_auth_headers())
+        assert res.status_code == 403
+        assert 'cannot be deleted' in res.get_json()['error']
+        mock_delete.assert_not_called()
+
+
+class TestUserCreationGate:
+    """Creating a user assigns a role, so it needs the same authority as
+    changing one: admin, or a manager in IT. It used to accept ANY manager."""
+
+    URL = '/api/v1/users'
+    BODY = {'email': 'n@test.com', 'full_name': 'N', 'password': 'secret123',
+            'role': 'manager'}
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.create_user')
+    def test_non_it_manager_refused(
+            self, mock_create, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='ACC')
+        res = client.post(self.URL, json=self.BODY, headers=_auth_headers())
+        assert res.status_code == 403
+        mock_create.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.create_user')
+    def test_it_manager_allowed(
+            self, mock_create, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='IT')
+        mock_create.return_value = {'success': True, 'user': {'sid': 2}}
+        res = client.post(self.URL, json=self.BODY, headers=_auth_headers())
+        assert res.status_code == 201
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes.auth_service.create_user')
+    def test_staff_refused(self, mock_create, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='staff', department_code='IT')
+        res = client.post(self.URL, json=self.BODY, headers=_auth_headers())
+        assert res.status_code == 403
+        mock_create.assert_not_called()
+
+
+class TestAdminPasswordCannotBeReset:
+    """Resetting the admin's password is a way to BECOME the admin: the reset
+    sets a known default, so any manager could reset it and log in with it.
+    Every other door was locked and this one was left open."""
+
+    URL = '/api/v1/users/100000001/reset-password'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.reset_password')
+    def test_manager_cannot_reset_the_admin(
+            self, mock_reset, mock_is_admin, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='IT')
+        mock_is_admin.return_value = True
+        res = client.post(self.URL, headers=_auth_headers())
+        assert res.status_code == 403
+        mock_reset.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.reset_password')
+    def test_another_admin_session_cannot_either(
+            self, mock_reset, mock_is_admin, mock_get_user, mock_verify, client):
+        """Even an admin-role caller: only the admin's OWN session may."""
+        _mock_auth(mock_verify, mock_get_user, role='admin')   # sid 1, not 100000001
+        mock_is_admin.return_value = True
+        res = client.post(self.URL, headers=_auth_headers())
+        assert res.status_code == 403
+        mock_reset.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.reset_password')
+    def test_resetting_a_normal_user_still_works(
+            self, mock_reset, mock_is_admin, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='IT')
+        mock_is_admin.return_value = False
+        mock_reset.return_value = {'success': True}
+        res = client.post('/api/v1/users/100000010/reset-password',
+                          headers=_auth_headers())
+        assert res.status_code == 200
+
+
+class TestIsActiveStringCoercion:
+    """`not "false"` is False — a JSON string sailed past the deactivation
+    guard while psycopg2 wrote boolean false to the column."""
+
+    URL = '/api/v1/users/100000001'
+
+    @pytest.mark.parametrize('value', [False, 'false', 'False', 'FALSE', '0', 'no', ''])
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_every_falsey_spelling_is_refused(
+            self, mock_update, mock_is_admin, mock_get_user, mock_verify, client, value):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_is_admin.return_value = True
+        res = client.put(self.URL, json={'is_active': value}, headers=_auth_headers())
+        assert res.status_code == 403, f'{value!r} was allowed through'
+        mock_update.assert_not_called()
+
+    @pytest.mark.parametrize('value', [True, 'true'])
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_reactivation_still_allowed(
+            self, mock_update, mock_is_admin, mock_get_user, mock_verify, client, value):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_is_admin.return_value = True
+        mock_update.return_value = {'success': True, 'user': {'sid': 100000001}}
+        res = client.put(self.URL, json={'is_active': value}, headers=_auth_headers())
+        assert res.status_code == 200
