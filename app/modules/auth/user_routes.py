@@ -62,9 +62,11 @@ def _target_is_admin(sid):
     like whoever is authenticated, and the guard below fires on innocent
     updates. Keeping it separate also keeps it separately patchable.
 
-    False when the role cannot be read. The guard is defence in depth — the
-    admin role is already ungrantable through this API by `_reject_admin_role`
-    — so a database blip must not start rejecting ordinary user edits.
+    False when the role cannot be read, so a database blip cannot start
+    rejecting ordinary user edits. That means the guard FAILS OPEN, which is
+    why the destructive paths carry a second, independent check that does not
+    depend on this one: `delete_user` re-reads the target through
+    `auth_service`, and `update_user` does the same before deactivating.
     """
     from app.core.database import get_postgres_connection
     conn = None
@@ -88,6 +90,20 @@ def _target_is_admin(sid):
             conn.close()
 
 
+def _is_truthy(value):
+    """Whether `value` means true, for a JSON field that should be a boolean.
+
+    `not value` is not enough: a JSON body can carry the STRING "false", which
+    is truthy in Python, so `not "false"` is False and a deactivation sailed
+    past the guard — while psycopg2 then wrote boolean false to the column.
+    Strings are compared explicitly, so "false", "0", "no" and "" all read as
+    false, as does a real `False`.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', '0', 'no', 'off', '')
+    return bool(value)
+
+
 def _protect_admin_row(sid, fields):
     """An error response when `fields` would strip the admin of its powers.
 
@@ -108,7 +124,7 @@ def _protect_admin_row(sid, fields):
             'success': False,
             'error': "The admin account's role cannot be changed through the API.",
         }), 403
-    if 'is_active' in fields and not fields['is_active']:
+    if 'is_active' in fields and not _is_truthy(fields['is_active']):
         return jsonify({
             'success': False,
             'error': 'The admin account cannot be deactivated through the API.',
@@ -308,6 +324,17 @@ def update_user(sid):
     if denied:
         return denied
 
+    # `_protect_admin_row` fails open when the role cannot be read. Deactivation
+    # is unrecoverable, so it gets a second check through a different path —
+    # the same belt-and-braces `delete_user` already had.
+    if 'is_active' in allowed_updates and not _is_truthy(allowed_updates['is_active']):
+        target = auth_service.get_user_by_sid(sid)
+        if target and str(target.get('role', '')).lower() == UserRole.ADMIN:
+            return jsonify({
+                'success': False,
+                'error': 'The admin account cannot be deactivated through the API.',
+            }), 403
+
     result = auth_service.update_user(sid, allowed_updates)
 
     if result['success']:
@@ -325,6 +352,19 @@ def reset_user_password(sid):
     if g.role not in [UserRole.ADMIN, UserRole.MANAGER]:
         return jsonify({'success': False, 'error': 'Only admin or manager can reset passwords'}), 403
 
+    # Resetting the admin's password is a way to BECOME the admin: this sets a
+    # known default, so any manager could reset it and then log in with it.
+    # Every other door was locked (`_reject_admin_role`, `_protect_admin_row`)
+    # and this one was left open, which made the rest of it decoration.
+    # Only the admin may reset the admin — i.e. itself.
+    if g.sid != sid and _target_is_admin(sid):
+        return jsonify({
+            'success': False,
+            'error': "The admin account's password cannot be reset by another "
+                     'user. Use the password-change flow as the admin, or reset '
+                     'it directly in the database.',
+        }), 403
+
     result = auth_service.reset_password(sid)
 
     if result['success']:
@@ -333,7 +373,7 @@ def reset_user_password(sid):
 
 
 @user_bp.route('/<int:sid>', methods=['DELETE'])
-@token_required
+@admin_or_it_manager_required
 def delete_user(sid):
     """
     Delete a user
@@ -377,7 +417,10 @@ def delete_user(sid):
             'error': 'Only admin can delete admin users'
         }), 403
 
-    # Manager can only delete staff and manager users
+    # Manager can only delete staff and manager users. The decorator already
+    # narrowed this to admin or an IT-department manager, matching create and
+    # update — deleting a user is at least as consequential as creating one,
+    # and it was reachable by any manager in any department.
     if g.role == UserRole.MANAGER:
         if target_user.get('role') not in [UserRole.STAFF, UserRole.MANAGER]:
             return jsonify({

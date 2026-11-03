@@ -3,6 +3,43 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [1.2.0] — 2026-11-03
+
+### Security — resetting the admin's password was a way to BECOME the admin
+
+`POST /users/<sid>/reset-password` was gated "admin or manager" and nothing
+more, and it sets a **known default password** with a forced change on next
+login. So **any manager in any department could reset the admin's password and
+then log in as the admin.** Every other door was locked in 1.1.0 — the role
+ungrantable, the row undeletable, undemotable, undeactivatable — and this one
+was left open, which made the rest of it decoration.
+
+Only the admin's own session may now reset the admin. Resetting any other user
+is unchanged.
+
+### Fixed — `is_active: "false"` deactivated the admin
+
+The guard was `not fields['is_active']`, and `not "false"` is **False**: a JSON
+body carrying the STRING `"false"` sailed straight through while psycopg2 wrote
+boolean false to the column. Verified by running the route. `_is_truthy` now
+compares strings explicitly, so `false`, `False`, `FALSE`, `0`, `no`, `off` and
+`""` are all refused, as is a real `False`. Reactivation (`true`) still works.
+
+### Changed — `DELETE /users/<sid>` needs admin or an IT manager
+
+Create and update were tightened in 1.1.0 and delete was left reachable by any
+manager in any department, which is the more consequential operation of the
+three. Now `@admin_or_it_manager_required` like the others. The in-handler rules
+(no self-delete, no deleting the admin, managers may only delete staff and
+managers) are unchanged.
+
+### Added — a second check on the deactivation path
+
+`_target_is_admin` fails open when the role cannot be read, so that a database
+blip cannot start rejecting ordinary user edits. `delete_user` already carried
+an independent re-read as belt-and-braces; deactivation now does too, since it
+is equally unrecoverable.
+
 ## [1.1.0] — 2026-11-03
 
 ### Security — the admin role is no longer assignable through the API

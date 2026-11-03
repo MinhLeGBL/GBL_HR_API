@@ -43,11 +43,42 @@ exactly the same people:
 The admin is ignored throughout: admin bypasses every check, so it is never part
 of what a grant has to reproduce.
 
-Read-only by default. It prints a per-section BEFORE / AFTER / DELTA table and
-**refuses `--apply` unless every delta is zero** (`--allow-delta` overrides,
-deliberately awkward). Verified on the local stack: delta 0 across all 13
-sections, and re-resolving every user independently gave an identical
-distribution — 13, 2, 3, 3, 4, 4, 5, 5, 6 sections per user before and after.
+Read-only by default, printing a per-section table.
+
+> **The delta column in that table proves nothing.** `propose` derives its
+> grants from `effective_old` and the delta re-derives the result from the
+> proposal, so it is algebraically always zero — it was described as a safety
+> gate in an earlier revision and was never one. It is kept only as a
+> consistency check on the proposal code.
+>
+> **The real check runs on `--apply`:** the SHIPPING resolver is run over the
+> committed database and compared against what the OLD rules granted. Anything
+> different and the grants are restored exactly as they were, nothing is
+> marked applied, and the script exits non-zero. So the only thing taken on
+> trust is `effective_old`; the apply and the new rule are both verified.
+>
+> Note the comparison is against the OLD rules, **not** against what the
+> resolver said beforehand. Deployed code is already department-only, so on
+> un-migrated data the resolver reports the widened set — the very widening
+> this script undoes. An earlier revision compared against that and reported
+> the IT and HR managers "losing" `USER_MANAGEMENT`, which they only had
+> because of the widening.
+
+**It is NOT idempotent, and refuses to run twice.** Its first run moves access
+out of per-user inclusions and into department grants; a second run reads
+`section_roles` as the baseline, which no longer describes reality, concludes
+the department grant is unjustified, and deletes it. Observed on dev: a second
+run proposed removing `LIVE_COMPARISON` from both BOD managers. A marker table
+(`section_access_migration`) is written **after** verification passes, so a
+rolled-back run does not block the retry. `--force` overrides.
+
+Writes run in one transaction (`conn.autocommit` is honoured and restored), so
+a failure part-way cannot leave a section holding no grants at all.
+
+A department that currently has no members — or whose every member is excluded
+— cannot be derived from today's access, but if it is granted now that grant is
+a deliberate pre-authorisation the access page allows. It is carried over
+rather than deleted.
 
 It also closes a gap recorded in 1.1.0: `LIVE_COMPARISON` had department `BOD`
 and no roles, so rule 5 granted nobody and its two BOD managers were held up by
@@ -56,7 +87,15 @@ BOD hire inherits it.
 
 > **Deployment order matters.** Deploy, then `python scripts/database/init_db.py`,
 > then this migration. Running the new code against un-migrated data is the
-> widening described above.
+> widening described above, and that window is unavoidable with this design.
+
+### Changed — the seed no longer re-grants over a migrated database
+
+`_seed_v2_permissions` is additive, which was harmless when rule 5 needed a
+role match and is not now: a re-inserted department grant admits the whole
+department, so running `init_db.py` after the migration would restore grants an
+administrator had narrowed through the access page. It now seeds only when
+`section_departments` is empty, and says so when it skips.
 
 ## [1.1.0] — 2026-11-03
 

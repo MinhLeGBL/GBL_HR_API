@@ -134,8 +134,17 @@ class PermissionService:
                 ON CONFLICT (code) DO NOTHING
             ''')
 
-            # Section permissions seed (additive — ON CONFLICT in _seed_v2_permissions)
-            self._seed_v2_permissions(cursor)
+            # Section permissions seed. Additive, and that now MATTERS: under
+            # department-only rule 5 a re-inserted department grant admits the
+            # whole department, so re-seeding over a migrated database would
+            # undo narrowing an administrator has done through the access page.
+            # Seed only when there is nothing to overwrite.
+            cursor.execute('SELECT COUNT(*) FROM section_departments')
+            if cursor.fetchone()[0] == 0:
+                self._seed_v2_permissions(cursor)
+            else:
+                print('[permissions] section grants already exist \u2014 seed skipped '
+                      '(re-seeding would restore grants removed via the UI)')
             self._migrate_periodic_report_to_weekly(cursor)
 
             conn.commit()
@@ -213,10 +222,12 @@ class PermissionService:
             'COMMISSION_DATA': ['ADMIN', 'MANAGER', 'STAFF'],
             'USER_MANAGEMENT': ['ADMIN'],
             'EMPLOYEE_DATA': ['ADMIN', 'MANAGER'],
-            # STAFF included so that "admin and members of the IT department"
-            # holds for every role in IT: resolution rule 5 is department AND
-            # role, so an IT staff user matched the department and was denied
-            # on the role.
+            # Kept complete for the record, though `section_roles` is dead to
+            # resolution since rule 5 became department-only. STAFF was added
+            # when the rule still required a role match and an IT staff user
+            # was denied on that half; it now affects nothing at resolution
+            # time, and only shifts what the migration reads as the old
+            # baseline.
             'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER', 'STAFF'],
             'BATHROOM_PRICE_CHECK': [],
             'CRM': [],

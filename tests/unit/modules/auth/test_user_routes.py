@@ -540,3 +540,82 @@ class TestUserCreationGate:
         res = client.post(self.URL, json=self.BODY, headers=_auth_headers())
         assert res.status_code == 403
         mock_create.assert_not_called()
+
+
+class TestAdminPasswordCannotBeReset:
+    """Resetting the admin's password is a way to BECOME the admin: the reset
+    sets a known default, so any manager could reset it and log in with it.
+    Every other door was locked and this one was left open."""
+
+    URL = '/api/v1/users/100000001/reset-password'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.reset_password')
+    def test_manager_cannot_reset_the_admin(
+            self, mock_reset, mock_is_admin, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='IT')
+        mock_is_admin.return_value = True
+        res = client.post(self.URL, headers=_auth_headers())
+        assert res.status_code == 403
+        mock_reset.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.reset_password')
+    def test_another_admin_session_cannot_either(
+            self, mock_reset, mock_is_admin, mock_get_user, mock_verify, client):
+        """Even an admin-role caller: only the admin's OWN session may."""
+        _mock_auth(mock_verify, mock_get_user, role='admin')   # sid 1, not 100000001
+        mock_is_admin.return_value = True
+        res = client.post(self.URL, headers=_auth_headers())
+        assert res.status_code == 403
+        mock_reset.assert_not_called()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.reset_password')
+    def test_resetting_a_normal_user_still_works(
+            self, mock_reset, mock_is_admin, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user, role='manager', department_code='IT')
+        mock_is_admin.return_value = False
+        mock_reset.return_value = {'success': True}
+        res = client.post('/api/v1/users/100000010/reset-password',
+                          headers=_auth_headers())
+        assert res.status_code == 200
+
+
+class TestIsActiveStringCoercion:
+    """`not "false"` is False — a JSON string sailed past the deactivation
+    guard while psycopg2 wrote boolean false to the column."""
+
+    URL = '/api/v1/users/100000001'
+
+    @pytest.mark.parametrize('value', [False, 'false', 'False', 'FALSE', '0', 'no', ''])
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_every_falsey_spelling_is_refused(
+            self, mock_update, mock_is_admin, mock_get_user, mock_verify, client, value):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_is_admin.return_value = True
+        res = client.put(self.URL, json={'is_active': value}, headers=_auth_headers())
+        assert res.status_code == 403, f'{value!r} was allowed through'
+        mock_update.assert_not_called()
+
+    @pytest.mark.parametrize('value', [True, 'true'])
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.auth.user_routes._target_is_admin')
+    @patch('app.modules.auth.user_routes.auth_service.update_user')
+    def test_reactivation_still_allowed(
+            self, mock_update, mock_is_admin, mock_get_user, mock_verify, client, value):
+        _mock_auth(mock_verify, mock_get_user, role='admin')
+        mock_is_admin.return_value = True
+        mock_update.return_value = {'success': True, 'user': {'sid': 100000001}}
+        res = client.put(self.URL, json={'is_active': value}, headers=_auth_headers())
+        assert res.status_code == 200
