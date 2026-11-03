@@ -104,9 +104,12 @@ def effective_new(code, depts, incl, excl, non_admin):
     was nothing of the kind. It survives only as a consistency check on the
     proposal-building code itself.
 
-    The real check is `verify_against_resolver`, which runs the SHIPPING
-    resolver over the committed database before and after, so a mistake in
-    `effective_old` cannot hide.
+    The real check runs on `--apply`: `resolver_access` asks the SHIPPING
+    resolver what the migrated database grants, and `expected_access` says what
+    the OLD rules granted. Comparing those two is what catches a mistake in the
+    apply or in the new rule. A mistake in `effective_old` itself cannot be
+    caught from inside this script — the old code it reimplements is gone — so
+    that function is the one thing taken on trust.
     """
     out = set()
     for u in non_admin:
@@ -339,12 +342,15 @@ def main():
 
         print(f'\nTotal access delta across all sections: {total_delta}')
         if total_delta:
-            print('  A NON-ZERO DELTA MEANS SOMEONE GAINS OR LOSES ACCESS.')
+            print('  A NON-ZERO DELTA MEANS THE PROPOSAL IS INTERNALLY '
+                  'INCONSISTENT. It is normally 0 by construction.')
 
         if not args.apply:
             print('\nRead-only. Re-run with --apply to write these changes.')
-            print('On --apply the SHIPPING resolver is run before and after, and '
-                  'the change is rolled back if anyone\'s access differs.')
+            print('The delta column above proves nothing — it is derived from '
+                  'the proposal. On --apply the SHIPPING resolver is asked what '
+                  'the migrated data grants and compared against what the OLD '
+                  'rules granted; any difference and everything is restored.')
             return
 
         # The table above cannot catch a mistake in `effective_old` — see
