@@ -213,7 +213,11 @@ class PermissionService:
             'COMMISSION_DATA': ['ADMIN', 'MANAGER', 'STAFF'],
             'USER_MANAGEMENT': ['ADMIN'],
             'EMPLOYEE_DATA': ['ADMIN', 'MANAGER'],
-            'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER'],
+            # STAFF included so that "admin and members of the IT department"
+            # holds for every role in IT: resolution rule 5 is department AND
+            # role, so an IT staff user matched the department and was denied
+            # on the role.
+            'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER', 'STAFF'],
             'BATHROOM_PRICE_CHECK': [],
             'CRM': [],
             'ACCOUNT_PAYABLE': ['ADMIN', 'MANAGER'],
@@ -616,8 +620,18 @@ class PermissionService:
         2. DASHBOARD → always included
         3. Excluded via section_exclusions_v2 → denied
         4. Included via section_inclusions → allowed
-        5. Department in section_departments AND role in section_roles → allowed
+        5. Department in section_departments → allowed
         6. Otherwise → denied
+
+        Rule 5 used to require department AND role. Role is no longer consulted:
+        the access page stores a department grant (everyone in it, standing) or
+        explicit users, and offers no role field, so keeping the role half would
+        mean every department grant matched nothing and silently granted nobody.
+
+        `section_roles` is left in place but is dead to resolution. It is not
+        dropped here because the data still describes who HAD access under the
+        old rules, which the migration in
+        `scripts/database/migrate_section_access_to_departments.py` reads.
         """
         conn = None
         try:
@@ -665,13 +679,6 @@ class PermissionService:
                 )
                 dept_sections = {r[0] for r in cursor.fetchall()}
 
-            # Sections where user's role is allowed
-            cursor.execute(
-                'SELECT section_code FROM section_roles WHERE role_code = %s',
-                (user_role.upper(),)
-            )
-            role_sections = {r[0] for r in cursor.fetchall()}
-
             result = []
             for code, name in all_sections:
                 # DASHBOARD always included
@@ -688,8 +695,9 @@ class PermissionService:
                     result.append({'section_code': code, 'section_name': name})
                     continue
 
-                # Department + role check
-                if code in dept_sections and code in role_sections:
+                # Department check. NOT "department AND role" any more — see
+                # the docstring.
+                if code in dept_sections:
                     result.append({'section_code': code, 'section_name': name})
 
             cursor.close()
