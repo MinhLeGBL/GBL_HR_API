@@ -7,6 +7,7 @@ into a single feature module (commission, crm, sale_through, etc.).
 from flask import Blueprint, jsonify, request
 
 from app.core.auth.middleware import token_required
+from . import engine
 from .service import CustomReportsService
 
 custom_reports_bp = Blueprint(
@@ -61,3 +62,57 @@ def sizes_by_brand_season():
         status = 400 if 'invalid season' in result.get('error', '') else 500
         return jsonify(result), status
     return jsonify(result), 200
+
+
+@custom_reports_bp.route('/query', methods=['POST'])
+@token_required
+def run_query():
+    """The query engine (CR #1).
+
+    POST, not GET, deliberately: the filter body is nested and long, and
+    it keeps customer names out of URLs and access logs.
+
+    Body:
+        subject  — "sales" | "imports" | "sellThrough"
+        from, to — inclusive ISO yyyy-mm-dd, at most one year apart
+        filters  — { dimensionId: string[] }, empty array = no filter
+        groupBy  — up to 3 dimension ids; [] means line detail
+
+    Returns `{ success, result: { subject, groupBy, columns, rows,
+    totals, rowCount, queryMs, notes } }`. The contract is recorded in
+    GBL_MASTER_FRONTEND/docs/cr/custom_reports.md and specified by
+    src/features/custom-reports/mocks/engine.ts.
+
+    400 on a bad request — including a dimension that does not apply to
+    the subject, which is REJECTED rather than ignored: silently dropping
+    the clause would answer a different question under the label of the
+    one that was asked.
+    """
+    try:
+        query = engine.parse_query(request.get_json(silent=True))
+    except engine.QueryError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+    # Labels pass through as ids. The frontend holds the EN/VI strings and
+    # relabels every column itself, so translating here would be work
+    # thrown away — but `run_query` takes them as arguments so a CSV
+    # export or a scheduled job can supply real text.
+    result = engine.run_query(query, lambda d: d, lambda m: m)
+    return jsonify(result), 200 if result.get('success') else 500
+
+
+@custom_reports_bp.route('/dimensions/<dim>', methods=['GET'])
+@token_required
+def dimension_values(dim):
+    """Allowed values for one dimension's picker — `{ success, values }`.
+
+    One dimension per call, fetched lazily when its picker opens. Only
+    `multi` and `typeahead` dimensions call this; the `search` ones
+    (bill, receiving, alu, description) are free-text CONTAINS matches
+    with no option list.
+    """
+    try:
+        result = engine.dimension_values(dim)
+    except engine.QueryError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    return jsonify(result), 200 if result.get('success') else 500
