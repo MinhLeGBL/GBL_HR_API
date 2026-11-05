@@ -3,6 +3,47 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.5.0] — 2026-11-05
+
+### Changed
+- `/sizes` now groups by **(brand, department, normalized_size)** instead of
+  (brand, size, season). Raw `invn_sbs_item.item_size` is not comparable
+  across brands — AKRIS `36` is FR 36 (= M) while MARNI `36` is IT 36
+  (= XS) — so grouping the raw label scattered one physical size across
+  several rows.
+- `FOCUS_BRANDS` is no longer applied by default. Pass the list explicitly
+  for the previous behaviour.
+
+### Added
+- `normalize_size(raw_size, brand, department)` — translates a numeric label
+  through the brand's sizing system, keeps shoe departments' EU numerics
+  as-is, takes the letter half of merchant-prenormalised hybrids (`40/M`,
+  `L/XL`), and passes anything unmatched through as its raw value so it
+  surfaces as an unmapped bucket rather than landing in a wrong one.
+- `is_meaningful_size()` — drops NULL, empty and one-size labels.
+- `BRAND_SIZE_SYSTEMS`, `RTW_NUMERIC_TO_LETTER`, `SIZED_DEPARTMENTS`,
+  `SHOE_DEPARTMENTS`.
+
+### ⚠️ The mapping is PROVISIONAL — not ratified
+Stated by the user when adopting it: the normalisation *"is still in testing
+and is not officially recognize yet"*. Two specifics a reader must know
+before trusting a row:
+
+- `BRAND_SIZE_SYSTEMS` declares a sizing system for **13 brands**. Every
+  other vendor falls through to `DEFAULT_SIZE_SYSTEM = 'IT'`, which is a
+  guess rather than a vendor-published chart.
+- `RTW_NUMERIC_TO_LETTER` follows modern luxury-fashion industry
+  convention — a judgement, not per-brand size charts.
+
+So a normalised size is a useful **grouping**, not a fact about the garment,
+and anything built on it must say so WHERE IT IS READ. The frontend does:
+the `size` dimension carries `caveatKey: 'caveatSizeNormalised'`, which
+surfaces as a note on any result grouped or filtered by size.
+
+### Notes
+- Recovered from `stash@{1}`, where it had been living on this machine
+  alone — invisible to every other checkout and lost with the clone.
+
 ## [0.4.0] — 2026-05-21
 
 ### Changed
