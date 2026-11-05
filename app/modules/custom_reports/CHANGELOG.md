@@ -181,6 +181,42 @@ returns a **wrong ratio** rather than a narrower one. Both 400.
   6,517 customers — `LTY_LEVEL`, `LTY_CUST_LVL_HIST` and
   `LTY_CUST_CENTRAL` are all empty tables.
 
+#### `GET /dimensions/store` — stores with ACTIVITY only
+
+The user's call. `rps.store` has nine rows, but three of them have **zero
+sale lines and zero receipt lines in all history**:
+
+| store | sale lines | receipt lines |
+|---|---|---|
+| HQ | 609 | 33,170 |
+| RHN | 14,606 | 0 |
+| RWT | 14,557 | 7 *(Dec 2023 setup)* |
+| RWD | 9,068 | 5 *(Dec 2023 setup)* |
+| RWR | 7,030 | 0 |
+| RWP | 2,150 | 0 |
+| **LOA / RWL / DEMO** | **0** | **0** |
+
+Offering those three is a filter value that can only ever return an empty
+result — the "control no data could ever trigger" shape, and `DEMO` is not
+a shop at all.
+
+"Activity" is defined as **the scope this engine reports on**, not mere
+existence in a table: a store is offered iff one of the two pulls could
+return a row for it. **Either document type counts** — HQ takes
+essentially all receiving against only 609 sale lines, so a sales-only
+definition would nearly have dropped it.
+
+Unbounded by date, like every other picker: a store that sold nothing this
+quarter must still be offered, or the filter cannot reach the rows you are
+about to widen the range to find.
+
+Three formulations were measured and all returned the same six stores; the
+`UNION` of the two document scopes has the cheapest plan (126ms against
+202ms for correlated `EXISTS` on a warm cursor; 1.88s against 2.22s end to
+end). ⚠️ It is still **~1.5s dearer than a plain `SELECT DISTINCT`**
+(0.4s), because proving activity means touching DOCUMENT and VOUCHER —
+paid once when the filter panel opens.
+
 #### Raised back to the frontend
 
 - **`size` is declared `kind: 'multi'`** (a checkbox list) but the picker

@@ -804,7 +804,64 @@ def dimension_values(dim: str) -> Dict[str, Any]:
 # exception: it must be normalised in Python, so its raw labels come back
 # with the brand and department needed to translate them.
 _PICKER_SQL = {
-    'store':        "SELECT DISTINCT store_code FROM rps.store",
+    # ⚠️ STORES WITH ACTIVITY ONLY (user's call, 2026-11-05). `rps.store`
+    # has nine rows; `LOA`, `RWL` and `DEMO` have **zero** sale lines and
+    # **zero** receipt lines in ALL history, so offering them is a filter
+    # value that can only ever return an empty result — the "control no
+    # data could ever trigger" shape this project has been bitten by
+    # before (`draft_stale`), and `DEMO` is not a shop at all.
+    #
+    # "Activity" is defined as the scope THIS ENGINE REPORTS ON, not as
+    # mere existence in a table: a store is offered iff one of the two
+    # pulls could return a row for it. The two EXISTS clauses below are
+    # therefore the WHERE of SALE_LINES and RECEIPT_LINES with the date
+    # bound dropped.
+    #
+    # Unbounded by date, like every other picker: a store that sold
+    # nothing this quarter must still be offered, or the filter cannot
+    # reach the rows you are about to widen the range to find. Measured
+    # over all history (production, 2026-11-05):
+    #
+    #     HQ     609 sale lines   33,170 receipt lines
+    #     RHN  14,606                  0
+    #     RWT  14,557                  7   (Dec 2023 setup)
+    #     RWD   9,068                  5   (Dec 2023 setup)
+    #     RWR   7,030                  0
+    #     RWP   2,150                  0
+    #     LOA / RWL / DEMO    0        0   ← excluded
+    #
+    # HQ stays: 609 sale lines is small but real (the TRAVELITE bulk
+    # sales), and it is where essentially all receiving lands.
+    # A UNION of the two document scopes rather than two correlated
+    # EXISTS clauses. All three formulations tried returned the SAME six
+    # stores; this one has the cheapest plan — 126ms against 202ms on a
+    # warm cursor, 1.88s against 2.22s end to end through a fresh
+    # connection. The DOCUMENT_ITEM / VOU_ITEM joins are dropped because
+    # they cost nothing to the answer (a document in scope has lines) and
+    # only made the plan worse.
+    #
+    # ⚠️ It is still ~1.5s dearer than a plain `SELECT DISTINCT
+    # store_code FROM rps.store` (0.4s), because proving activity means
+    # touching DOCUMENT and VOUCHER. That is the price of not offering
+    # three options that can only ever return nothing, paid once when the
+    # filter panel opens.
+    'store':        """
+        SELECT st.store_code
+        FROM rps.store st
+        WHERE st.sid IN (
+            SELECT d.store_sid FROM rps.document d
+            WHERE d.is_held = 0
+              AND d.receipt_type IN (0, 1)
+              AND d.status = 4
+            UNION
+            SELECT vh.store_sid FROM rps.voucher vh
+            WHERE vh.vou_class = 0
+              AND vh.slip_flag = 0
+              AND vh.held = 0
+              AND vh.status = 4
+              AND vh.vou_type = 0
+        )
+    """,
     'brand':        "SELECT DISTINCT vend_name FROM rps.vendor",
     'season':       "SELECT DISTINCT udf5_string FROM rps.invn_sbs_item",
     'gender':       ("SELECT DISTINCT CASE WHEN d_long_name IN ('COSM','HOME') "

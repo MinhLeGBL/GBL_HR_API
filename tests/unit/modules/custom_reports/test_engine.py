@@ -525,3 +525,38 @@ class TestSortedValues:
     def test_values_are_distinct_after_the_unknown_collapse(self):
         out = engine._sorted_values({None, '', '  '})
         assert out == [UNKNOWN]
+
+
+class TestStorePicker:
+    """`GET /dimensions/store` offers only stores with activity.
+
+    The user's call (2026-11-05). `rps.store` has nine rows, but `LOA`,
+    `RWL` and `DEMO` have zero sale lines and zero receipt lines in ALL
+    history, so offering them is a filter value that can only ever return
+    an empty result — and `DEMO` is not a shop.
+    """
+
+    def test_the_query_constrains_on_activity_not_mere_existence(self):
+        sql = engine._PICKER_SQL['store']
+        assert 'rps.document' in sql and 'rps.voucher' in sql, \
+            'a plain SELECT from rps.store would offer the dead stores'
+
+    def test_both_document_scopes_count_as_activity(self):
+        """A store that only ever RECEIVED must still be offered — HQ
+        takes essentially all receiving (33,170 lines) against 609 sale
+        lines, so a sales-only definition would nearly drop it."""
+        sql = engine._PICKER_SQL['store']
+        assert 'receipt_type IN (0, 1)' in sql      # the sale side
+        assert 'vou_type = 0' in sql                # the receipt side
+
+    def test_the_picker_is_not_bounded_by_any_date(self):
+        """Like every other picker: a store that sold nothing this quarter
+        must still be offered, or the filter cannot reach the rows you are
+        about to widen the range to find."""
+        sql = engine._PICKER_SQL['store']
+        assert ':from_date' not in sql and ':to_exclusive' not in sql
+
+    def test_store_is_still_absent_from_sell_through(self):
+        """Restricting the picker does not make the dimension applicable —
+        receipts land at HQ while the sale happened in an outlet."""
+        assert 'sellThrough' not in engine.DIMENSIONS['store']['subjects']
