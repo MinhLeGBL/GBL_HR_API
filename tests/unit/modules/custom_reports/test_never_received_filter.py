@@ -14,13 +14,17 @@ from app.modules.custom_reports.service import CustomReportsService
 
 def _items_with_dates(*rows):
     """rows: (item_sid, brand, size, season, on_hand_qty, first_rcvd_date)
-    first_rcvd_date can be a date string or None (catalog ghost)."""
+
+    The season field is kept in the tuple signature for backward-compat but
+    is no longer used by the aggregator. Department defaults to 'WRTW' so
+    items survive the sized-department filter."""
     df = pd.DataFrame(rows, columns=[
         'item_sid', 'brand', 'item_size', 'season', 'on_hand_qty', 'first_rcvd_date',
     ])
     df['item_sid'] = df['item_sid'].astype('int64')
     df['on_hand_qty'] = df['on_hand_qty'].astype(int)
     df['first_rcvd_date'] = pd.to_datetime(df['first_rcvd_date'])
+    df['department'] = 'WRTW'
     return df
 
 
@@ -47,7 +51,7 @@ class TestNeverReceivedFilter:
         )
 
         assert result['success']
-        rows_by_size = {(r['brand'], r['size']): r for r in result['rows']}
+        rows_by_size = {(r['brand'], r['normalized_size']): r for r in result['rows']}
         # Items 1 (M) and 3 (XL) have real first_rcvd_date — preserved.
         # Item 2 (L) has NaT — filtered out by default.
         assert ('AKRIS', 'M') in rows_by_size
@@ -69,7 +73,7 @@ class TestNeverReceivedFilter:
         )
 
         assert result['success']
-        rows_by_size = {(r['brand'], r['size']): r for r in result['rows']}
+        rows_by_size = {(r['brand'], r['normalized_size']): r for r in result['rows']}
         # All three rows preserved
         assert ('AKRIS', 'M') in rows_by_size
         assert ('AKRIS', 'L') in rows_by_size

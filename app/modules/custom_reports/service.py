@@ -48,6 +48,152 @@ FOCUS_BRANDS = (
     'THE ATTICO',
 )
 
+# ----------------------------------------------------------------------
+# Size normalization
+# ----------------------------------------------------------------------
+# Per-brand numeric sizing system used for RTW. Used to look up the
+# letter equivalent of a numeric label (e.g. AKRIS uses FR sizing →
+# AKRIS '36' = FR 36 = M, while MARNI uses IT → MARNI '36' = IT 36 = XS).
+# Unknown brands fall through to IT (most common in the catalog).
+BRAND_SIZE_SYSTEMS = {
+    'AKRIS':                   'FR',
+    'AKRIS PUNTO':             'FR',
+    'ALAIA':                   'FR',
+    'ALEXANDER MCQUEEN':       'IT',
+    'COURREGES':               'FR',
+    'ELEVENTY':                'IT',
+    'IBLUES':                  'IT',
+    'JIL SANDER':              'DE',
+    'KHAITE':                  'US',
+    'MAISON MARGIELA MM6':     'IT',
+    'MARELLA':                 'IT',
+    'MARNI INTERNATIONAL S.A': 'IT',
+    'THE ATTICO':              'IT',
+}
+DEFAULT_SIZE_SYSTEM = 'IT'
+
+# Numeric → letter conversion per sizing system (women's RTW).
+# Each mapping uses the smallest letter that the numeric represents in
+# that system, following modern luxury-fashion industry convention.
+RTW_NUMERIC_TO_LETTER = {
+    'IT': {
+        '32': 'XXS', '34': 'XXS',
+        '36': 'XS',
+        '38': 'S',
+        '40': 'M',
+        '42': 'L',
+        '44': 'XL',
+        '46': 'XXL', '48': 'XXL', '50': 'XXL',
+    },
+    'FR': {
+        '30': 'XXS', '32': 'XXS',
+        '34': 'XS',
+        '36': 'S',
+        '38': 'M',
+        '40': 'L',
+        '42': 'XL',
+        '44': 'XXL', '46': 'XXL',
+    },
+    'DE': {
+        '28': 'XXS', '30': 'XXS',
+        '32': 'XS',
+        '34': 'S',
+        '36': 'M',
+        '38': 'L',
+        '40': 'XL',
+        '42': 'XXL', '44': 'XXL',
+    },
+    'US': {
+        '00': 'XXS', '0': 'XXS',
+        '2': 'XS',
+        '4': 'S',
+        '6': 'M',
+        '8': 'L',
+        '10': 'XL', '12': 'XL',
+        '14': 'XXL', '16': 'XXL',
+    },
+}
+
+# Letter sizes are universal already.
+LETTER_SIZES = {'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'}
+
+# "One size" markers — items with these labels are dropped from the
+# size report (jewelry, bags, scarves, etc.).
+ONE_SIZE_LABELS = {
+    'OS', 'O/S', 'O', 'U', 'TU', 'ONE SIZE', 'ONESIZE', 'UNI', 'TAGLIA UNICA',
+}
+
+# Departments that have meaningful sized items. Items in other
+# departments are dropped from the size report.
+SIZED_DEPARTMENTS = {'WRTW', 'MRTW', 'WSHO', 'MSHO'}
+
+# Departments where the item_size is an EU shoe size and is kept as-is
+# (no letter normalization makes sense — a 38 shoe ≠ a 38.5 shoe).
+SHOE_DEPARTMENTS = {'WSHO', 'MSHO'}
+
+
+def is_meaningful_size(raw_size) -> bool:
+    """True iff raw_size is a usable label (not NULL, empty, or one-size)."""
+    if raw_size is None:
+        return False
+    if not isinstance(raw_size, str):
+        return False
+    s = raw_size.strip().upper()
+    if not s:
+        return False
+    if s in ONE_SIZE_LABELS:
+        return False
+    return True
+
+
+def normalize_size(raw_size: str, brand: str, department: str) -> str:
+    """
+    Convert a raw `item_size` label into a canonical bucket.
+
+    - Shoe departments → return the size as-is (EU numeric is already
+      universal across brands).
+    - Hybrid notation like '40/M' or '42/L' → take the letter half (it's
+      pre-normalized by the merchant).
+    - Letter sizes (XS, S, M, L, …) → upper-cased letter.
+    - Numeric sizes → looked up in RTW_NUMERIC_TO_LETTER using the brand's
+      sizing system.
+
+    Falls through to the raw value (upper-cased) if no rule matches —
+    surfaces as an "unmapped" bucket in the report so a human can extend
+    the conversion table.
+    """
+    if not is_meaningful_size(raw_size):
+        return ''   # caller is expected to have filtered these out
+    s = raw_size.strip()
+    dept = (department or '').upper()
+
+    # Shoes: don't translate.
+    if dept in SHOE_DEPARTMENTS:
+        return s
+
+    s_upper = s.upper()
+
+    # Pre-normalized hybrid like '40/M', '42/L', 'L/XL'. Take the rightmost
+    # part if it's a known letter; otherwise leave the whole token alone.
+    if '/' in s_upper:
+        parts = [p.strip() for p in s_upper.split('/') if p.strip()]
+        for part in reversed(parts):
+            if part in LETTER_SIZES:
+                return part
+
+    # Plain letter sizes
+    if s_upper in LETTER_SIZES:
+        return s_upper
+
+    # Numeric — look up in the brand's sizing-system table
+    system = BRAND_SIZE_SYSTEMS.get(brand, DEFAULT_SIZE_SYSTEM)
+    table = RTW_NUMERIC_TO_LETTER.get(system, {})
+    if s in table:
+        return table[s]
+
+    # No match — surface raw so it shows up in the report as an outlier
+    return s_upper
+
 
 class CustomReportsService:
 
@@ -68,9 +214,10 @@ class CustomReportsService:
             seasons: list of season codes (e.g. ['SS25', 'SS26']). Each
                 must match ^[A-Za-z0-9]+$. Defaults to ('SS25', 'SS26').
             brands: list of vendor_name values to keep. Case-insensitive
-                exact match. When None, falls back to FOCUS_BRANDS (the
-                13 brands of interest). Pass `['*']` to disable the filter
-                and return every brand.
+                exact match. When None (default), no brand filter is
+                applied — the report covers every vendor. Pass `['*']`
+                for the same behaviour explicitly, or pass `list(FOCUS_BRANDS)`
+                to restrict to the 13 curated brands.
             size: optional item_size filter (case-insensitive exact).
             include_never_received: when False (default), SKUs whose
                 `first_rcvd_date` is NULL — i.e. catalog ghosts that have
@@ -102,10 +249,10 @@ class CustomReportsService:
 
         seasons_sql = ', '.join(f"'{s.upper()}'" for s in season_list)
 
-        # Resolve brand filter: None → FOCUS_BRANDS; ['*'] → no filter
-        if brands is None:
-            brand_filter = list(FOCUS_BRANDS)
-        elif len(brands) == 1 and brands[0] == '*':
+        # Resolve brand filter: None or ['*'] → no filter (all vendors).
+        # Pass a list of vendor names to restrict (FOCUS_BRANDS remains
+        # available as a curated preset callers can opt into).
+        if brands is None or (len(brands) == 1 and brands[0] == '*'):
             brand_filter = None
         else:
             brand_filter = list(brands)
@@ -117,8 +264,24 @@ class CustomReportsService:
 
         # 1a. Drop catalog ghosts (never physically received) unless caller opts in.
         # These inflate sku_count without contributing to any qty metric.
-        if not include_never_received and 'first_rcvd_date' in items_df.columns:
+        if (not include_never_received
+                and len(items_df) > 0
+                and 'first_rcvd_date' in items_df.columns):
             items_df = items_df[items_df['first_rcvd_date'].notna()].copy()
+
+        # 1b. Drop items with no meaningful size (NULL, empty, one-size labels
+        # like 'OS', 'U', 'TU'). This naturally removes jewelry, bags,
+        # accessories — categories that don't have a useful size dimension.
+        if len(items_df) > 0:
+            items_df = items_df[items_df['item_size'].apply(is_meaningful_size)].copy()
+
+        # 1c. Drop items in departments outside SIZED_DEPARTMENTS (anything
+        # other than WRTW/MRTW/WSHO/MSHO — accessories etc. shouldn't appear
+        # in a size report even if they happen to carry a number label).
+        if len(items_df) > 0:
+            items_df = items_df[
+                items_df['department'].fillna('').str.upper().isin(SIZED_DEPARTMENTS)
+            ].copy()
 
         if len(items_df) == 0:
             return {
@@ -255,14 +418,13 @@ class CustomReportsService:
         brands: Optional[List[str]] = None,
         size: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Roll matched + raw counts up to (brand, size, season)."""
+        """Roll matched + raw counts up to (brand, department, normalized_size)."""
         # Per-item totals
         rec_per_item = receipts_df.groupby('item_sid')['qty'].sum() if len(receipts_df) else pd.Series(dtype='int64')
         sales_per_item = sales_df.groupby('item_sid')['qty'].sum() if len(sales_df) else pd.Series(dtype='int64')
 
         if len(matched_df):
             matched_per_item_qty = matched_df.groupby('item_sid')['qty'].sum()
-            # Sum of (qty × days) for weighted-mean computation
             matched_df = matched_df.assign(qty_days=matched_df['qty'] * matched_df['days_to_sell'])
             matched_per_item_qty_days = matched_df.groupby('item_sid')['qty_days'].sum()
         else:
@@ -275,16 +437,22 @@ class CustomReportsService:
         item_stats['matched_qty'] = item_stats['item_sid'].map(matched_per_item_qty).fillna(0).astype(int)
         item_stats['matched_qty_days'] = item_stats['item_sid'].map(matched_per_item_qty_days).fillna(0).astype('int64')
 
+        # Normalize each item's size based on its brand + department
+        item_stats['normalized_size'] = item_stats.apply(
+            lambda r: normalize_size(r['item_size'], r['brand'], r['department']),
+            axis=1,
+        )
+
         # Apply filters
         if brands:
             wanted = {b.upper() for b in brands}
             item_stats = item_stats[item_stats['brand'].fillna('').str.upper().isin(wanted)]
         if size is not None:
-            item_stats = item_stats[item_stats['item_size'].fillna('').str.upper() == size.upper()]
+            item_stats = item_stats[item_stats['normalized_size'].fillna('').str.upper() == size.upper()]
 
-        # Group by (brand, size, season)
+        # Group by (brand, department, normalized_size)
         grouped = item_stats.groupby(
-            ['brand', 'item_size', 'season'], dropna=False
+            ['brand', 'department', 'normalized_size'], dropna=False
         ).agg(
             sku_count=('item_sid', 'count'),
             imported_qty=('imported_qty', 'sum'),
@@ -292,6 +460,9 @@ class CustomReportsService:
             on_hand_qty=('on_hand_qty', 'sum'),
             matched_qty=('matched_qty', 'sum'),
             matched_qty_days=('matched_qty_days', 'sum'),
+            raw_sizes=('item_size', lambda s: ', '.join(
+                sorted({str(x) for x in s if pd.notna(x)})
+            )),
         ).reset_index()
 
         # Compute derived fields
@@ -304,13 +475,10 @@ class CustomReportsService:
             sell_through_pct = round(sold / imported * 100, 2) if imported > 0 else None
             avg_days = round(matched_qty_days / matched, 2) if matched > 0 else None
 
-            # Per-row median is harder to do post-aggregate without raw events;
-            # compute it from matched_df scoped to this (brand, size, season)
-            # if needed. For v0.1, only avg + count; median can be added later.
             rows.append({
                 'brand': r['brand'],
-                'size': r['item_size'],
-                'season': r['season'],
+                'department': r['department'],
+                'normalized_size': r['normalized_size'],
                 'sku_count': int(r['sku_count']),
                 'imported_qty': imported,
                 'sold_qty': sold,
@@ -318,11 +486,30 @@ class CustomReportsService:
                 'sell_through_pct': sell_through_pct,
                 'avg_days_to_sell': avg_days,
                 'units_matched': matched,
+                'raw_sizes': r['raw_sizes'],
             })
 
-        # Sort: brand asc, season asc, size asc. Coerce non-strings (NaN
-        # from missing brand/size in source data) to '' before uppercasing.
-        def _key(s):
+        # Sort: brand asc, department asc, then normalized_size in a sensible
+        # order (letter sizes XXS→XXL first, then numeric ascending, then other)
+        letter_order = {s: i for i, s in enumerate(
+            ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
+        )}
+
+        def _size_key(ns):
+            ns_str = ns if isinstance(ns, str) else ''
+            if ns_str in letter_order:
+                return (0, letter_order[ns_str], '')
+            try:
+                return (1, float(ns_str), '')
+            except (TypeError, ValueError):
+                return (2, 0, ns_str)
+
+        def _str_key(s):
             return (s if isinstance(s, str) else '').upper()
-        rows.sort(key=lambda x: (_key(x['brand']), _key(x['season']), _key(x['size'])))
+
+        rows.sort(key=lambda x: (
+            _str_key(x['brand']),
+            _str_key(x['department']),
+            _size_key(x['normalized_size']),
+        ))
         return rows

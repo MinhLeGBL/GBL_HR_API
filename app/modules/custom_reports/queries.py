@@ -23,11 +23,13 @@ class CustomReportsQueries:
             TO_CHAR(i.upc) AS upc,
             v.vend_name AS brand,
             i.item_size AS item_size,
+            d.d_long_name AS department,
             i.UDF5_STRING AS season,
             NVL(iq.qty, 0) AS on_hand_qty,
             i.first_rcvd_date AS first_rcvd_date
         FROM rps.invn_sbs_item i
         LEFT JOIN rps.vendor v ON v.sid = i.vend_sid
+        LEFT JOIN rps.dcs d ON d.sid = i.dcs_sid AND d.sbs_sid = i.sbs_sid
         LEFT JOIN (
             SELECT invn_sbs_item_sid AS item_sid, SUM(qty) AS qty
             FROM rps.invn_sbs_item_qty
