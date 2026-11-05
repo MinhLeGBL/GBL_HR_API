@@ -1,6 +1,24 @@
 """Route-level tests for custom_reports — service is mocked."""
 from unittest.mock import patch
 
+import pytest
+
+PERMS = ('app.modules.permissions.service.PermissionService'
+         '.get_user_permissions_v2')
+
+
+@pytest.fixture(autouse=True)
+def grant_section():
+    """Every route here is gated on the CUSTOM_REPORTS section (v0.7.0), and
+    `section_required` resolves permissions from Postgres, which these unit
+    tests do not have. Grant it by default; the refusal test overrides this
+    with its own patch.
+
+    Same fixture as `weekly_report`'s route tests, for the same reason.
+    """
+    with patch(PERMS, return_value=[{'section_code': 'CUSTOM_REPORTS'}]):
+        yield
+
 
 def _auth_headers():
     return {'Authorization': 'Bearer testtoken'}
@@ -115,3 +133,45 @@ class TestSizesEndpoint:
     def test_unauthenticated_returns_401(self, client):
         resp = client.get(self.URL)
         assert resp.status_code == 401
+
+
+class TestSectionGate:
+    """A valid token is NOT enough.
+
+    These endpoints return company-wide net revenue, the margin split,
+    customer names and membership tiers. The sidebar hides the page from
+    users without the section, but a hidden nav entry is not an access
+    control — so the refusal is asserted here, per route.
+    """
+
+    @pytest.mark.parametrize('method, url, body', [
+        ('get',  '/api/v1/custom-reports/sizes', None),
+        ('post', '/api/v1/custom-reports/query',
+         {'subject': 'sales', 'from': '2026-01-01', 'to': '2026-01-31',
+          'groupBy': ['brand']}),
+        ('get',  '/api/v1/custom-reports/dimensions/brand', None),
+    ])
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_a_user_without_the_section_is_refused(
+        self, mock_get_user, mock_verify, client, method, url, body,
+    ):
+        _mock_auth(mock_verify, mock_get_user, role='staff', department_code='ACC')
+        with patch(PERMS, return_value=[]):
+            call = getattr(client, method)
+            resp = call(url, headers=_auth_headers(), json=body) if body \
+                else call(url, headers=_auth_headers())
+        assert resp.status_code == 403
+        assert resp.get_json()['success'] is False
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_holding_a_DIFFERENT_section_does_not_admit(
+        self, mock_get_user, mock_verify, client,
+    ):
+        """Access to the weekly report is not access to the query engine."""
+        _mock_auth(mock_verify, mock_get_user)
+        with patch(PERMS, return_value=[{'section_code': 'WEEKLY_REPORT'}]):
+            resp = client.get('/api/v1/custom-reports/dimensions/brand',
+                              headers=_auth_headers())
+        assert resp.status_code == 403

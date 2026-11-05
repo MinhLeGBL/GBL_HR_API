@@ -130,7 +130,8 @@ class PermissionService:
                 ('ACCOUNT_PAYABLE', 'Account Payable', 'AR payable reconciliation tool (CR #60)'),
                 ('HAND_CARRY', 'Hand Carry', 'Hand-carry UPC catalog under Commission (CR #57)'),
                 ('LIVE_COMPARISON', 'Live Sale Comparison', 'Two-period sale comparison report under Report (CR #78)'),
-                ('WEEKLY_REPORT', 'Weekly Report', 'Weekly sales report under Report — view, approve and send')
+                ('WEEKLY_REPORT', 'Weekly Report', 'Weekly sales report under Report — view, approve and send'),
+                ('CUSTOM_REPORTS', 'Custom Reports', 'Self-service query engine over sales, imports and sell-through under Report')
                 ON CONFLICT (code) DO NOTHING
             ''')
 
@@ -209,6 +210,21 @@ class PermissionService:
             'ACCOUNT_PAYABLE': ['HR', 'ACC'],
             'HAND_CARRY': ['HR'],
             'WEEKLY_REPORT': ['BOD'],
+            # CUSTOM_REPORTS is deliberately ABSENT, like CRM,
+            # BATHROOM_PRICE_CHECK and LIVE_COMPARISON: an admin or IT
+            # manager grants it on the access page (user's instruction,
+            # 2026-11-05 — "treat this feature like any other").
+            #
+            # ⚠️ Listing it here would be DEAD CODE in production anyway.
+            # `_seed_v2_permissions` only runs when `section_departments`
+            # is empty, which it has not been since the v2 migration, so
+            # a default grant added here reaches a fresh database only.
+            # It would also be the wrong default: the engine returns
+            # customer names, membership tiers and the full margin split.
+            #
+            # CONSEQUENCE, so it does not read as a bug on first deploy:
+            # the page is invisible to EVERY non-admin until someone
+            # grants the section. Admins resolve to all sections.
         }
         for section_code, depts in section_depts.items():
             for dept in depts:

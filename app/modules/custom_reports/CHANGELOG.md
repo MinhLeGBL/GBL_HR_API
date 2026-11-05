@@ -3,6 +3,62 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.7.0] — 2026-11-05
+
+### 🔴 Security — every route now requires the `CUSTOM_REPORTS` section
+
+`@token_required` → `@section_required('CUSTOM_REPORTS')` on `/query`,
+`/dimensions/<dim>` **and `/sizes`**.
+
+These endpoints return company-wide net revenue, the full-price/markdown
+margin split, **customer names** and **membership tiers**. The frontend
+sidebar already hid the page from users without the section — but a hidden
+nav entry is not an access control, and any authenticated employee could
+have POSTed a query directly. `@token_required` was what the module
+shipped with while it was one narrow size report; it is not enough for the
+query engine.
+
+`section_required` already wraps `token_required`, so it replaces rather
+than stacks with it.
+
+⚠️ **`/sizes` is a behaviour change for existing callers.** It was
+token-only since 0.1.0. Anything calling it with a token but without the
+section now gets **403**. It is the same feature and the same section, so
+gating it differently would have been the inconsistency — but if a script
+calls it, that script needs the section.
+
+### Added — the `CUSTOM_REPORTS` permission section
+
+Registered in `permissions.service` alongside the others. The sections
+INSERT is additive (`ON CONFLICT (code) DO NOTHING`), so it reaches an
+existing database on the next start.
+
+**No default department grant**, deliberately — like `CRM`,
+`BATHROOM_PRICE_CHECK` and `LIVE_COMPARISON`. The user's instruction:
+*"we treat this feature like any other, admin or it manager will set the
+access for this feature in the access page."*
+
+Two reasons it is not in `_seed_v2_permissions`:
+
+1. It would be **dead code in production**. That seed only runs when
+   `section_departments` is empty, which it has not been since the v2
+   migration — its own comment explains why re-seeding is dangerous
+   (a re-inserted department grant admits the whole department and would
+   undo narrowing done through the access page).
+2. It would be the wrong default for data at this sensitivity.
+
+⚠️ **CONSEQUENCE, so it does not read as a bug on first deploy: the page is
+invisible to every non-admin until someone grants the section.** Admins
+resolve to all sections.
+
+### Deployment
+
+1. Deploy — the section row appears on first start.
+2. An admin or IT manager grants `CUSTOM_REPORTS` on the access page.
+3. The frontend needs **no** env var: `MOCK_MODE` now defaults to the live
+   API (it defaulted to the mock until today, which would have shipped
+   invented figures — see the frontend change note).
+
 ## [0.6.0] — 2026-11-05
 
 ### Added — the QUERY ENGINE (CR #1)

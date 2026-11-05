@@ -3,12 +3,29 @@ Custom Reports API Routes.
 
 This module hosts cross-domain on-demand reports that don't fit cleanly
 into a single feature module (commission, crm, sale_through, etc.).
+
+One permission section gates the whole module: CUSTOM_REPORTS. Access to
+the page is access to the page — the same design as every other feature,
+on the user's instruction (2026-11-05): an admin or IT manager grants it
+on the access page.
+
+⚠️ ENFORCED HERE, not only hidden in the nav. These endpoints return
+company-wide net revenue, the full-price/markdown margin split, CUSTOMER
+NAMES and membership tiers. The sidebar already hides the page from users
+without the section, but a hidden nav entry is not an access control — an
+authenticated employee could POST a query directly. A bare token check,
+which is what these routes shipped with while the module was one narrow
+size report, is not enough for the query engine.
 """
 from flask import Blueprint, jsonify, request
 
-from app.core.auth.middleware import token_required
+from app.core.auth.middleware import section_required
 from . import engine
 from .service import CustomReportsService
+
+# The permission section gating every route below. Matches SECTION_CODE in
+# the frontend's `src/features/custom-reports/constants.ts`.
+SECTION = 'CUSTOM_REPORTS'
 
 custom_reports_bp = Blueprint(
     'custom_reports', __name__, url_prefix='/api/v1/custom-reports'
@@ -17,7 +34,7 @@ custom_reports_service = CustomReportsService()
 
 
 @custom_reports_bp.route('/sizes', methods=['GET'])
-@token_required
+@section_required(SECTION)
 def sizes_by_brand_season():
     """
     Size-by-brand-season report.
@@ -65,7 +82,7 @@ def sizes_by_brand_season():
 
 
 @custom_reports_bp.route('/query', methods=['POST'])
-@token_required
+@section_required(SECTION)
 def run_query():
     """The query engine (CR #1).
 
@@ -102,7 +119,7 @@ def run_query():
 
 
 @custom_reports_bp.route('/dimensions/<dim>', methods=['GET'])
-@token_required
+@section_required(SECTION)
 def dimension_values(dim):
     """Allowed values for one dimension's picker — `{ success, values }`.
 
