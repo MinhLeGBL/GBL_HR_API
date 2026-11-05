@@ -21,6 +21,7 @@ jobs:
       employees: ${{ steps.changes.outputs.employees }}
       handcarry: ${{ steps.changes.outputs.handcarry }}
       health: ${{ steps.changes.outputs.health }}
+      weekly_report: ${{ steps.changes.outputs.weekly_report }}
       permissions: ${{ steps.changes.outputs.permissions }}
       reports: ${{ steps.changes.outputs.reports }}
       stores: ${{ steps.changes.outputs.stores }}
@@ -69,6 +70,11 @@ jobs:
             health:
               - 'app/modules/health/**'
               - 'tests/unit/modules/health/**'
+            weekly_report:
+              - 'app/modules/weekly_report/**'
+              - 'tests/unit/modules/weekly_report/**'
+              - 'scripts/reports/generate_periodic_report.py'
+              - 'tests/unit/scripts/**'
             permissions:
               - 'app/modules/permissions/**'
               - 'tests/unit/modules/permissions/**'
@@ -89,6 +95,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
+          # MUST match the production venv. CI on 3.12 against a 3.10 server
+          # let an f-string backslash — legal from 3.12, a SyntaxError before
+          # it — reach production and take the API down on 2026-09-16.
+          # The server venv was rebuilt on 3.12, so the two match again.
+          # If the server moves, change it here in the SAME PR.
           python-version: '3.12'
       - run: pip install -r requirements.txt
 
@@ -116,6 +127,7 @@ jobs:
           [ "${{ needs.detect.outputs.employees }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/employees"
           [ "${{ needs.detect.outputs.handcarry }}" = "true" ]   && PATHS="$PATHS tests/unit/modules/handcarry"
           [ "${{ needs.detect.outputs.health }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/health"
+          [ "${{ needs.detect.outputs.weekly_report }}" = "true" ] && PATHS="$PATHS tests/unit/modules/weekly_report tests/unit/scripts"
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
           [ "${{ needs.detect.outputs.reports }}" = "true" ]     && PATHS="$PATHS tests/unit/modules/reports"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"

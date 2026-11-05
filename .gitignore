@@ -6,9 +6,12 @@ docs/
 debug_endpoint.py
 server.log
 
-# Local-only report scripts (Oracle data exports for ad-hoc analysis;
-# not shipped to the deployment server).
-scripts/reports/
+# Report GENERATORS are tracked (see scripts/reports/). Their OUTPUT is not --
+# document/reports/ is ignored further down. The scripts were briefly ignored
+# wholesale, which left them existing only in individual working trees; several
+# had in fact been force-added on feature branches anyway.
+# Note: deploy.yml strips document/ server-side, so tracking the scripts does
+# not ship report output to production.
 
 # Large local-only catalog/data sources kept outside git (re-fetched
 # on demand, not part of the application).
@@ -99,6 +102,13 @@ credentials.json
 .env
 .env.development
 .env.production
+# Local development. Its committed counterpart is .env.development.example,
+# which carries the same (throwaway) container passwords. This one is ignored
+# because it is the file a real ANTHROPIC_API_KEY eventually gets pasted into.
+.env.local
+# Production credentials, reached deliberately by FLASK_ENV=remote. The one
+# file here that holds live secrets.
+.env.remote
 
 # Temporary files
 temp/
@@ -111,9 +121,19 @@ tmp/
 document/reports/
 document/samples/
 document/screenshots/
-README.md
+# The ROOT readme only. A bare `README.md` matches at every depth, which
+# silently swallowed scripts/dev/README.md — the setup guide a new machine
+# needs most. It had already been worked around twice with `git add -f`
+# (the root one and scripts/jobs/), which is the tell.
+/README.md
 docs/
 
 # Development scripts
 deploy-*.sh
 debug_*.py
+
+# Development database seed bundles — extracted from production.
+# Pseudonymised, but still real sales, inventory and payroll figures. These
+# move between machines by hand, never through git.
+dev/seed/
+*.tar.gz

@@ -1,6 +1,7 @@
 """
 GBL Master API - Main Application Entry Point
 """
+import os
 from flask import Flask, jsonify
 from flask_cors import CORS
 from app.modules.employees.routes import hr_employee_bp
@@ -17,6 +18,7 @@ from app.modules.custom_reports.routes import custom_reports_bp
 from app.modules.handcarry.routes import handcarry_bp
 from app.modules.account_payable.routes import account_payable_bp
 from app.modules.reports.routes import reports_bp
+from app.modules.weekly_report.routes import weekly_report_bp
 
 
 def create_app():
@@ -46,6 +48,20 @@ def create_app():
     app.register_blueprint(store_bp)
     app.register_blueprint(commission_bp)
     app.register_blueprint(auth_bp)
+
+    # Development sign-in, registered ONLY when explicitly enabled on a local
+    # database — so in production these URLs do not exist and 404 like any
+    # other unknown path. See app/modules/auth/dev_auth.py for the three
+    # conditions and why it still goes through bcrypt.
+    from app.modules.auth.dev_auth import dev_auth_bp, dev_auth_status
+    _dev_ok, _dev_why = dev_auth_status()
+    if _dev_ok:
+        app.register_blueprint(dev_auth_bp)
+        print(f'[DEV AUTH] account picker at /api/v1/auth/dev/accounts '
+              f'— {_dev_why}')
+    elif (os.getenv('DEV_AUTH_BYPASS') or '').strip():
+        # Asked for and refused: say so, or it looks like the flag did nothing.
+        print(f'[DEV AUTH] NOT enabled — {_dev_why}')
     app.register_blueprint(permission_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(user_bp)
@@ -55,6 +71,14 @@ def create_app():
     app.register_blueprint(handcarry_bp)
     app.register_blueprint(account_payable_bp)
     app.register_blueprint(reports_bp)
+    app.register_blueprint(weekly_report_bp)
+    # TEMPORARY ALIAS — remove once the frontend rename has been live a while.
+    # The two repos deploy independently, so between the backend landing and
+    # the frontend landing the old page would call a path that no longer
+    # exists. Serving both prefixes makes the rename a non-event in either
+    # order. The section gate is unchanged: both paths require WEEKLY_REPORT.
+    app.register_blueprint(weekly_report_bp, name='weekly_report_legacy',
+                           url_prefix='/api/v1/periodic-report')
 
     # Root endpoint
     @app.route('/')
@@ -80,7 +104,8 @@ def create_app():
                 'custom_reports': '/api/v1/custom-reports',
                 'handcarry': '/api/v1/handcarry',
                 'account_payable': '/api/v1/account-payable',
-                'reports': '/api/v1/reports'
+                'reports': '/api/v1/reports',
+                'periodic_report': '/api/v1/weekly-report'
             }
         }), 200
 

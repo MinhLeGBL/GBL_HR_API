@@ -1,0 +1,345 @@
+"""Unit tests for app.modules.weekly_report.period.
+
+The Phase 1 period maths is already covered by
+`tests/unit/scripts/test_periodic_report.py`, which loads the CLI script and so
+exercises these same functions through it. What is tested here is what Phase 2
+ADDED: the `through` clamp that ends MTD and YTD on the last closed day, and
+`fetch_span`.
+"""
+from datetime import date
+
+from app.modules.weekly_report.period import (fetch_span, last_complete_week,
+                                                month_end, order_stores,
+                                                period_windows, shift_year,
+                                                STORE_ORDER)
+
+
+class TestStoreOrder:
+    """The board's reading order, not the alphabet."""
+
+    def test_the_order_is_the_one_the_board_asked_for(self):
+        assert STORE_ORDER == ('HQ', 'RWP', 'RHN', 'RWR', 'RWT', 'RWD')
+
+    def test_stores_come_back_in_that_order_whatever_order_they_go_in(self):
+        assert order_stores({'RWD', 'HQ', 'RWT', 'RHN', 'RWR', 'RWP'}) == [
+            'HQ', 'RWP', 'RHN', 'RWR', 'RWT', 'RWD']
+
+    def test_it_is_not_alphabetical(self):
+        # The distinction the whole change exists for: alphabetical puts HQ
+        # beside RHN and RWP last.
+        codes = list(STORE_ORDER)
+        assert order_stores(codes) != sorted(codes)
+
+    def test_a_store_that_did_not_trade_is_simply_absent(self):
+        # A closed or not-yet-open store must not appear as an empty row.
+        assert order_stores({'HQ', 'RWT'}) == ['HQ', 'RWT']
+
+    def test_an_unlisted_store_goes_last_rather_than_vanishing(self):
+        # A new store, or a code Oracle returns that nobody has added here yet,
+        # must end up somewhere a human will notice — never dropped from the
+        # report, and never an exception on a Monday morning.
+        assert order_stores({'RWT', 'ZZZ', 'HQ'}) == ['HQ', 'RWT', 'ZZZ']
+
+    def test_several_unlisted_stores_are_alphabetical_among_themselves(self):
+        assert order_stores({'BBB', 'AAA', 'HQ'}) == ['HQ', 'AAA', 'BBB']
+
+    def test_no_stores_at_all_is_an_empty_list(self):
+        assert order_stores(set()) == []
+
+
+class TestLastCompleteWeek:
+    def test_excludes_the_week_containing_as_of(self):
+        # Wed 2026-09-09 sits in week 37; the last COMPLETE week is week 36.
+        assert last_complete_week(date(2026, 9, 9)) == (date(2026, 8, 31),
+                                                        date(2026, 9, 6))
+
+    def test_monday_reports_the_week_that_just_closed(self):
+        # The scheduled run's case: Monday 2026-09-14 at 03:00 reports
+        # Mon 09-07 .. Sun 09-13, the week that ended a few hours earlier.
+        assert last_complete_week(date(2026, 9, 14)) == (date(2026, 9, 7),
+                                                         date(2026, 9, 13))
+
+    def test_sunday_still_reports_the_previous_week(self):
+        # A run on the final day of a week must NOT report that week — it is
+        # still in progress until midnight.
+        assert last_complete_week(date(2026, 9, 13)) == (date(2026, 8, 31),
+                                                         date(2026, 9, 6))
+
+    def test_sunday_week_start_shifts_the_boundary(self):
+        w = last_complete_week(date(2026, 9, 9), 'sunday')
+        assert w == (date(2026, 8, 30), date(2026, 9, 5))
+        assert w[0].weekday() == 6   # starts on a Sunday
+
+
+class TestThroughClamp:
+    """The Monday 03:00 run passes the closing Sunday as `through`.
+
+    Without it, MTD and YTD would run to the Monday itself — a day with almost
+    no sales at 03:00 — while the prior-year side carries a full trading day.
+    """
+
+    def test_default_through_is_as_of(self):
+        w = period_windows(date(2026, 9, 14))
+        assert w['MTD'][0] == (date(2026, 9, 1), date(2026, 9, 14))
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 9, 14))
+
+    def test_through_ends_mtd_and_ytd_on_the_closed_day(self):
+        w = period_windows(date(2026, 9, 14), 'monday', date(2026, 9, 13))
+        assert w['MTD'][0] == (date(2026, 9, 1), date(2026, 9, 13))
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 9, 13))
+
+    def test_through_does_not_touch_the_week_window(self):
+        # The week sheet already uses the last complete week; the clamp is only
+        # about MTD/YTD.
+        plain = period_windows(date(2026, 9, 14))
+        clamped = period_windows(date(2026, 9, 14), 'monday', date(2026, 9, 13))
+        assert plain['WOW'] == clamped['WOW']
+
+    def test_prior_year_side_is_clamped_too(self):
+        # Both sides must end on the same calendar day, or the comparison
+        # silently gains a day on one side.
+        w = period_windows(date(2026, 9, 14), 'monday', date(2026, 9, 13))
+        assert w['MTD'][1] == (date(2025, 9, 1), date(2025, 9, 13))
+        assert w['YTD'][1] == (date(2025, 1, 1), date(2025, 9, 13))
+
+    def test_month_is_taken_from_through_not_as_of(self):
+        # Monday 1 Sep with through = Sunday 31 Aug. Taking the month from
+        # `as_of` would give an INVERTED window (1 Sep .. 31 Aug); it must be
+        # the whole of August instead.
+        w = period_windows(date(2026, 9, 1), 'monday', date(2026, 8, 31))
+        assert w['MTD'][0] == (date(2026, 8, 1), date(2026, 8, 31))
+        assert w['MTD'][0][0] <= w['MTD'][0][1]
+
+    def test_new_year_monday_reports_the_prior_year_in_full(self):
+        # 2027-01-04 is the first Monday of 2027; through = Sun 2027-01-03
+        # keeps YTD in 2027. But a Monday that IS 1 January clamps back into
+        # the previous year, which is the sensible read for a report about a
+        # week that ended in it.
+        w = period_windows(date(2024, 1, 1), 'monday', date(2023, 12, 31))
+        assert w['YTD'][0] == (date(2023, 1, 1), date(2023, 12, 31))
+        assert w['YTD'][1] == (date(2022, 1, 1), date(2022, 12, 31))
+
+    def test_leap_day_through_folds_on_the_prior_year_side(self):
+        w = period_windows(date(2024, 3, 1), 'monday', date(2024, 2, 29))
+        assert w['MTD'][0] == (date(2024, 2, 1), date(2024, 2, 29))
+        assert w['MTD'][1] == (date(2023, 2, 1), date(2023, 2, 28))
+
+
+class TestFetchSpan:
+    def test_covers_every_window(self):
+        w = period_windows(date(2026, 9, 14), 'monday', date(2026, 9, 13))
+        start, end = fetch_span(w)
+        for cur, prior in w.values():
+            for win in (cur, prior):
+                assert start <= win[0] and win[1] <= end
+
+    def test_earliest_start_can_be_the_prior_WEEK_not_the_prior_year_ytd(self):
+        # Early January: the YTD prior window starts 1 Jan of last year, but the
+        # WOW comparison week reaches back further still. Assuming YTD bounds
+        # the fetch would read those days as zero.
+        w = period_windows(date(2025, 1, 6), 'monday', date(2025, 1, 5))
+        start, _end = fetch_span(w)
+        assert start == min(s for cur_pri in w.values() for s, _ in cur_pri)
+        assert start <= w['WOW'][1][0]
+
+    def test_end_is_the_latest_window_end(self):
+        w = period_windows(date(2026, 9, 14), 'monday', date(2026, 9, 13))
+        _start, end = fetch_span(w)
+        assert end == date(2026, 9, 13)
+
+
+class TestShiftYear:
+    def test_leap_day_folds_back_to_feb_28(self):
+        assert shift_year(date(2024, 2, 29)) == date(2023, 2, 28)
+
+
+class TestMonthEndStraddle:
+    """A week that spans a month boundary reports the month that ENDED in it.
+
+    Reported from production on week 36 (31 Aug - 6 Sep), whose MTD sheet showed
+    six days of September. Without this rule a complete month is never reported
+    at all: the last week ending in August stops on the 30th and the next week
+    jumps to September, so August is only ever seen a day short. That happens in
+    every month whose last day is not a Sunday.
+    """
+
+    def _mtd(self, as_of):
+        wk = last_complete_week(as_of)
+        return period_windows(as_of, 'monday', wk[1])['MTD']
+
+    def test_week_36_reports_the_whole_of_august(self):
+        cur, prior = self._mtd(date(2026, 9, 7))       # week 31 Aug - 6 Sep
+        assert cur == (date(2026, 8, 1), date(2026, 8, 31))
+        assert prior == (date(2025, 8, 1), date(2025, 8, 31))
+
+    def test_it_does_NOT_show_the_new_months_first_days(self):
+        cur, _ = self._mtd(date(2026, 9, 7))
+        assert cur[1].month == 8
+
+    def test_a_week_inside_one_month_is_unchanged(self):
+        cur, prior = self._mtd(date(2026, 9, 14))      # week 7-13 Sep
+        assert cur == (date(2026, 9, 1), date(2026, 9, 13))
+        assert prior == (date(2025, 9, 1), date(2025, 9, 13))
+
+    def test_the_week_before_the_boundary_is_unchanged(self):
+        cur, _ = self._mtd(date(2026, 8, 31))          # week 24-30 Aug
+        assert cur == (date(2026, 8, 1), date(2026, 8, 30))
+
+    def test_a_week_spanning_new_year_reports_the_whole_of_december(self):
+        cur, prior = self._mtd(date(2026, 1, 5))       # week 29 Dec - 4 Jan
+        assert cur == (date(2025, 12, 1), date(2025, 12, 31))
+        assert prior == (date(2024, 12, 1), date(2024, 12, 31))
+
+    def test_february_is_reported_to_its_real_last_day(self):
+        # 2026: Feb ends on the 28th, inside the week 23 Feb - 1 Mar.
+        cur, _ = self._mtd(date(2026, 3, 2))
+        assert cur == (date(2026, 2, 1), date(2026, 2, 28))
+
+    def test_a_leap_february_ends_on_the_29th(self):
+        # 2028 is a leap year; Feb 29 falls in the week 28 Feb - 5 Mar.
+        cur, prior = self._mtd(date(2028, 3, 6))
+        assert cur == (date(2028, 2, 1), date(2028, 2, 29))
+        # The prior-year side folds 29 Feb back to the 28th.
+        assert prior == (date(2027, 2, 1), date(2027, 2, 28))
+
+    def test_a_month_ending_on_a_sunday_needs_no_special_case(self):
+        # 31 May 2026 is a Sunday, so that week already ends the month.
+        cur, _ = self._mtd(date(2026, 6, 1))
+        assert cur == (date(2026, 5, 1), date(2026, 5, 31))
+
+    def test_YTD_ends_where_MTD_ends(self):
+        # Originally YTD was left alone by a month straddle, so week 36 showed
+        # MTD = the whole of August beside YTD running to 6 September. YTD then
+        # carried six days the MTD excluded and was not the sum of the months
+        # reported — two columns silently describing different spans.
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 8, 31))
+        assert w['YTD'][0][1] == w['MTD'][0][1]
+
+    def test_the_prior_year_side_ends_there_too(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        assert w['YTD'][1] == (date(2025, 1, 1), date(2025, 8, 31))
+
+    def test_the_week_window_is_untouched_by_the_straddle(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        assert w['WOW'][0] == (date(2026, 8, 31), date(2026, 9, 6))
+
+    def test_fetch_span_still_covers_every_window(self):
+        w = period_windows(date(2026, 9, 7), 'monday', date(2026, 9, 6))
+        start, end = fetch_span(w)
+        for cur, prior in w.values():
+            for win in (cur, prior):
+                assert start <= win[0] and win[1] <= end
+
+
+class TestYearEndStraddle:
+    """The month rule, one level up: a week spanning New Year reports the whole
+    of the year that ended, not the two or three days of the new one.
+
+    A complete year is otherwise never reported either, since 31 December is
+    rarely a Sunday.
+    """
+
+    def _w(self, as_of):
+        wk = last_complete_week(as_of)
+        return period_windows(as_of, 'monday', wk[1])
+
+    def test_the_new_year_week_reports_the_whole_previous_year(self):
+        cur, prior = self._w(date(2026, 1, 5))['YTD']   # week 29 Dec - 4 Jan
+        assert cur == (date(2025, 1, 1), date(2025, 12, 31))
+        assert prior == (date(2024, 1, 1), date(2024, 12, 31))
+
+    def test_it_does_NOT_show_the_new_years_first_days(self):
+        cur, _ = self._w(date(2026, 1, 5))['YTD']
+        assert cur[1].year == 2025
+
+    def test_month_and_year_agree_in_that_week(self):
+        # A complete December sitting inside a complete 2025 — the whole point
+        # of applying the same rule to both.
+        w = self._w(date(2026, 1, 5))
+        assert w['MTD'][0] == (date(2025, 12, 1), date(2025, 12, 31))
+        assert w['YTD'][0] == (date(2025, 1, 1), date(2025, 12, 31))
+        assert w['MTD'][0][1] == w['YTD'][0][1]
+
+    def test_the_following_week_is_normal_year_to_date(self):
+        cur, prior = self._w(date(2026, 1, 12))['YTD']  # week 5-11 Jan
+        assert cur == (date(2026, 1, 1), date(2026, 1, 11))
+        assert prior == (date(2025, 1, 1), date(2025, 1, 11))
+
+    def test_a_month_end_that_is_not_a_year_end_still_ends_YTD(self):
+        # The year rule is not a special case: it is the month rule reaching
+        # December. So an ordinary month end moves YTD as well.
+        cur, _ = self._w(date(2026, 9, 7))['YTD']       # week 31 Aug - 6 Sep
+        assert cur == (date(2026, 1, 1), date(2026, 8, 31))
+
+    def test_the_year_boundary_falls_out_of_the_month_rule(self):
+        # Week 29 Dec - 4 Jan closes December, so month_end(week_begin) is
+        # 31 December and the year is reported whole — the same code path.
+        cur, prior = self._w(date(2026, 1, 5))['YTD']
+        assert cur == (date(2025, 1, 1), date(2025, 12, 31))
+        assert prior == (date(2024, 1, 1), date(2024, 12, 31))
+
+    def test_YTD_and_MTD_agree_in_every_straddling_week_of_a_year(self):
+        # The invariant, swept across a whole year rather than spot-checked:
+        # whenever a week closes a month, both columns end on that month end.
+        from datetime import timedelta
+        day = date(2026, 1, 1)
+        checked = 0
+        while day < date(2027, 1, 1):
+            begin, end = last_complete_week(day)
+            if begin.month != end.month:
+                w = period_windows(day, 'monday', end)
+                assert w['MTD'][0][1] == w['YTD'][0][1] == month_end(begin), day
+                assert w['YTD'][0][0] == date(begin.year, 1, 1), day
+                checked += 1
+            day += timedelta(days=7)
+        assert checked >= 11        # one per month boundary a week can straddle
+
+    def test_an_ad_hoc_later_cutoff_still_wins(self):
+        # Same guard as the month: asking for a later cut-off means asking for
+        # year-to-date at that date.
+        w = period_windows(date(2026, 1, 7), 'monday', None)
+        assert w['YTD'][0] == (date(2026, 1, 1), date(2026, 1, 7))
+
+    def test_a_year_ending_on_a_sunday_needs_no_special_case(self):
+        # 31 Dec 2028 is a Sunday, so that week already ends the year.
+        cur, _ = self._w(date(2029, 1, 1))['YTD']
+        assert cur == (date(2028, 1, 1), date(2028, 12, 31))
+
+    def test_fetch_span_still_covers_every_window(self):
+        w = self._w(date(2026, 1, 5))
+        start, end = fetch_span(w)
+        for cur, prior in w.values():
+            for win in (cur, prior):
+                assert start <= win[0] and win[1] <= end
+
+
+class TestFiftyThreeWeekYear:
+    """A 53-week ISO year has no counterpart week in a 52-week prior year.
+
+    `prior_week_window` falls back to the prior year's LAST week. The path was
+    uncovered, and the workbook's alignment note silently claimed both sides
+    were the same week number because of it. 2026 is a 53-week year, so this
+    fires at the end of this year, not in some distant edge case.
+    """
+
+    def test_week_53_compares_against_week_52_of_the_prior_year(self):
+        # ISO week 53 of 2026 is 2026-12-28..2027-01-03; 2025 has only 52.
+        (cur_from, _), (prior_from, _) = period_windows(
+            date(2027, 1, 4), 'monday')['WTD']
+        assert cur_from.isocalendar().week == 53
+        assert prior_from.isocalendar().week == 52
+        assert prior_from.isocalendar().year == 2025
+
+    def test_the_fallback_keeps_a_whole_week_on_both_sides(self):
+        (cur_from, cur_to), (prior_from, prior_to) = period_windows(
+            date(2027, 1, 4), 'monday')['WTD']
+        assert (cur_to - cur_from).days == 6
+        assert (prior_to - prior_from).days == 6
+        # Same weekday on both sides, so the trading-day mix still matches.
+        assert cur_from.weekday() == prior_from.weekday()
+
+    def test_an_ordinary_week_still_matches_its_own_number(self):
+        (cur_from, _), (prior_from, _) = period_windows(
+            date(2026, 9, 21), 'monday')['WTD']
+        assert cur_from.isocalendar().week == prior_from.isocalendar().week == 38

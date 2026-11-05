@@ -1,0 +1,29 @@
+# Keep line endings sane when the repo is checked out on Windows.
+#
+# Without this, git on Windows rewrites LF to CRLF on checkout. Python does not
+# care, but anything a Linux container or a POSIX shell executes does: a shell
+# script with CRLF fails with the famously unhelpful "\r: command not found",
+# and a .sql file fed to a container can break in stranger ways. The project is
+# now developed on both a Mac and a Windows machine, so this stops being
+# theoretical.
+* text=auto
+
+# Always LF — these run on Linux (the server, the CI runner, the containers)
+# no matter which machine edited them.
+*.sh        text eol=lf
+*.sql       text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Dockerfile  text eol=lf
+
+# Always CRLF — only ever run by Windows.
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Never touched.
+*.png binary
+*.jpg binary
+*.xlsx binary
+*.gz binary
+*.zip binary

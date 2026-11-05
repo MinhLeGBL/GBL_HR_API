@@ -1,0 +1,80 @@
+# Local development databases. Identical on macOS and Windows — Docker Desktop
+# runs Linux containers on both, so these are the same images and the same
+# commands on either machine.
+#
+#   cd dev && docker compose up -d
+#
+# PORTS ARE DELIBERATELY NOT THE DEFAULTS. 55432 and 51521, not 5432 and 1521.
+# Two reasons, and the second is the important one:
+#   - they cannot collide with a Postgres already installed on the machine;
+#   - nothing can connect here by accident thinking it is somewhere else, and
+#     nothing pointed here can reach production. The whole point of this setup
+#     is that local work cannot touch the live database, so the address being
+#     obviously different is a feature.
+#
+# Data lives in named volumes and survives `docker compose down`. To start
+# genuinely clean, `docker compose down -v` — that deletes both databases.
+
+name: gbl-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gbl-dev-postgres
+    environment:
+      POSTGRES_USER: gbl
+      POSTGRES_PASSWORD: gbl_dev_password
+      POSTGRES_DB: gbl_master
+      # The application's SQL is unquoted and case-insensitive; keeping the
+      # collation fixed means ORDER BY on Vietnamese text sorts the same here
+      # as on the server rather than following the host's locale.
+      LANG: C.UTF-8
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gbl -d gbl_master"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  oracle:
+    # Oracle Database Free 23ai. Production is 12c Standard Edition, but every
+    # construct this application uses (NVL, TRUNC, TO_CHAR, TO_DATE, DUAL,
+    # analytic functions) is unchanged across those releases. Pin
+    # gvenzl/oracle-xe:21-slim instead to sit closer to production.
+    #
+    # First start takes several minutes while the database is created; every
+    # start after that is quick. Watch it with `docker compose logs -f oracle`.
+    image: gvenzl/oracle-free:23-slim
+    container_name: gbl-dev-oracle
+    environment:
+      ORACLE_PASSWORD: oracle_dev_password
+      # Creates the RPS user that owns the RetailPro tables. The application
+      # connects as this user and runs ALTER SESSION SET CURRENT_SCHEMA = RPS,
+      # so both `DOCUMENT` and `RPS.DOCUMENT` resolve, exactly as they do in
+      # production.
+      APP_USER: RPS
+      APP_USER_PASSWORD: rps_dev_password
+    ports:
+      - "51521:1521"
+    volumes:
+      # Named volume only — NO bind mount. A bind mount of a repo directory is
+      # a reliable source of grief on Windows (Docker Desktop file sharing,
+      # path translation, line endings on mounted .sql), and the only thing it
+      # was carrying was two GRANT statements. `load_seed.py` issues those over
+      # SQL instead, which works the same on every machine.
+      - oradata:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 300s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  oradata:

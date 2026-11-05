@@ -47,5 +47,10 @@ black~=23.11.0
 flake8~=6.1.0
 isort~=5.12.0
 
+# LLM commentary for the periodic report email.
+# Optional at runtime: with no ANTHROPIC_API_KEY the report is still generated
+# and sent, just with the commentary paragraph left empty.
+anthropic~=0.69.0
+
 # Production Server
 gunicorn~=21.2.0

@@ -1,0 +1,936 @@
+# Weekly Report — Changelog
+
+## 0.1.0 — 2026-09-16
+
+Phase 2. Turns the standalone weekly Excel generator into a real module so the
+report can be previewed, approved and emailed from the app.
+
+### Added
+- `period.py`, `queries.py`, `aggregate.py` — the aggregation logic lifted out
+  of `scripts/reports/generate_periodic_report.py`. Reconciled against live
+  Oracle to 1e-16 relative in Phase 1; moved verbatim.
+- `excel.py` — the workbook renderer, also lifted from the script. The script
+  now imports it, so the downloaded file, the emailed attachment and the CLI
+  output are the same bytes and the layout cannot drift between them.
+- `period_windows(..., through=...)` — ends the MTD and YTD windows on a day
+  earlier than `as_of`. The scheduled Monday 03:00 run stops both on the Sunday
+  that closes the reported week: at 03:00 the current Monday carries almost no
+  sales while the prior-year side carries a full trading day, which understates
+  MTD and YTD (severely in the first days of a month). The month and year are
+  taken from `through`, so a run on the 1st reports the previous month in full.
+- `service.py` — snapshot generation, email drafting, approval and dispatch
+  state. Figures are SNAPSHOT at generation, never recomputed on read: Oracle is
+  live, so a recompute would mean the numbers approved are not the numbers sent.
+- `commentary.py` — the LLM-written analysis for the email. Best-effort; a
+  failure leaves the placeholder empty rather than failing the run.
+- Four tables: `periodic_report_runs`, `_recipients`, `_settings`, `_sends`.
+  The .xlsx is stored in `runs.workbook` rather than on disk because
+  `deploy.yml` runs `rm -rf document/` on the server.
+- `section_required()` in `app/core/auth/middleware.py`, and two sections:
+  `WEEKLY_REPORT` (view) and `WEEKLY_REPORT` (edit, approve,
+  configure recipients).
+
+
+## 0.2.0 — 2026-09-16
+
+### Changed
+- **The email template is now the company's own Vietnamese wording.** The fixed
+  text (greeting, the sentence naming the three parts, the unit declaration, the
+  sign-off) is template; only the numbered analysis is written by the model.
+- New placeholders for that wording: `{{week_no}}`, `{{week_year}}`,
+  `{{prior_week_no}}`, `{{month_no}}`, `{{mtd_range}}`, `{{ytd_range}}`, plus
+  `{{week_range}}` now rendered day-first (`07/09–13/09`). `{{month_no}}` comes
+  from the MTD window rather than `as_of`, so a run on Monday the 1st names the
+  month that just ended instead of the new one.
+- `commentary.py` rewritten to produce the three-part analysis in Vietnamese,
+  in the house style: decompose a revenue move into its drivers, label
+  "Điểm tích cực:" / "Cần lưu ý:", locate a problem in time by comparing the
+  week against the month, and name store outliers.
+
+### Added
+- **Pre-computed derived facts.** Every cross-period ratio the house style
+  quotes — a week's share of the month's returns, the gap between the week's and
+  the month's discount rate — is calculated in Python and handed to the model,
+  which is told not to compute anything new. An LLM dividing 375 by 489 in prose
+  is usually right and occasionally not, and this email goes to the board.
+- **Notable-movement detection** for the "fluctuations to watch" the user asked
+  for: a store is named when its discount rate moves ≥ 5 percentage points or
+  its sales move ≥ 15%. Thresholds rather than a forced top-N, so a quiet week
+  flags nothing instead of manufacturing significance.
+- `anthropic~=0.69.0` in `requirements.txt`. Optional at runtime — with no
+  `ANTHROPIC_API_KEY` the report still generates and sends, with the analysis
+  paragraph empty.
+
+### Fixed
+- `build_prompt` tolerates a partial payload instead of raising, so a run
+  missing one period block still produces analysis of the blocks it has.
+
+
+## 0.2.1 — 2026-09-16
+
+### Fixed
+- **Markdown in a plain-text email.** The first live generation wrapped its
+  section headings in `**bold**`, which renders literally in a plain-text body.
+  The system prompt now forbids Markdown explicitly, and `strip_markdown()`
+  removes `**bold**` and leading `#` headings as a backstop. Deliberately
+  narrow — a lone `*` is left alone, since a broader strip would risk mangling
+  punctuation in Vietnamese prose.
+
+### Verified against live data (2026-09-16)
+First real run on Week 37 2026: 694 words, ~50s, on `claude-opus-5`.
+**Every one of 11 spot-checked figures reconciled exactly to the payload** —
+store-level sales, bill-count changes, YTD rates and the prior-year HQ
+comparison. The model used the pre-computed 76.6% returns-concentration figure
+rather than dividing 375 by 489 itself, which is what the arithmetic policy is
+for. The analysis reproduced every move of the house style: driver
+decomposition, "Điểm tích cực:" / "Cần lưu ý:", locating the heavy discounting
+in the early month from the week-vs-month gap, and the section-3 observation
+that the year grew on bigger baskets while September reversed to more, smaller
+ones.
+
+
+## 0.3.0 — 2026-09-16
+
+The email is now **HTML**, following the company's own formatting (see the
+screenshot at `document/template/`): bold section headings, bullet points, and
+bold on each claim and its figure — with supporting numbers in parentheses left
+plain.
+
+### Changed
+- **Reversed the 0.2.1 Markdown strip.** That fix treated `**bold**` as an
+  artifact; it is the intended format. The email had to become HTML for bold
+  and bullets to mean anything, which is what this release does.
+- `commentary.py` now asks for 2-4 bullets per section with bold on the claim
+  and its number. Target length dropped 600 → 400 words: bullets are terser
+  than flowing prose, which is the point of the change.
+
+### Added
+- `render.py` — renders the stored draft two ways. `markdown_to_html()` for the
+  HTML part (inline styles only; mail clients strip `<style>` blocks, and Gmail
+  ignores everything but inline CSS), `to_plain_text()` for the plain
+  alternative. Everything is HTML-escaped BEFORE markup is inserted, so a stray
+  `<` in an edited draft cannot break the email or inject anything.
+- Messages are now `multipart/alternative`. **The plain part is never dropped**
+  — some clients and most archiving tools refuse HTML, and a recipient should
+  never receive an empty message.
+
+### Why the draft stays lightly-marked text rather than HTML
+One editable source of truth. A person can edit `**bold**` and `- ` in a
+textarea without fighting markup, and both wire formats are derived from it, so
+they cannot disagree.
+
+### Verified against live data (2026-09-16)
+Regenerated all three stored weeks. Week 37: 629 words, 11 bullets, ~35s.
+**9 further figures spot-checked and all 9 reconciled exactly** to the payload
+(store-level sales, AOV, returns percentages, prior-year YTD rates) — 20 of 20
+across both format revisions.
+
+
+## 0.4.0 — 2026-09-16
+
+### Removed
+- **`POST /runs/generate`.** There is no longer any way to generate a report
+  over HTTP. The analysis costs money and is written exactly once per report,
+  by the Monday 03:00 job.
+
+  The endpoint existed so a run taken before a store finished posting could be
+  refreshed. That reasoning was wrong: a sale posted late carries the later
+  post date, so it falls into the NEXT week's window and re-running today
+  cannot pull it back. The button solved nothing while keeping a token-spend
+  path open on every press.
+
+  Recovery from a failed Monday run is a manual job run on the server — see
+  `scripts/jobs/README.md`.
+
+- **`draft_stale`**, added earlier the same day. It flagged an analysis whose
+  figures had moved under it, which could only happen through the refresh path
+  above. With that gone nothing can set it, and unreachable state is a trap for
+  the next reader. Column dropped.
+
+### Added
+- Guard against replacing a run while it is being sent. Resetting the row under
+  an in-flight dispatcher would hand recipients the old workbook against a run
+  claiming new figures — a seconds-wide window, but a confusing one.
+- `tests/unit/modules/weekly_report/test_routes.py` — HTTP-layer tests,
+  including one asserting the generate endpoint does not exist and one asserting
+  `routes.py` does not even mention `draft_email`, so a future refactor cannot
+  silently re-open the spend.
+
+### Cost
+One model call per week: the Monday 03:00 job. Roughly $0.13 a run, ~$7/year.
+`draft_email=False` survives only for the CLI's `--no-email-draft` flag, which
+produces figures without paying for prose; nothing over HTTP reaches it.
+
+
+## 0.5.0 — 2026-09-16
+
+A failed generation is now visible and recoverable, without reopening a casual
+spend path.
+
+### Added
+- **`commentary_error`** on `periodic_report_runs` (with an `ADD COLUMN IF NOT
+  EXISTS` upgrade path). Records WHY the analysis is missing. Previously a
+  failure only printed a warning to the job log, so a dead API key looked
+  exactly like a deliberately disabled one — weeks of analysis-free reports
+  could have gone to the board before anyone asked why.
+  `draft_email()` now returns `(subject, body, commentary_error)`.
+  An unconfigured key counts as a failure: `generate_commentary()` returns `''`
+  rather than raising, and that is still a missing analysis.
+- **`POST /runs/<id>/retry`** — re-runs a generation that FAILED. One model call.
+
+### The guard is the point
+It is refused unless something actually went wrong:
+- healthy run → `INVALID_STATE` ("edit the text instead of regenerating it")
+- already approved or sent → `INVALID_STATE`
+- run not found → `NOT_FOUND`
+
+So it cannot become the casual regenerate button removed in 0.4.0. Verified
+against the three live stored runs: all three refuse, no API call made.
+
+### One path, not two
+Whether the whole run failed or only the analysis did, the retry regenerates
+**everything** — figures, workbook and analysis together.
+
+Re-fetching is safe here, for the same reason the refresh button was removed:
+every window ends in the past (the closed Mon-Sun week; MTD/YTD through that
+Sunday), and a sale posted late carries the later post date, so it lands in the
+NEXT week's window rather than changing this one. Re-querying a closed window
+returns what it returned before. An earlier draft branched — re-draft from the
+stored payload when only the prose failed — which was more code for no benefit.
+
+A retry whose analysis fails again returns `COMMENTARY_FAILED` (502) rather than
+reporting success; the refreshed figures are still saved.
+
+
+## 0.6.0 — 2026-09-16
+
+Recipients are now independent of approval.
+
+### The rule
+Approval locks the **subject, body and figures** — what was signed off. It does
+NOT lock **who receives them**. The recipient list is global and changes over
+time, so a past report can be forwarded to someone added since.
+
+### Added
+- **`POST /runs/<id>/resend`** — send an already-sent report again, to the
+  CURRENT recipient list. No fresh approval: the content is unchanged and was
+  already approved. Still gated by the APPROVE section.
+- `repository.requeue_run()`, guarded on `status = 'sent'` and kept separate
+  from `approve_run` so a re-send and a first approval cannot stand in for each
+  other.
+
+### Why this works without a schema change
+Nothing about recipients was ever stored on a run — `create_run` has no
+recipient parameter, and `send_run` reads the live list at send time. A test now
+pins that, because it is the guarantee the whole feature rests on.
+
+### Note on `periodic_report_sends`
+Kept as an operational log of send attempts (success, failure detail, timestamp),
+which is what makes a failed delivery diagnosable. It is no longer presented as
+"who received this report" — the UI shows a short "last sent" line instead.
+
+
+## 0.7.0 — 2026-09-16
+
+**Approval and sending are now separate decisions**, with one Send action
+covering both a first send and a re-send.
+
+### Changed
+- **`POST /runs/<id>/approve`** signs off the CONTENT only. It takes no body,
+  queues nothing, and **no longer requires recipients** — the list is edited
+  independently and may legitimately be empty at that moment.
+  `approve_run` sets `scheduled_send_at = NULL`, which is what keeps an approved
+  run out of `claim_due_runs`: the dispatcher matches on
+  `scheduled_send_at <= now`, and NULL never compares true. So "approved" and
+  "queued" are distinguishable without another column.
+- **`POST /runs/<id>/send`** replaces `/resend`. One endpoint for both cases,
+  because sending the first time and sending again differ only in what the row
+  said beforehand. Guarded on `status IN ('approved', 'sent')`, so a run still
+  awaiting approval cannot be sent and one mid-send cannot be disturbed.
+  Recipients ARE required here — a send with no visible addressee is refused by
+  the mailer anyway, so it is better refused up front.
+- **A schedule passed to `/send` is saved as the new default**, the same
+  contract as the recipient list: set it once and it stays until changed.
+
+### Removed
+- `resend()` and `requeue_run`'s sent-only guard — both folded into `send()`
+  and `queue_run`.
+
+
+## 0.7.1 — 2026-09-17
+
+Two bugs found on the deployed system.
+
+### Fixed: a schedule was interpreted in the SERVER's timezone, not the user's
+The user picked **00:30** and it was stored as **00:30 UTC** — 07:30 in Vietnam.
+The browser then faithfully displayed 07:30 for a time typed as 00:30, and the
+run was not due for another seven hours.
+
+`datetime.now()` on a UTC server is naive UTC, and that is what reached a
+`TIMESTAMPTZ` column. Schedules are now computed as timezone-AWARE values in a
+configurable report timezone (`REPORT_TIMEZONE`, default `Asia/Ho_Chi_Minh`),
+so `00:30` means 00:30 where the user is.
+
+Same class of bug as the systemd timer fixed in 0.7.0 — that fix addressed the
+TIMER and left the APPLICATION untouched.
+
+### Fixed: the week selector showed the same week twice
+Runs are keyed by `as_of`, but **every day Mon-Sun reports the same closed
+week** — so a manual run mid-week created a second row for a week that already
+had one. `generate_run` now normalises `as_of` to the canonical day for the week
+being reported (the day after it ends), so `ON CONFLICT (as_of)` replaces the
+existing run, which is what "run it again for this week" should mean.
+
+### Also
+`through` now defaults to that same closing Sunday. Previously only the job
+passed it, so any other caller silently got MTD/YTD windows running to the
+Monday — a day with almost no sales measured against a full prior-year day. The
+correct behaviour should not depend on the caller remembering.
+
+
+## 0.8.0 — 2026-09-17
+
+Past weeks can be backfilled as **historical** reports, so the week selector
+covers history rather than only weeks the job happened to run.
+
+### Why the selector only showed four weeks
+It lists GENERATED REPORTS, not available data. A week appeared only once the
+job had run for it — three had been generated by hand and one by a manual run —
+while Oracle holds data back to 2024.
+
+### Added
+- **`historical` status.** Figures, workbook and the email template, with **no
+  analysis and no API call**. Editable (a person may write the analysis by hand)
+  and sendable, but never approvable — it was never a live draft. Kept distinct
+  from `pending_approval` so ~40 past weeks don't all claim to need sign-off and
+  bury the real Monday report.
+- **`scripts/jobs/periodic_report_backfill.py`** with `--from/--to/--dry-run`.
+  **One Oracle fetch** covers the whole range and each week is aggregated in
+  memory — one query against the live database instead of one history-spanning
+  query per week.
+- **`service.backfill_week()`**. Never overwrites an existing run, so weeks that
+  already carry a real, paid analysis are left untouched. Safe to re-run.
+
+### Guarantees, pinned by tests
+- **No model call**, and no path from a historical report to one:
+  `retry_generation` refuses it.
+- **Backfilled figures equal a live generation** of the same week.
+- A week's workbook contains only rows from **its own span** — the shared fetch
+  must not put months of later data into week 1's Raw Data sheet.
+
+### Verified against production (dry run, 2026-09-17)
+2026 through ISO week 37: **37 weeks, 3 already exist (kept), 34 to create.**
+
+
+## 0.8.1 — 2026-09-18
+
+### Fixed: a complete month was never reported
+Reported from production on week 36 (31 Aug - 6 Sep), whose MTD sheet showed six
+days of September.
+
+A week that straddles a month boundary now reports the month that **ended**
+inside it, in full. Week 36's MTD is the whole of August.
+
+Without this, a complete month is never reported at all: the last week ending in
+August stops on the 30th, and the next week jumps to September — so August is
+only ever seen a day short. That happens in **every month whose last day is not
+a Sunday**. Six days of a new month is also a poor comparison against six days
+of the prior year, while a complete month is the natural unit.
+
+The rule applies only when the report is **anchored to that week**
+(`through <= week_end`), which production always is. An ad-hoc run asking for a
+later cut-off — `--as-of 9 Sep` with no `--through` — still gets month-to-date on
+the 9th.
+
+A week spanning New Year gets the same treatment: it now reports the whole of
+December, which it never did before.
+
+### Known, not changed at the time
+YTD had the same flaw one level up. Fixed in 0.8.2 below.
+
+
+## 0.8.2 — 2026-09-18
+
+### Fixed: a complete year was never reported either
+The same rule as 0.8.1, one level up. A week spanning New Year now reports the
+whole of the year that **ended**, instead of the two or three days of the new
+one — which would otherwise have sat next to a complete December and said far
+less.
+
+A complete year was likewise never reported at all, since 31 December is rarely
+a Sunday.
+
+Affects exactly one week a year, and it is the week where YTD was least useful.
+Every other week is untouched. The same `through <= week_end` guard applies, so
+an ad-hoc run asking for a later cut-off still gets year-to-date at that date.
+
+The two rules now agree in that week: a complete December inside a complete
+prior year.
+
+
+## 0.9.0 — 2026-09-19
+
+### Added
+- The prior-period block on every period sheet (Week by Week, MTD, YTD) is now
+  an Excel column group that opens COLLAPSED. The three blocks together are
+  ~1543px, which overflows a 15" screen; the prior figures are reference
+  material while the current figures and the deltas are what gets read.
+  Collapsing puts the delta block on screen beside the current one, and the
+  outline button restores the prior figures in one click.
+  - The `+` control sits on the first delta column — Excel draws it on the
+    column AFTER the group (`summaryRight`) and marks that column `collapsed`,
+    mirroring the summary-cell rule the existing row outline already follows
+    with `summaryBelow`. Both outlines coexist in one `outlinePr`.
+  - Implemented by setting `outlineLevel`/`hidden` per column rather than with
+    `column_dimensions.group()`. That helper deletes the per-column dimensions
+    across the range and leaves one spanning dimension keyed to the first
+    column, so the remaining columns fall back to Excel's default width of 13:
+    measured, `group('J','P')` over widths `[10,8,7,9,9,8,9]` yields
+    `[10,13,13,13,13,13,13]`, which would have made the block wider on expand
+    than the layout is sized for.
+
+### Tests
+- New `tests/unit/modules/weekly_report/test_excel.py` — 37 tests, the first
+  direct coverage of the workbook layout. Every assertion runs against a real
+  save/load round trip, since the outline only counts if it survives into the
+  file Excel opens. Confirmed to fail against the previous renderer (9 failures
+  across the three sheets) before being committed.
+- Covers the guard against the `group()` regression, that the current and delta
+  blocks stay visible, that the existing row outline and `summaryBelow` still
+  work alongside the new column outline, and that `Raw Data` is untouched.
+
+
+## 0.9.1 — 2026-09-21
+
+### Fixed
+- **YTD now ends where MTD ends.** The straddle rule added in 0.8.x moved MTD
+  to the completed month and YTD to the completed year, but YTD was left alone
+  by a MONTH boundary. Week 36 of 2026 therefore reported MTD as the whole of
+  August beside a YTD running to 6 September — so YTD carried six days the MTD
+  excluded and was not the sum of the months shown. Two columns silently
+  describing different spans.
+  - The YTD branch tested `week_begin.year != week_end.year`; it now uses the
+    same `week_begin.month != week_end.month` condition as MTD, with
+    `month_end(week_begin)` as the end date.
+  - This SUBSUMES the year-boundary case rather than special-casing it: the
+    week spanning New Year closes December, so `month_end` is 31 December and
+    the year is still reported whole. One rule, two effects.
+  - Effect on week 36: YTD 1 Jan–6 Sep becomes 1 Jan–31 Aug; sales
+    158,837,587,819 → 155,157,421,731, bills 4,534 → 4,446.
+
+### Tests
+- Two tests asserting the old behaviour were replaced — both were written with
+  the original straddle work and encoded the gap.
+- Added a sweep that walks every week of a year and asserts MTD and YTD end
+  together whenever a week closes a month, rather than spot-checking one date.
+- 1197 tests pass.
+
+### Note
+Stored runs keep the figures they were generated with, so eight existing runs
+still carry the old YTD: seven `historical` from the backfill, plus week 36,
+which was regenerated by hand after this change.
+
+
+## 0.10.0 — 2026-09-21
+
+### Added
+- **WTD period** — the reported week against the SAME ISO WEEK NUMBER a year
+  earlier. Week 38 of 2026 (14–20 Sep) pairs with week 38 of 2025 (15–21 Sep).
+  - Not `shift_year`. MTD and YTD align on the calendar date, which is right
+    for a month or a year, but a week shifted by date lands on different
+    weekdays and carries a different number of Saturdays. Retail weeks are only
+    comparable weekday-for-weekday.
+  - `prior_iso_week()` takes the ISO week from a day three into the week, so a
+    Sunday-start week works too, and places the prior-year anchor on the same
+    ISO weekday. A year with no week 53 falls back to its week 52.
+  - Both WTD windows carry their ISO label, so the page reads
+    "Week 38 2026 vs Week 38 2025" rather than leaving the reader to check the
+    dates really are the same week.
+- `PERIOD_TITLES` — display names for every period, used by the payload.
+
+### Changed
+- `PERIOD_LABELS` is now `('WTD', 'MTD', 'YTD', 'WOW')`. WTD, MTD and YTD all
+  compare against a year earlier; WOW is the odd one out and sits last.
+
+### Deliberately unchanged
+- **WOW, MTD and YTD windows.** Verified against staging across 4,380 window
+  comparisons — two years of dates, both through-modes — with 0 differences.
+- **The workbook.** Still three sheets in the same order; WTD is an app-only
+  view, so the emailed attachment is untouched. `excel.py` iterates
+  `SHEET_NAMES` rather than `PERIOD_LABELS` to keep it that way.
+- **The written analysis and the email summary lines.** Both now iterate
+  `COMMENTARY_LABELS` — the same three periods as before — so WTD costs no
+  tokens and narrates nothing.
+
+### Tests
+- 1201 pass. Two tests were updated because the behaviour they pinned
+  deliberately changed: the payload now carries four periods, and WTD's prior
+  window can begin earlier than YTD's in early January, so the fetch span is no
+  longer bounded by YTD. Added a test for the property that actually matters —
+  the span covers every window.
+
+
+## 0.11.0 — 2026-09-21
+
+### Changed
+- **Renamed from "periodic report" to "weekly report"**, which is what the
+  feature is actually called. Module `app/modules/weekly_report/`, class
+  `WeeklyReportService`, blueprint `weekly_report_bp`, URL
+  `/api/v1/weekly-report`, downloaded file `weekly_report_<date>.xlsx`.
+  - `/api/v1/periodic-report` is kept as a TEMPORARY alias so the two repos'
+    independent deploys cannot leave the page calling a path that no longer
+    exists. Remove it once the frontend rename has been live a while.
+- **One permission section.** `PERIODIC_REPORT` and `PERIODIC_REPORT_APPROVE`
+  collapse into `WEEKLY_REPORT`: access to the page is access to the page, the
+  same as every other feature. Splitting view from approve/send bought nothing
+  — nobody was granted the view without needing to act on it — and only made
+  this page inconsistent.
+  - `_migrate_periodic_report_to_weekly()` carries grants over as a UNION, so
+    anyone holding EITHER old section holds the new one. It is idempotent and
+    runs from `init_db.py`.
+  - This WIDENS access: a view-only holder can now approve and send.
+
+### Deliberately NOT renamed
+- The four `periodic_report_*` tables. Renaming them is a migration over live
+  data that nobody ever sees.
+- `scripts/jobs/periodic_report_*.py` and the `gbl-periodic-report` systemd
+  units. A timer pointing at a moved script fails SILENTLY — the Monday report
+  simply never runs. Both are recorded in CLAUDE.md.
+
+### Future idea, not built
+- Per-user views of the page — e.g. a different recipient list per user.
+  Raised 2026-09-21; not a priority.
+
+
+## 0.12.0 — 2026-09-21
+
+### Added
+- **Average revenue by weekday**, in every period block of the payload, for the
+  chart view behind each tab. Seven entries, Monday first, each carrying the
+  weekday's total, how many times it occurred, and the average.
+  - Averaged over CALENDAR occurrences, not over days that traded. A Monday
+    with no sales is a real zero and pulls the Monday average down; counting
+    only days with rows would quietly report the average of the Mondays that
+    went well.
+  - A weekday the window never contains gets `average: None`, not zero — a zero
+    would assert that trading happened and earned nothing.
+  - Revenue is `sale_net - return_net`, the same `total_sales` the tables show,
+    so the seven bars sum back to the period total. A test asserts this for all
+    four periods; verified against live Oracle to 0.0m in each.
+  - Monday first, matching `week_start='monday'` and every week label the
+    report prints.
+
+### Note
+Computed at generation because the daily rows are not stored — the snapshot is
+all the page ever sees. Reports generated before this release carry no weekday
+block and never will; the page says so rather than drawing an empty chart.
+
+
+## 0.13.0 — 2026-09-21
+
+### Added
+- **`--force` and `--keep-analysis`** on the generate job, for re-rendering a
+  stored week because the REPORT changed rather than the data — a new period,
+  a corrected window, a new view.
+
+      PYTHONPATH=. python scripts/jobs/periodic_report_generate.py \
+          --as-of 2026-09-21 --force --keep-analysis
+
+  - `--force` lifts the guard on a week already `sent`. That guard exists so a
+    re-render cannot quietly replace the record of what was emailed; what
+    actually went out lives in `weekly_report_sends` and is untouched. It does
+    NOT open the `sending` window — recipients would get the old workbook
+    against a rewritten run, and no version of that is safe.
+  - `--keep-analysis` carries the stored subject and body across verbatim,
+    including human edits, and implies `--no-email-draft`. Re-rendering figures
+    should neither discard prose somebody paid for nor quietly spend a model
+    call replacing it. Refused alongside drafting, and refused when there is no
+    stored run to keep anything from.
+
+### Why
+Adding WTD and then the weekday chart each meant re-rendering a stored week
+without touching its prose. Both times that was done by hand-editing the
+database: stash the analysis, clear the status, regenerate, restore. Three
+occurrences is enough to make it a flag.
+
+
+## 0.14.0 — 2026-09-21
+
+### Added
+- **`--overwrite` on the backfill**, for re-rendering weeks the job itself
+  produced after the REPORT changed — a new period, a new view.
+
+      PYTHONPATH=. python scripts/jobs/periodic_report_backfill.py \
+          --from 2026-01-01 --to 2026-09-20 --overwrite
+
+  Deliberately narrow: only `historical` runs are replaced. A week that was
+  approved or sent carries prose this job does not write and recipients have
+  read; replacing it would destroy the analysis and silently contradict a
+  delivered email. Those weeks are skipped, counted as `protected`, and the
+  run prints the `generate --force --keep-analysis` command for them.
+
+### Note
+Used to give all 38 stored reports the WTD period and the weekday chart data:
+34 historical weeks via `--overwrite`, and the four carrying analysis via
+`--force --keep-analysis`. Re-rendering clears approval state, so weeks 35, 37
+and 38 dropped from `sent` back to `pending_approval` — the send records in
+`weekly_report_sends` are untouched, but the page will ask for approval again.
+
+
+## 0.15.0 — 2026-09-21
+
+### Added
+- **`qty_returned` as a reported metric**, immediately after `returns_value` in
+  every block of every period — tables, workbook and the model's prompt (where
+  it is `Số lượng hàng trả lại`, formatted as a count).
+  - Already summed as a component since the module existed; only ever exposed
+    now. The value of what came back and how many items did are different
+    problems: 3 items at ~44m each this week against a 23m year-to-date
+    average is a fact the đồng figure alone conceals.
+  - Joins `LOWER_IS_BETTER` beside `returns_value` — more returned stock is a
+    loss whether measured in đồng or in items.
+
+### Note
+Eight metrics per block now widens a fully expanded sheet past what a 15-inch
+screen shows. It still fits because the prior block opens COLLAPSED (0.9.0),
+which hides one whole block — that change is now load-bearing rather than a
+convenience.
+
+Existing snapshots do not carry the column. Re-render with
+`--overwrite` for historical weeks and `--force --keep-analysis` for the rest.
+
+
+
+## 0.16.0 — 2026-09-22
+
+### Added
+- **The sent email now appears in the company mailbox's Sent folder.**
+  `app/core/mail/sent_folder.py` — after a successful SMTP send the message is
+  also filed into the mailbox over IMAP.
+  - SMTP delivers a message; it never files a copy anywhere. The Sent folder
+    lives on the IMAP server, and the only thing that ever puts a message there
+    is a client doing a second step after sending — an IMAP `APPEND`. Outlook,
+    Thunderbird and Apple Mail all do both halves, which is why mail sent by
+    hand appeared in Sent and mail sent by this tool did not. (Gmail is the
+    exception people remember; it files SMTP sends itself, because the send
+    passes through Google's own servers.)
+  - **The folder is discovered, not guessed** — the RFC 6154 `\Sent`
+    special-use flag first, then `Sent` / `INBOX.Sent` / `Sent Items` and the
+    rest by name. A guess would file the copy somewhere nobody reads.
+  - **Best effort, never fatal.** By the time it runs the mail is already
+    delivered; a failure means a missing copy, not a failed send, and raising
+    would make a retry email the board twice. Failures come back in the send
+    detail (`sent via …; no Sent copy (<reason>)`), which is stored in
+    `weekly_report_sends` and shown on the page.
+  - Carries its own socket timeout, for the same reason: a mailbox that accepts
+    the connection and then stops talking must not hang the dispatch job over a
+    cosmetic copy.
+  - Bcc recipients do not appear in the copy — bcc is envelope-only and never a
+    header, and writing it in to make the copy fuller would expose the hidden
+    recipients to everyone. The full envelope stays in `weekly_report_sends`.
+  - **No `.env` change needed**: `IMAP_HOST` falls back to `SMTP_HOST` and the
+    credentials to `SMTP_USER` / `SMTP_PASSWORD`. Override any of them —
+    `IMAP_PORT` (993), `IMAP_SECURITY`, `IMAP_SENT_FOLDER`, `IMAP_TIMEOUT` — or
+    set `MAIL_FILE_SENT=false` to switch the whole thing off.
+- `scripts/jobs/mail_sent_folder_check.py` — proves login, lists the mailbox's
+  folders and names the one that would be chosen. **Sends nothing**, so it is
+  safe against the live mailbox; `--append-test` additionally files one
+  throwaway message to prove the `APPEND` itself.
+
+### Note
+Only applies to mail sent from here from now on. Reports already emailed have no
+Sent copy and cannot be given one retroactively.
+
+**`mail.globallink.vn` needs no TLS special-casing.** Verified from outside: IMAP
+993 and SMTP 587 STARTTLS both present a valid RapidSSL/DigiCert certificate for
+the host, chaining to DigiCert Global Root G2. If you ever see
+`CERTIFICATE_VERIFY_FAILED — self-signed certificate in certificate chain` from
+this server, **suspect the client, not the mailbox**: a Python whose trust store
+is empty fails exactly that way against every host alive, including google.com.
+That is why a rejected certificate is reported separately from "could not reach"
+— they point at different machines. Check with:
+
+    python -c "import ssl; print(len(ssl.create_default_context().get_ca_certs()))"
+
+A `0` there is the whole diagnosis. (On macOS python.org builds, the fix is to
+run `Install Certificates.command`, or to point `SSL_CERT_FILE` at
+`certifi.where()`. The Linux server uses the system bundle and is unaffected.)
+
+
+## 0.17.0 — 2026-09-22
+
+### Changed
+- **The analysis and the emailed workbook now cover WTD instead of WOW.**
+  Readers said the year-on-year week is the more useful comparison.
+  `COMMENTARY_LABELS` is `('WTD', 'MTD', 'YTD')` and `SHEET_NAMES` is
+  `{'WTD', 'MTD', 'YTD'}`.
+  - **All three parts are now the same comparison** — this period against the
+    same period a year earlier. Part 1 used to be week-over-week while parts 2
+    and 3 were year-over-year; the model had to be told about the mismatch and
+    the reader had to keep track of it.
+  - **WOW is unchanged and still a tab on the page.** It is simply no longer
+    narrated or exported. `PERIOD_LABELS` still carries all four, and
+    `period_windows()` still computes the WOW window.
+  - The WTD sheet names the ISO week on both sides (`Week 38 2026 vs Week 38
+    2025`) rather than two date ranges, and its note warns that the calendar
+    dates differ by a day or two — both sides are whole Monday-to-Sunday weeks,
+    so the weekday mix matches and the dates cannot.
+- **The model is told explicitly that part 1 is NOT week-over-week.** The prompt
+  said "Tuần X so với Tuần Y", which it was free to read as the previous week.
+  Left alone it would have narrated the right figures under the wrong baseline —
+  the kind of error that reads perfectly plausibly.
+- **`{{prior_week_no}}` now resolves to the same number as `{{week_no}}`**,
+  because the comparison week IS week N, a year earlier. New placeholder
+  `{{prior_week_year}}`, and `DEFAULT_BODY_TEMPLATE`'s opening sentence becomes
+  `Tuần {{week_no}}/{{week_year}} so với Tuần {{prior_week_no}}/{{prior_week_year}}`.
+  Without both years the email announces "Tuần 38 so với Tuần 38".
+
+### ⚠ Requires a data migration — the template is NOT in git
+The live template lives in `periodic_report_settings.body_template`, so
+deploying the code alone leaves the email announcing the wrong comparison.
+Run, from the server:
+
+    PYTHONPATH=. .venv/bin/python \
+        scripts/database/migrate_weekly_report_yoy_template.py --apply
+
+Dry run by default; `--apply` writes. It rewrites ONLY the exact sentence it
+knows, so a hand-edited template is left alone and printed for a human to judge,
+and it is idempotent. Checked against production 2026-09-22: the stored template
+is the unmodified default, so it matches.
+
+### Note
+Existing snapshots carry the OLD store order — the row order is baked into the
+stored payload, not applied on read. Re-render to pick up the new one.
+
+Otherwise existing snapshots are unaffected — they store figures, not sheets,
+and WTD has been in every payload since 0.13.0. But a stored run's WORKBOOK and ANALYSIS
+were rendered under the old rules and still carry Week by Week. Re-render with
+`--force --keep-analysis` to swap the sheet while keeping the prose, or plain
+`--force` to have the analysis rewritten year-on-year as well.
+
+### Changed — the workbook wears the company's own colours
+- **The palette is lifted from the "P&L overview" sheet of the Runway Company
+  Overview deck**, so the attachment looks like the rest of the reporting rather
+  than like a different tool's output. Four warm tones, no borders:
+  `5A483E` dark (header band + grand total, white bold), `DCD0BC` beige
+  (subtotals), `EDE7DC` light (the recessive block), white (detail lines).
+  Replaces the old blue/grey/yellow/green.
+- **The hierarchy is what was actually copied.** The deck uses no borders at
+  all — depth is read entirely from fill. Mapped onto this sheet: department
+  rows are detail, a store's TOTAL is a subtotal, ALL STORES is the grand
+  total. The same three levels the deck's P&L has, so the two read alike.
+- The three column blocks keep three distinct tones rather than one flat band.
+  The prior block opens COLLAPSED, so the usual view is Current beside Δ with
+  nothing between them, and a single tone would lose that boundary.
+- `Raw Data`'s header gets the same band. It is one workbook.
+
+#### The red warning had to be re-chosen for the dark row
+`C00000` on `5A483E` is a **1.33:1** contrast ratio — it renders, so nothing
+fails, and the unfavourable-move warning would have silently vanished from the
+single most-read row on the sheet. The grand total now uses `FF9C9C`: **4.31:1**
+on the dark fill, and the candidate furthest from white (**2.00:1**) so a red
+figure and an ordinary one do not blur together. Every lighter row keeps
+`C00000`, which still reads at 4.25:1 on beige and 6.48:1 on white.
+
+`emit()` now takes the font and the red shade ALONGSIDE the fill, because both
+are properties of the fill a row sits on. Leaving the font hardcoded is exactly
+how black text ends up on a dark row.
+
+### Changed — store order
+- **Stores are now listed HQ, RWP, RHN, RWR, RWT, RWD** on the page, in the
+  workbook and in the workbook's store legend. The board's reading order;
+  alphabetical put HQ beside RHN and buried RWP at the end.
+- **One order, defined once** (`period.order_stores`). The page and the sheet
+  used to sort independently — `sorted(...)` in three separate places — so a
+  reader comparing the attachment against the screen had to take on trust that
+  row three was the same store in both. The analysis picks it up too, since
+  `notable_movements` walks the same list.
+- An unlisted code sorts after every listed one, then alphabetically. A store
+  opening, or a code Oracle returns that nobody has added to `STORE_ORDER` yet,
+  lands at the end where someone will notice it — never dropped from the report
+  and never an exception on a Monday morning. Checked against 21 months of live
+  data: the six codes are exactly the six that trade.
+
+### Changed — trade vocabulary
+- **"chiết khấu" → "giảm giá"** throughout the analysis. Both translate as
+  "discount", but they are not interchangeable in the trade: "chiết khấu" is the
+  supplier/settlement discount, while this figure measures the markdown off the
+  retail ticket that a shopper sees, which fashion retail calls "giảm giá".
+  Every surface the model reads — `METRIC_VI`, the system prompt, the derived
+  facts and the store movements — uses the new word, because the word the model
+  is handed is the word it writes.
+
+### Added
+- `TestWhichSheetsTheWorkbookCarries` and `TestWhichPeriodsAreNarrated`. The
+  existing sheet tests parametrise over `SHEET_NAMES`, so they followed this
+  change silently — swapping a period in or out failed nothing. Which periods
+  are exported and narrated is a decision and now has tests of its own.
+
+---
+
+## 0.18.0 — 2026-10-02
+
+### Added — the sender's signature on every report email
+- `render.signature_html()` / `render.signature_text()` reproduce the signature
+  the sender keeps on the mail server, and `dispatch` appends them to the HTML
+  and plain-text parts respectively.
+
+**Why it was missing.** The signature is configured in the webmail client, and
+the client appends it as the message is composed there. This app speaks SMTP
+directly to the same mailbox, so nothing was ever in the composing path to add
+it — every report has gone out unsigned.
+
+**Why it lives in code and not in the draft.** Two earlier traps argued for it:
+- `body_template` lives in the **database**, so putting the signature there
+  would mean a migration on every environment and a code change that ships
+  nothing (the trap `0.17.0` hit with the WTD wording).
+- The draft is model-written and human-editable. A signature in the draft is one
+  the model can paraphrase and an editor can delete by accident. Appended at
+  send time it is neither.
+
+It is also deliberately outside what approval freezes: approval signs off the
+figures and the wording, and the sender's own contact details are not that.
+
+### Added — `GET /settings` carries `signature`
+The preview promises "the email exactly as it will be sent", and the signature
+is not part of `email_body`, so the frontend has to render it too. Rather than
+let it keep a second copy of the strings — two places to edit, and a preview
+free to disagree with the message — `/settings` now serves the signature as a
+read-only `signature` object, built from the same `render.SIGNATURE` the email
+is. One source of truth across both repos.
+
+- It is **not** a settings-row column and **not** writable: `update_settings`
+  builds its fields from an explicit allowlist, so a `signature` in a `PUT`
+  body is ignored rather than stored. Pinned by a test.
+- Served as `dict(SIGNATURE)` — a copy, so a caller mutating the response
+  cannot reach back into every later send. Also pinned by a test.
+
+### Notes
+- Styles are inline, matching the rest of the email — Gmail ignores `<style>`.
+- The contact rows are a `<table>` rather than aligned text, so the values line
+  up in clients that collapse runs of spaces.
+- Every field is `escape()`d before insertion, as everywhere else in `render.py`.
+  Verified the Vietnamese survives it — `Lê Minh`, `Phó giám đốc`, `Đặng Tất`.
+- `TestSignature` in `tests/unit/modules/weekly_report/test_render.py`, 7 cases,
+  and `TestSignatureInSettings` in `test_service.py`, 3 cases.
+  Full suite: **1293 passed**.
+
+---
+
+## 0.18.1 — 2026-10-04
+
+Correctness fixes in shipped code, found reviewing #74. None of these were
+introduced by that PR — all four files were byte-identical to `staging` at
+the time, and remain so after `0.18.0` merged.
+
+### Fixed — the WTD note contradicted its own header in a 53-week year
+`prior_week_window` falls back to the prior year's **week 52** when that year
+has no week 53, but `excel.py` printed the CURRENT week number on both sides of
+the note. **2026 is a 53-week ISO year**, so the week of 2026-12-28 would have
+shipped a sheet headed `Week 53 2026 vs Week 52 2025` over a note reading
+`week 53 against week 53`. The note now reads the prior side from the window
+actually used and explains the fallback when the two differ.
+
+`period.py`'s fallback branch had no test at all. Now covered by
+`TestFiftyThreeWeekYear` (3 cases) and `TestWtdNoteOnAFiftyThreeWeekYear` (4).
+
+### Fixed — the migration script hid its own connection failure
+`scripts/database/migrate_weekly_report_yoy_template.py` called
+`get_postgres_connection()`, which returns **None** on failure rather than
+raising — the trap `repository.py:63` documents. With no guard the first use
+raised `AttributeError`, and `finally: conn.close()` then raised a SECOND
+`AttributeError` that replaced it. A run against an unreachable database
+produced neither documented exit code and no usable message. Now guarded, with
+a new **exit code 2** for "could not reach the database".
+
+### Fixed — the CLI script described a sheet the workbook does not contain
+`scripts/reports/generate_periodic_report.py` still looped `WOW` and printed
+`[... week over week]`, and its docstring still called the first sheet
+"Week by Week". The workbook has carried WTD since `0.17.0`. CLAUDE.md names
+this script as the live-data validation path, so its summary disagreeing with
+the file it had just written was the worst possible place for the drift.
+
+### Fixed — an inverted comment in `excel.py`
+`build_workbook_object` said "the payload carries WTD as well, and the workbook
+deliberately does not". Exactly backwards: the payload carries **WOW**, and the
+workbook's week sheet IS WTD.
+
+### Not changed — `PERIOD_TITLES['WTD'] = 'Week to date'`
+Reported alongside the above: the window is the last COMPLETE week, so "to
+date" misdescribes it, and `excel.py` says as much on the sheet. Left alone
+deliberately — it is a user-facing tab label chosen in `0.17.0`, mirrored in
+the frontend's `constants.ts`, and renaming it is a product decision rather
+than a fix.
+
+
+---
+
+## 0.19.0 — 2026-10-04
+
+### Changed — the signature follows the company template issued 2026-10-02
+Company line, then name, then the contact rows. Replaces the `---` separator
+and the name/title/company stack from `0.18.0`.
+
+- **The job title is gone.** The issued template carries none, and the point of
+  adopting it was that every signature in the company should match.
+- **`Home:` added** — `www.runwayvietnam.com`.
+- **Address in English**, as the template has it. Same place.
+- **"Corporation" is spelt correctly here.** The issued template misspells it
+  "Coporation"; departing from it was agreed with the sender.
+
+### Added — the Runway logo, inline
+Left of the text block, with the vertical rule part of the image rather than a
+CSS cell border — borders on table cells are the first thing Outlook's renderer
+disagrees about, and a rule landing a few pixels out looks like a defect.
+
+`app/core/mail/mailer.py` gained an `inline_images` parameter: `(cid, mime,
+bytes)` tuples added to the HTML part with `add_related`, which turns it into
+`multipart/related` and binds the `cid:` to the markup. **This had to be built
+— `build_message` could only produce downloadable attachments**, so a logo
+added the old way would have arrived as a second file beside the .xlsx with a
+broken image where it should have been.
+
+Inline is the only placement that renders unprompted: a remote `https:` src is
+blocked by default in Gmail and Outlook, and a `data:` URI is stripped by Gmail
+outright.
+
+Resulting structure, pinned by `TestInlineLogo`:
+
+```
+multipart/mixed
+├── multipart/alternative
+│   ├── text/plain
+│   └── multipart/related
+│       ├── text/html
+│       └── image/png  cid:runway-logo  inline
+└── .xlsx  attachment
+```
+
+### Changed — only the website is a link
+The **email address is plain text**, not a `mailto:`. Clients style a real
+anchor blue and underlined, which reads as "click me" on an address nobody
+needs to click — anyone replying uses Reply — and an automated message carrying
+live links is the shape spam filters score hardest. The **website keeps its
+link**: it is the company's own site and following it is the point of listing
+it. Verified `https://www.runwayvietnam.com` serves a valid certificate and
+redirects HTTP to HTTPS itself, so the href is `https:`.
+
+Exactly one anchor in the signature, pinned by a test.
+
+### Notes
+- The logo ships as the **JPEG that was supplied**, not re-encoded. Converting
+  it to PNG tripled the size — 5.6 KB to 17.7 KB — and bought nothing: the
+  source is greyscale with no alpha channel, so there was no transparency to
+  preserve, and every client that renders a PNG renders a JPEG. The image is
+  embedded in every message rather than fetched once, so that size is paid per
+  email.
+- `signature_logo()` returns `None` when the file is missing, and
+  `signature_html(with_logo=False)` drops the image column. Missing art must
+  never stop the week's figures going out.
+- Laid out with tables, not flex or float: Outlook renders Word's HTML engine,
+  which supports neither.
+- `GET /settings` carries the new shape — `title` gone, `home` added. The
+  frontend reads it from there, so the two cannot drift.
+- Plain text keeps the fields under a `--` rule and carries no image
+  placeholder; `[image]` tells a reader nothing.
+- Full suite: **1314 passed**.
