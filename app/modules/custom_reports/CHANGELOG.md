@@ -49,11 +49,42 @@ Two reasons it is not in `_seed_v2_permissions`:
 
 ⚠️ **CONSEQUENCE, so it does not read as a bug on first deploy: the page is
 invisible to every non-admin until someone grants the section.** Admins
-resolve to all sections.
+resolve to all sections — but see the migration note below, because that
+resolution is itself a SELECT over the `sections` table.
 
 ### Deployment
 
-1. Deploy — the section row appears on first start.
+⚠️ **`init_db.py` IS REQUIRED. The section row does NOT appear by itself.**
+
+`init_permission_tables()` is called only from `scripts/database/init_db.py`
+(verified 2026-11-06: no other caller, and nothing in `app/main.py` runs it).
+`deploy.yml` does not run that script either — see `DEPLOYMENT.md`, "Database
+migrations are NOT automatic", the same gap that caused the CR #82
+pins-don't-persist incident.
+
+Skipping it does not merely leave the default ungranted. `get_user_permissions_v2`
+builds every answer from `SELECT code, name FROM sections WHERE is_active`, so
+with no row:
+
+| | result |
+|---|---|
+| any non-admin | 403, no grant is possible — the access page has nothing to grant |
+| **an admin** | **403 as well**, because "admin → all sections" means all rows IN THAT TABLE, and there are none for this feature |
+| the sidebar | no entry, for anyone |
+
+So the feature is not "locked down pending a grant"; it is inert for everyone
+including the person who would grant it, and it looks like a broken deploy.
+
+Measured, not inferred — 2026-11-06, admin token against a live backend, the
+section row's `is_active` flipped either side of the same request:
+
+```
+is_active = FALSE   GET /custom-reports/dimensions/store -> 403
+is_active = TRUE    GET /custom-reports/dimensions/store -> 200 ["HQ","RHN",...]
+```
+
+1. Deploy, then run `python scripts/database/init_db.py` (idempotent —
+   `ON CONFLICT DO NOTHING`). This is what creates the section row.
 2. An admin or IT manager grants `CUSTOM_REPORTS` on the access page.
 3. The frontend needs **no** env var: `MOCK_MODE` now defaults to the live
    API (it defaulted to the mock until today, which would have shipped
