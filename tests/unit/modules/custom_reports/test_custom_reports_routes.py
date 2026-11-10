@@ -175,3 +175,109 @@ class TestSectionGate:
             resp = client.get('/api/v1/custom-reports/dimensions/brand',
                               headers=_auth_headers())
         assert resp.status_code == 403
+
+
+class TestQueryFailureShapes:
+    """The two failures the FRONTEND renders in the user's own language.
+
+    Both carry a stable `code` ALONGSIDE the English `error`. The page
+    translates a code it knows and falls back to the prose otherwise, so
+    losing either field loses a real message — which is why both are
+    asserted rather than just the status.
+    """
+
+    URL = '/api/v1/custom-reports/query'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_long_range_without_a_filter_is_400_with_a_code(
+            self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2023-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'],
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        body = r.get_json()
+        assert body['success'] is False
+        assert body['code'] == 'rangeNeedsFilter'
+        # The prose must name a way out, not just the rule.
+        assert 'brand' in body['error']
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_beyond_five_years_even_filtered_is_400_with_a_code(
+            self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2015-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'], 'filters': {'brand': ['AKRIS']},
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        assert r.get_json()['code'] == 'rangeTooLong'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_an_ordinary_validation_error_carries_no_code(
+            self, mock_get_user, mock_verify, client):
+        """Only the codes the page can translate are emitted; the rest stay
+        prose, so an unknown code can never reach the UI as a raw key."""
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2026-01-01', 'to': '2026-01-31',
+            'groupBy': ['nope'],
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        assert 'code' not in r.get_json()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.custom_reports.routes.engine.run_query')
+    def test_cap_refuses_the_third_concurrent_query_with_503(
+            self, mock_run, mock_get_user, mock_verify, client):
+        """Two slots per process. The third caller is refused rather than
+        queued — blocking would hold the very worker the cap protects."""
+        from app.modules.custom_reports import routes
+
+        mock_run.return_value = {'success': True, 'result': {}}
+        _mock_auth(mock_verify, mock_get_user)
+        body = {'subject': 'sales', 'from': '2026-01-01',
+                'to': '2026-01-31', 'groupBy': ['brand']}
+
+        # Hold both slots, as two in-flight queries would.
+        assert routes._slots.acquire(blocking=False)
+        assert routes._slots.acquire(blocking=False)
+        try:
+            r = client.post(self.URL, json=body, headers=_auth_headers())
+            assert r.status_code == 503
+            assert r.get_json()['code'] == 'reportsBusy'
+            assert r.headers['Retry-After'] == '10'
+        finally:
+            routes._slots.release()
+            routes._slots.release()
+
+        # ...and the slots are given back, so the next caller succeeds.
+        assert client.post(self.URL, json=body,
+                           headers=_auth_headers()).status_code == 200
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.custom_reports.routes.engine.run_query')
+    def test_a_failing_query_still_releases_its_slot(
+            self, mock_run, mock_get_user, mock_verify, client):
+        """Without the `finally`, one exception would permanently burn a
+        slot and the cap would ratchet down to zero."""
+        from app.modules.custom_reports import routes
+
+        _mock_auth(mock_verify, mock_get_user)
+        body = {'subject': 'sales', 'from': '2026-01-01',
+                'to': '2026-01-31', 'groupBy': ['brand']}
+
+        mock_run.side_effect = RuntimeError('oracle fell over')
+        with pytest.raises(RuntimeError):
+            client.post(self.URL, json=body, headers=_auth_headers())
+
+        mock_run.side_effect = None
+        mock_run.return_value = {'success': True, 'result': {}}
+        assert client.post(self.URL, json=body,
+                           headers=_auth_headers()).status_code == 200
