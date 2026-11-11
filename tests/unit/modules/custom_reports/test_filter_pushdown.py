@@ -352,7 +352,9 @@ class TestBroadFilterDoesNotUnlockTheLongRange:
                                          'department': UNIVERSE['department']}),
                         stub_universe())
         assert e.value.code == 'rangeFilterTooBroad'
-        assert 'department, fpMd' in str(e.value)
+        # Plural phrasing, and both named: "the filterS ... EACH select".
+        msg = str(e.value)
+        assert 'the filters on department, fpMd each select' in msg
 
     def test_inside_the_plain_cap_a_broad_filter_is_fine(self):
         """Nothing that worked before fails. A year of everything was

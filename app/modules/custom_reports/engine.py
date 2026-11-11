@@ -355,11 +355,14 @@ def parse_query(body: Any, universe_of: 'UniverseOf' = None) -> Dict[str, Any]:
         # a fact about their selection, and the cheap fix — untick
         # something — would be invisible.
         if broad:
+            named = ', '.join(sorted(broad))
+            lead = (f'the filter on {named} selects every option, so it '
+                    f'narrows nothing' if len(broad) == 1 else
+                    f'the filters on {named} each select every option, so '
+                    f'they narrow nothing')
             raise QueryError(
-                f'the filter on {", ".join(sorted(broad))} selects every '
-                f'option, so it narrows nothing — a range beyond '
-                f'{MAX_RANGE_DAYS} days needs a filter that excludes '
-                f'something',
+                f'{lead} — a range beyond {MAX_RANGE_DAYS} days needs a '
+                f'filter that excludes something',
                 'rangeFilterTooBroad')
         raise QueryError(
             f'date range must not exceed {cap} days without a filter on '
