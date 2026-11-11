@@ -175,3 +175,204 @@ class TestSectionGate:
             resp = client.get('/api/v1/custom-reports/dimensions/brand',
                               headers=_auth_headers())
         assert resp.status_code == 403
+
+
+class TestQueryFailureShapes:
+    """The two failures the FRONTEND renders in the user's own language.
+
+    Both carry a stable `code` ALONGSIDE the English `error`. The page
+    translates a code it knows and falls back to the prose otherwise, so
+    losing either field loses a real message — which is why both are
+    asserted rather than just the status.
+    """
+
+    URL = '/api/v1/custom-reports/query'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_long_range_without_a_filter_is_400_with_a_code(
+            self, mock_get_user, mock_verify, client):
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2023-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'],
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        body = r.get_json()
+        assert body['success'] is False
+        assert body['code'] == 'rangeNeedsFilter'
+        # The prose must name a way out, not just the rule.
+        assert 'brand' in body['error']
+
+    # ⚠️ Oracle is mocked away in every test below that asks for a range
+    # beyond `MAX_RANGE_DAYS`. Past that cap the route consults
+    # `universe_lookup` to see whether the filter narrows anything, and
+    # an unmocked `get_oracle_connection()` spends ~1.7s failing to
+    # resolve the host before returning None — a doomed network call that
+    # was half this file's runtime until it was mocked.
+    @patch('app.modules.custom_reports.engine.get_oracle_connection',
+           return_value=None)
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_beyond_five_years_even_filtered_is_400_with_a_code(
+            self, mock_get_user, mock_verify, _mock_oracle, client):
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2015-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'], 'filters': {'brand': ['AKRIS']},
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        assert r.get_json()['code'] == 'rangeTooLong'
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_an_ordinary_validation_error_carries_no_code(
+            self, mock_get_user, mock_verify, client):
+        """Only the codes the page can translate are emitted; the rest stay
+        prose, so an unknown code can never reach the UI as a raw key."""
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2026-01-01', 'to': '2026-01-31',
+            'groupBy': ['nope'],
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        assert 'code' not in r.get_json()
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.custom_reports.routes.engine.run_query')
+    def test_cap_refuses_the_third_concurrent_query_with_503(
+            self, mock_run, mock_get_user, mock_verify, client):
+        """Two slots per process. The third caller is refused rather than
+        queued — blocking would hold the very worker the cap protects."""
+        from app.modules.custom_reports import routes
+
+        mock_run.return_value = {'success': True, 'result': {}}
+        _mock_auth(mock_verify, mock_get_user)
+        body = {'subject': 'sales', 'from': '2026-01-01',
+                'to': '2026-01-31', 'groupBy': ['brand']}
+
+        # Hold both slots, as two in-flight queries would.
+        assert routes._slots.acquire(blocking=False)
+        assert routes._slots.acquire(blocking=False)
+        try:
+            r = client.post(self.URL, json=body, headers=_auth_headers())
+            assert r.status_code == 503
+            assert r.get_json()['code'] == 'reportsBusy'
+            assert r.headers['Retry-After'] == '10'
+        finally:
+            routes._slots.release()
+            routes._slots.release()
+
+        # ...and the slots are given back, so the next caller succeeds.
+        assert client.post(self.URL, json=body,
+                           headers=_auth_headers()).status_code == 200
+
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    @patch('app.modules.custom_reports.routes.engine.run_query')
+    def test_a_failing_query_still_releases_its_slot(
+            self, mock_run, mock_get_user, mock_verify, client):
+        """Without the `finally`, one exception would permanently burn a
+        slot and the cap would ratchet down to zero."""
+        from app.modules.custom_reports import routes
+
+        _mock_auth(mock_verify, mock_get_user)
+        body = {'subject': 'sales', 'from': '2026-01-01',
+                'to': '2026-01-31', 'groupBy': ['brand']}
+
+        mock_run.side_effect = RuntimeError('oracle fell over')
+        with pytest.raises(RuntimeError):
+            client.post(self.URL, json=body, headers=_auth_headers())
+
+        mock_run.side_effect = None
+        mock_run.return_value = {'success': True, 'result': {}}
+        assert client.post(self.URL, json=body,
+                           headers=_auth_headers()).status_code == 200
+
+
+class TestBroadFilterIsRefusedThroughTheRoute:
+    """A filter that selects every option must not buy the long range.
+
+    `fpMd` is used throughout because its two values are a constant in
+    the engine (`_PICKER_FIXED`), so these tests exercise the real
+    decision with NO database at all — the connection is mocked to None
+    and never needed. That is also the production property worth having:
+    the easiest broad filter to set is the one that costs nothing to
+    catch.
+    """
+
+    URL = '/api/v1/custom-reports/query'
+
+    @patch('app.modules.custom_reports.engine.get_oracle_connection',
+           return_value=None)
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_both_fp_and_md_over_three_years_is_refused(
+            self, mock_get_user, mock_verify, mock_oracle, client):
+        _mock_auth(mock_verify, mock_get_user)
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2023-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'], 'filters': {'fpMd': ['FP', 'MD']},
+        }, headers=_auth_headers())
+        assert r.status_code == 400
+        body = r.get_json()
+        assert body['code'] == 'rangeFilterTooBroad'
+        # Names the offending filter, so the way out is visible.
+        assert 'fpMd' in body['error']
+        # And did it without a connection, because fpMd is a constant.
+        mock_oracle.assert_not_called()
+
+    @patch('app.modules.custom_reports.engine.run_query')
+    @patch('app.modules.custom_reports.engine.get_oracle_connection',
+           return_value=None)
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_one_of_the_two_still_runs(
+            self, mock_get_user, mock_verify, _mock_oracle, mock_run, client):
+        """The counterpart: FP alone excludes the MD half, so it is a real
+        filter and the long range stays available."""
+        _mock_auth(mock_verify, mock_get_user)
+        mock_run.return_value = {'success': True, 'result': {'rows': []}}
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2023-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'], 'filters': {'fpMd': ['FP']},
+        }, headers=_auth_headers())
+        assert r.status_code == 200
+        assert mock_run.called
+
+    @patch('app.modules.custom_reports.engine.run_query')
+    @patch('app.modules.custom_reports.engine.get_oracle_connection',
+           return_value=None)
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_inside_a_year_a_broad_filter_still_runs(
+            self, mock_get_user, mock_verify, mock_oracle, mock_run, client):
+        """Nothing that worked before fails. A year of FP+MD was always
+        allowed, and the lookup is never consulted inside the plain cap."""
+        _mock_auth(mock_verify, mock_get_user)
+        mock_run.return_value = {'success': True, 'result': {'rows': []}}
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2025-06-01', 'to': '2026-01-01',
+            'groupBy': ['brand'], 'filters': {'fpMd': ['FP', 'MD']},
+        }, headers=_auth_headers())
+        assert r.status_code == 200
+        mock_oracle.assert_not_called()
+
+    @patch('app.modules.custom_reports.engine.run_query')
+    @patch('app.modules.custom_reports.engine.get_oracle_connection',
+           return_value=None)
+    @patch('app.core.auth.middleware.auth_service.verify_token')
+    @patch('app.core.auth.middleware.auth_service.get_user_by_sid')
+    def test_an_unreachable_lookup_does_not_block_a_filtered_report(
+            self, mock_get_user, mock_verify, _mock_oracle, mock_run, client):
+        """Fails OPEN. With no connection the universe is unknown, so a
+        brand filter is assumed to narrow and the request proceeds — a
+        cost gate must not become an outage."""
+        _mock_auth(mock_verify, mock_get_user)
+        mock_run.return_value = {'success': True, 'result': {'rows': []}}
+        r = client.post(self.URL, json={
+            'subject': 'sales', 'from': '2023-01-01', 'to': '2026-01-01',
+            'groupBy': ['brand'], 'filters': {'brand': ['AKRIS']},
+        }, headers=_auth_headers())
+        assert r.status_code == 200

@@ -17,6 +17,9 @@ authenticated employee could POST a query directly. A bare token check,
 which is what these routes shipped with while the module was one narrow
 size report, is not enough for the query engine.
 """
+import os
+import threading
+
 from flask import Blueprint, jsonify, request
 
 from app.core.auth.middleware import section_required
@@ -26,6 +29,30 @@ from .service import CustomReportsService
 # The permission section gating every route below. Matches SECTION_CODE in
 # the frontend's `src/features/custom-reports/constants.ts`.
 SECTION = 'CUSTOM_REPORTS'
+
+# ----------------------------------------------------------------------
+# Concurrency guard
+# ----------------------------------------------------------------------
+# ⚠️ WHY A CAP AT ALL: gunicorn runs `--workers 3` (see
+# `deployment/gbl-hr-api.service`) with the default SYNC worker, so one
+# in-flight query occupies one of three processes for its whole duration.
+# An unfiltered multi-year query is ~28s. Three of those at once and the
+# API has no worker left for ANYTHING — `/auth/login` included. The
+# failure is not a slow report, it is the whole tool looking dead.
+#
+# Two is deliberate rather than three: it leaves one worker free by
+# construction, so logins and every other feature keep answering however
+# many people pile onto this page. The cost is that a third concurrent
+# report is refused while a worker is technically idle — the right trade,
+# since a clear "try again" beats a login timeout for someone else.
+#
+# ⚠️ PER PROCESS, NOT PER CLUSTER. Each worker holds its own semaphore,
+# so the real ceiling is `min(2, workers)` per process rather than a
+# global 2 — with sync workers that still means a free process, which is
+# the property being protected. A cluster-wide limit would need shared
+# state (Postgres or Redis), which is not worth it for 9 users.
+_MAX_CONCURRENT = int(os.environ.get('CUSTOM_REPORTS_MAX_CONCURRENT', '2'))
+_slots = threading.BoundedSemaphore(_MAX_CONCURRENT)
 
 custom_reports_bp = Blueprint(
     'custom_reports', __name__, url_prefix='/api/v1/custom-reports'
@@ -91,7 +118,11 @@ def run_query():
 
     Body:
         subject  — "sales" | "imports" | "sellThrough"
-        from, to — inclusive ISO yyyy-mm-dd, at most one year apart
+        from, to — inclusive ISO yyyy-mm-dd. At most 366 days apart, or
+                   up to 1830 (five years) when at least one filter can
+                   be pushed into SQL AND actually excludes something —
+                   see `MAX_RANGE_DAYS_FILTERED` and `_narrowing`. A
+                   filter that selects every option does not count.
         filters  — { dimensionId: string[] }, empty array = no filter
         groupBy  — up to 3 dimension ids; [] means line detail
 
@@ -106,15 +137,40 @@ def run_query():
     one that was asked.
     """
     try:
-        query = engine.parse_query(request.get_json(silent=True))
+        # The lookup is what lets validation reject a filter that selects
+        # every option — see `engine._narrowing`. It opens no connection
+        # unless the range actually exceeds the plain cap, so the common
+        # request is unchanged.
+        with engine.universe_lookup() as universe_of:
+            query = engine.parse_query(request.get_json(silent=True), universe_of)
     except engine.QueryError as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
+        # `code` only where the frontend has a translation for it; the
+        # English `error` remains the contract and the fallback.
+        body = {'success': False, 'error': str(e)}
+        if e.code:
+            body['code'] = e.code
+        return jsonify(body), 400
 
-    # Labels pass through as ids. The frontend holds the EN/VI strings and
-    # relabels every column itself, so translating here would be work
-    # thrown away — but `run_query` takes them as arguments so a CSV
-    # export or a scheduled job can supply real text.
-    result = engine.run_query(query, lambda d: d, lambda m: m)
+    # Refuse rather than queue. Flask is already holding a worker to read
+    # this request; blocking here would hold it for the length of someone
+    # else's query too, which is the exact starvation the cap exists to
+    # prevent. 503 + Retry-After is the honest answer, and the frontend
+    # turns it into a message that says to try again.
+    if not _slots.acquire(blocking=False):
+        return jsonify({
+            'success': False,
+            'error': 'another report is still running — try again shortly',
+            'code': 'reportsBusy',
+        }), 503, {'Retry-After': '10'}
+
+    try:
+        # Labels pass through as ids. The frontend holds the EN/VI strings
+        # and relabels every column itself, so translating here would be
+        # work thrown away — but `run_query` takes them as arguments so a
+        # CSV export or a scheduled job can supply real text.
+        result = engine.run_query(query, lambda d: d, lambda m: m)
+    finally:
+        _slots.release()
     return jsonify(result), 200 if result.get('success') else 500
 
 

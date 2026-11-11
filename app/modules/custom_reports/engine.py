@@ -21,7 +21,8 @@ The request contract is in
 """
 import datetime as dt
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.database import get_oracle_connection
 from .queries import EngineQueries
@@ -40,9 +41,52 @@ UNKNOWN = '—'   # em dash
 # the result is detail wearing a summary's clothes.
 MAX_GROUP_BY = 3
 
-# The picker enforces a one-year span; enforced here too, because a client
-# is not a validator.
+# The picker enforces these spans; enforced here too, because a client is
+# not a validator.
+#
+# TWO caps, because the cost of a range depends almost entirely on how
+# much of it a filter throws away. Measured on production 2026-11-09,
+# COUNT(*) over the SALE_LINES joins:
+#
+#     1 year, unfiltered           6.34s    16,321 rows
+#     1 year, brand = AKRIS        0.25s       192 rows
+#     3 years, unfiltered         20.62s    48,097 rows
+#     3 years, brand = AKRIS       0.53s       555 rows
+#
+# So a multi-year single-brand report is CHEAPER than the one-year
+# unfiltered query the old single cap already allowed, while a multi-year
+# unfiltered one is ~28s end to end and would hold a gunicorn worker (of
+# three) for that long. The honest limit is therefore not "days" but "how
+# many lines will this pull", and a pushable filter is the proxy for it.
+#
+# ⚠️ IT IS ONLY A PROXY, and a coarse one: the gate asks whether a
+# pushable filter EXISTS, not how much it removes. A broad one barely
+# helps — measured the same day, three years of `department = RTW` (about
+# 79% of all lines) is 14.99s, against 2.13s for three years of one
+# brand. Still inside the 120s worker timeout, and the route's
+# concurrency cap is what keeps even that from starving the API. Judging
+# selectivity properly would mean counting rows before deciding, and the
+# COUNT is most of the query — so the cheap proxy is the right trade.
 MAX_RANGE_DAYS = 366
+MAX_RANGE_DAYS_FILTERED = 1830          # five years
+
+# Filters that can be applied in SQL instead of in Python — see
+# `_where_for`. A dimension qualifies only when the column and the value
+# `value_of` produces agree EXACTLY, because `matches()` still handles the
+# remainder and the two must never disagree about the same row.
+#
+# Three are held back:
+#
+#   · `size`         — `field: None`. Normalised per brand by
+#                      `normalize_size()`, a Python table with no SQL
+#                      equivalent.
+#   · `customerType` — `field: None`. Derived, and RELATIVE TO THE
+#                      PERIOD, so no column holds it.
+#   · `customer`     — HAS a column, and is still excluded: `_derive`
+#                      rewrites it to None for walk-ins and for the
+#                      TOURIST aggregation record, so a SQL filter would
+#                      keep rows `matches()` drops.
+PUSHDOWN_EXCLUDED = ('size', 'customerType', 'customer')
 
 
 # ----------------------------------------------------------------------
@@ -173,18 +217,41 @@ LINE_MEASURES = {
 
 
 class QueryError(ValueError):
-    """A bad request. Carries the message the route returns as a 400."""
+    """A bad request. Carries the message the route returns as a 400.
+
+    `code` is optional and exists for the few errors the FRONTEND needs to
+    render in the user's own language. The message stays English prose and
+    stays the contract — the code is an additional hint, so an unknown or
+    absent one simply falls back to showing the message. Most validation
+    errors name a dimension or a field and read fine untranslated; these
+    two are the ones a user meets while learning the feature rather than
+    while misusing the API.
+    """
+
+    def __init__(self, message: str, code: str = None):
+        super().__init__(message)
+        self.code = code
 
 
 # ----------------------------------------------------------------------
 # Request validation
 # ----------------------------------------------------------------------
-def parse_query(body: Any) -> Dict[str, Any]:
+def parse_query(body: Any, universe_of: 'UniverseOf' = None) -> Dict[str, Any]:
     """Validate a request body into a normalised query dict, or raise.
 
     Everything is checked here rather than trusted from the client — the
     picker enforces the one-year cap and the three-dimension limit, but a
     client is not a validator.
+
+    `universe_of` is optional and, when given, is asked `dim -> every
+    value that dimension can take`. It exists for ONE check — whether a
+    filter that looks pushable actually narrows anything (see
+    `_narrowing`). Default `None` keeps this function PURE: no argument,
+    no database, same behaviour as before. The route supplies a real one
+    via `universe_lookup()`.
+
+    ⚠️ It is asked ONLY when the range exceeds `MAX_RANGE_DAYS`, so an
+    ordinary request never pays for it. See the comment at the call site.
     """
     if not isinstance(body, dict):
         raise QueryError('request body must be an object')
@@ -206,9 +273,6 @@ def parse_query(body: Any) -> Dict[str, Any]:
     date_from, date_to = _date('from'), _date('to')
     if date_to < date_from:
         raise QueryError('to must not be before from')
-    if (date_to - date_from).days + 1 > MAX_RANGE_DAYS:
-        raise QueryError(
-            f'date range must not exceed {MAX_RANGE_DAYS} days')
 
     group_by = body.get('groupBy') or []
     if not isinstance(group_by, list):
@@ -245,6 +309,67 @@ def parse_query(body: Any) -> Dict[str, Any]:
             raise QueryError(f'{dim} does not apply to {subject}')
         filters[dim] = [str(v) for v in picked]
 
+    # ⚠️ CHECKED AFTER THE FILTERS, because which cap applies depends on
+    # them. A range beyond a year needs at least one PUSHABLE filter —
+    # one SQL can actually use to narrow the scan. `size` and
+    # `customerType` do not count however selective they look: they are
+    # applied in Python, after the full pull, so they would license the
+    # long range without making it any cheaper. `customer` is excluded
+    # for the same reason (see `PUSHDOWN_EXCLUDED`).
+    span = (date_to - date_from).days + 1
+    pushable, _ = split_filters(filters)
+
+    # ⚠️ A FILTER THAT SELECTS EVERY OPTION NARROWS NOTHING.
+    #
+    # `split_filters` only asks whether a dimension CAN go into SQL, not
+    # whether the values picked exclude any row. Tick every box and the
+    # `IN (...)` list matches the whole table, so the request was buying
+    # five years at the price of a filter it does not actually have. The
+    # low-cardinality dimensions make that easy rather than perverse —
+    # `fpMd` has 2 options, `gender` 4, `customerTier` 5, `store` 6,
+    # `department` 7, so "all of them" is a few clicks, not a script.
+    #
+    # Checked HERE and only here, because this is the one decision that
+    # turns on it. Asked only past `MAX_RANGE_DAYS`: inside the plain cap
+    # the question cannot change the answer, so no ordinary request pays
+    # the lookup. Measured on production, the lookup is 0.055–0.239s per
+    # dimension (`fpMd` is free, it is a constant) against a query that
+    # is seconds — and a 5-year request asks at most three of them.
+    broad: List[str] = []
+    if span > MAX_RANGE_DAYS and pushable and universe_of is not None:
+        narrowing = {}
+        for dim, picked in pushable.items():
+            if _narrowing(dim, picked, universe_of(dim)):
+                narrowing[dim] = picked
+            else:
+                broad.append(dim)
+        pushable = narrowing
+
+    cap = MAX_RANGE_DAYS_FILTERED if pushable else MAX_RANGE_DAYS
+    if span > cap:
+        if pushable:
+            raise QueryError(
+                f'date range must not exceed {cap} days', 'rangeTooLong')
+        # Naming the broad filter matters: this user DID set one, so
+        # "needs a filter" would read as a bug in the page rather than as
+        # a fact about their selection, and the cheap fix — untick
+        # something — would be invisible.
+        if broad:
+            named = ', '.join(sorted(broad))
+            lead = (f'the filter on {named} selects every option, so it '
+                    f'narrows nothing' if len(broad) == 1 else
+                    f'the filters on {named} each select every option, so '
+                    f'they narrow nothing')
+            raise QueryError(
+                f'{lead} — a range beyond {MAX_RANGE_DAYS} days needs a '
+                f'filter that excludes something',
+                'rangeFilterTooBroad')
+        raise QueryError(
+            f'date range must not exceed {cap} days without a filter on '
+            f'{", ".join(_pushable_dims(subject))} — '
+            f'a longer range is allowed once one of those narrows it',
+            'rangeNeedsFilter')
+
     return {
         'subject': subject,
         'from': date_from,
@@ -252,6 +377,102 @@ def parse_query(body: Any) -> Dict[str, Any]:
         'filters': filters,
         'groupBy': list(group_by),
     }
+
+
+def _pushable_dims(subject: str) -> List[str]:
+    """The filters that unlock the long range, for this subject."""
+    return sorted(
+        dim for dim, meta in DIMENSIONS.items()
+        if meta.get('filterable') and meta['field']
+        and dim not in PUSHDOWN_EXCLUDED and subject in meta['subjects']
+    )
+
+
+def _narrowing(dim: str, picked: List[str], universe: Optional[List[str]]) -> bool:
+    """Does this selection exclude anything at all?
+
+    True when the picked values leave something out, so SQL can use them
+    to read fewer rows. False when they cover the dimension's whole
+    universe, which is a filter in form only.
+
+    ⚠️ UNKNOWN WINS. A `None` universe means the lookup could not answer
+    (no connection, or the query failed), and an EMPTY one means it
+    answered something impossible — a dimension always has at least one
+    value. Both return True, deliberately: this gate is a cost control,
+    not an access control. Refusing a legitimate filtered report because
+    a 60ms lookup hiccuped would be a worse failure than allowing a
+    long query that the concurrency cap and the request timeout already
+    bound — and if Oracle cannot answer `SELECT DISTINCT vend_name`, the
+    report query behind it was never going to succeed anyway.
+
+    Compared as a SUPERSET, not for equality, so a stale or duplicated
+    client value cannot defeat the check by making the sets merely
+    unequal. Raw string comparison matches `_where_for` and `matches`,
+    which also compare what `value_of` returns without trimming or
+    folding case — the three must agree about the same row.
+    """
+    if not universe:
+        return True
+    return not set(picked) >= set(universe)
+
+
+# A `dim -> all its values` lookup, or None where it cannot say. Defined
+# as a name so `parse_query`'s signature reads as intent rather than as
+# plumbing.
+UniverseOf = Optional[Callable[[str], Optional[List[str]]]]
+
+
+@contextmanager
+def universe_lookup():
+    """Yield a `universe_of` for `parse_query`, backed by Oracle.
+
+    Lazy on purpose, at two levels. The CONNECTION is not opened until a
+    dimension is actually asked about — a request inside the plain
+    `MAX_RANGE_DAYS` cap asks nothing, so it pays neither the 0.25s
+    connect nor any query. And each dimension is asked at most once, so
+    two filters share one connection.
+
+    A failure to answer is swallowed into `None` rather than raised: see
+    `_narrowing` for why unknown has to mean "assume it narrows". That
+    also keeps a validation path from turning an Oracle blip into a 500
+    on a request that would otherwise have been a clean 400.
+    """
+    state: Dict[str, Any] = {'conn': None, 'tried': False, 'cache': {}}
+
+    def universe_of(dim: str) -> Optional[List[str]]:
+        if dim in state['cache']:
+            return state['cache'][dim]
+
+        # Free for the dimensions whose values are a constant in this
+        # file — `fpMd` is the likeliest "all options" of the lot (two
+        # checkboxes) and it costs nothing to catch.
+        if dim in _PICKER_FIXED:
+            state['cache'][dim] = list(_PICKER_FIXED[dim])
+            return state['cache'][dim]
+
+        if not state['tried']:
+            state['tried'] = True
+            state['conn'] = get_oracle_connection()
+        if state['conn'] is None:
+            state['cache'][dim] = None
+            return None
+
+        values: Optional[List[str]]
+        cur = state['conn'].cursor()
+        try:
+            values = _distinct_values(cur, dim)
+        except Exception:
+            values = None
+        finally:
+            cur.close()
+        state['cache'][dim] = values
+        return values
+
+    try:
+        yield universe_of
+    finally:
+        if state['conn'] is not None:
+            state['conn'].close()
 
 
 # ----------------------------------------------------------------------
@@ -377,7 +598,22 @@ def _receipt_fact(row: Dict[str, Any]) -> Dict[str, Any]:
 _ARRAYSIZE = 5000
 
 
-def _fetch(cur, sql: str, binds: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _fetch(cur, sql: str, binds: Dict[str, Any],
+           where: str = '', where_binds: Dict[str, Any] = None
+           ) -> List[Dict[str, Any]]:
+    """Run one pull, optionally narrowed by a pushed-down filter.
+
+    The predicate wraps the query as a subquery rather than being spliced
+    into it. That is deliberate: the inner SQL carries a lot of
+    load-bearing scope (`is_held`, `receipt_type`, `status`, the season
+    list) documented at length in `queries.py`, and editing it to thread
+    a WHERE through would put all of that at risk for no gain. Oracle
+    pushes the outer predicate down through the view anyway — the 25x
+    measured in `MAX_RANGE_DAYS` was measured in exactly this form.
+    """
+    if where:
+        sql = f'SELECT * FROM ({sql}) WHERE {where}'
+        binds = {**binds, **(where_binds or {})}
     cur.arraysize = _ARRAYSIZE
     cur.execute(sql, binds)
     cols = [d[0].lower() for d in cur.description]
@@ -419,14 +655,22 @@ def facts_for(cur, query: Dict[str, Any]) -> List[Dict[str, Any]]:
     }
     subject = query['subject']
 
+    # The SQL half of the filters. `parse_query` has already rejected any
+    # dimension that does not apply to this subject, so every pushable
+    # field is guaranteed to exist in the query being narrowed:
+    # `fpMd` / `customerTier` are sales-only, `store` is absent from
+    # sellThrough, and the rest come from the shared `_PRODUCT_COLS`.
+    where, where_binds = _where_for(split_filters(query['filters'])[0])
+
     if subject == 'sales':
-        rows = _fetch(cur, EngineQueries.SALE_LINES, binds)
+        rows = _fetch(cur, EngineQueries.SALE_LINES, binds, where, where_binds)
         first_buy = _first_buy(cur, query)
         for r in rows:
             _derive(r, query, first_buy)
         return [_sale_fact(r) for r in rows]
 
-    receipts = _fetch(cur, EngineQueries.RECEIPT_LINES, binds)
+    receipts = _fetch(cur, EngineQueries.RECEIPT_LINES, binds,
+                      where, where_binds)
     for r in receipts:
         _derive(r, query)
 
@@ -435,6 +679,16 @@ def facts_for(cur, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         # vendor returns, which is what `/sizes` does for clean FIFO.
         return [_receipt_fact(r) for r in receipts]
 
+    # ⚠️ The SOLD side is NOT narrowed, and must not be: SELLTHROUGH_SOLD
+    # selects only `item_sid`, `sale_date` and `qty` — it carries no
+    # product columns to filter on. Narrowing the receipts alone is still
+    # correct, because the cohort rule already makes receipts the only
+    # source of rows: `_sell_through_facts` attributes sales by
+    # `item_sid` and emits one row per RECEIPT, so a sold line whose item
+    # is not among the filtered receipts finds no bucket and contributes
+    # nothing. It costs a wider sold pull than strictly needed — bounded
+    # by the same date range, and the receipts side is where the joins
+    # are — in exchange for not splitting the FIFO model in two.
     sold = _fetch(cur, EngineQueries.SELLTHROUGH_SOLD, binds)
     return _sell_through_facts(receipts, sold)
 
@@ -535,9 +789,73 @@ def value_of(fact: Dict[str, Any], dim: str) -> str:
     return str(v)
 
 
+def split_filters(filters: Dict[str, List[str]]
+                  ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    """Split filters into the SQL half and the Python half.
+
+    Returns `(pushable, python_only)`. Deterministic and side-effect
+    free, so `facts_for` and `run_query` can each call it rather than
+    thread the result between them.
+    """
+    push: Dict[str, List[str]] = {}
+    keep: Dict[str, List[str]] = {}
+    for dim, picked in filters.items():
+        meta = DIMENSIONS[dim]
+        if dim in PUSHDOWN_EXCLUDED or not meta['field']:
+            keep[dim] = picked
+        else:
+            push[dim] = picked
+    return push, keep
+
+
+def _where_for(push: Dict[str, List[str]]) -> Tuple[str, Dict[str, Any]]:
+    """A WHERE fragment equivalent to `matches()` for these filters.
+
+    ⚠️ This must agree with `matches()` row for row, so it mirrors
+    `value_of`'s two rules rather than inventing its own:
+
+      · a value is compared as the plain string the column holds, which
+        is what `str(v)` yields for every pushable field (all of them are
+        character columns);
+      · NULL and '' both read as `UNKNOWN`, so a picked UNKNOWN becomes
+        an IS NULL test, NOT a literal em-dash comparison. Oracle treats
+        '' as NULL so the `= ''` half can never fire; it is written out
+        anyway because it is the rule `value_of` states, and a reader
+        comparing the two functions should not have to know that quirk
+        to see that they match.
+
+    Binds are numbered rather than named after the dimension so a value
+    can never collide with `from_date` / `to_exclusive`.
+    """
+    clauses: List[str] = []
+    binds: Dict[str, Any] = {}
+    for n, (dim, picked) in enumerate(sorted(push.items())):
+        field = DIMENSIONS[dim]['field']
+        parts: List[str] = []
+        concrete = [v for v in picked if v != UNKNOWN]
+        if concrete:
+            names = []
+            for j, v in enumerate(concrete):
+                key = f'f{n}_{j}'
+                binds[key] = v
+                names.append(f':{key}')
+            parts.append(f'{field} IN ({", ".join(names)})')
+        if len(concrete) != len(picked):
+            parts.append(f"({field} IS NULL OR {field} = '')")
+        # `parse_query` drops empty lists, so `parts` is never empty.
+        clauses.append('(' + ' OR '.join(parts) + ')')
+    return ' AND '.join(clauses), binds
+
+
 def matches(fact: Dict[str, Any], filters: Dict[str, List[str]]) -> bool:
     """Dimension filters only — the date range is applied by `facts_for`,
-    on whichever date that subject is keyed to."""
+    on whichever date that subject is keyed to.
+
+    Called with the PYTHON HALF of the filters (see `split_filters`); the
+    rest never reaches here because the SQL already dropped those rows.
+    Passing the full set still works and is what the tests do — it is
+    just redundant work.
+    """
     for dim, picked in filters.items():
         value = value_of(fact, dim)
         # A `search` dimension holds ONE free-text query and matches on
@@ -683,7 +1001,10 @@ def run_query(query: Dict[str, Any],
         conn.close()
 
     subject = query['subject']
-    rows = [f for f in facts if matches(f, query['filters'])]
+    # Only the half SQL could not do. The pushed-down half was applied by
+    # `facts_for`, and re-testing it here would be pure waste on the
+    # hottest loop in the engine.
+    rows = [f for f in facts if matches(f, split_filters(query['filters'])[1])]
 
     # Totals ALWAYS span the whole filtered result. The engine holds every
     # matching row and the client pages in the browser, so paging never
