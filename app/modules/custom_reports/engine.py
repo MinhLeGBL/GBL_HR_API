@@ -21,7 +21,8 @@ The request contract is in
 """
 import datetime as dt
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.database import get_oracle_connection
 from .queries import EngineQueries
@@ -235,12 +236,22 @@ class QueryError(ValueError):
 # ----------------------------------------------------------------------
 # Request validation
 # ----------------------------------------------------------------------
-def parse_query(body: Any) -> Dict[str, Any]:
+def parse_query(body: Any, universe_of: 'UniverseOf' = None) -> Dict[str, Any]:
     """Validate a request body into a normalised query dict, or raise.
 
     Everything is checked here rather than trusted from the client — the
     picker enforces the one-year cap and the three-dimension limit, but a
     client is not a validator.
+
+    `universe_of` is optional and, when given, is asked `dim -> every
+    value that dimension can take`. It exists for ONE check — whether a
+    filter that looks pushable actually narrows anything (see
+    `_narrowing`). Default `None` keeps this function PURE: no argument,
+    no database, same behaviour as before. The route supplies a real one
+    via `universe_lookup()`.
+
+    ⚠️ It is asked ONLY when the range exceeds `MAX_RANGE_DAYS`, so an
+    ordinary request never pays for it. See the comment at the call site.
     """
     if not isinstance(body, dict):
         raise QueryError('request body must be an object')
@@ -307,11 +318,49 @@ def parse_query(body: Any) -> Dict[str, Any]:
     # for the same reason (see `PUSHDOWN_EXCLUDED`).
     span = (date_to - date_from).days + 1
     pushable, _ = split_filters(filters)
+
+    # ⚠️ A FILTER THAT SELECTS EVERY OPTION NARROWS NOTHING.
+    #
+    # `split_filters` only asks whether a dimension CAN go into SQL, not
+    # whether the values picked exclude any row. Tick every box and the
+    # `IN (...)` list matches the whole table, so the request was buying
+    # five years at the price of a filter it does not actually have. The
+    # low-cardinality dimensions make that easy rather than perverse —
+    # `fpMd` has 2 options, `gender` 4, `customerTier` 5, `store` 6,
+    # `department` 7, so "all of them" is a few clicks, not a script.
+    #
+    # Checked HERE and only here, because this is the one decision that
+    # turns on it. Asked only past `MAX_RANGE_DAYS`: inside the plain cap
+    # the question cannot change the answer, so no ordinary request pays
+    # the lookup. Measured on production, the lookup is 0.055–0.239s per
+    # dimension (`fpMd` is free, it is a constant) against a query that
+    # is seconds — and a 5-year request asks at most three of them.
+    broad: List[str] = []
+    if span > MAX_RANGE_DAYS and pushable and universe_of is not None:
+        narrowing = {}
+        for dim, picked in pushable.items():
+            if _narrowing(dim, picked, universe_of(dim)):
+                narrowing[dim] = picked
+            else:
+                broad.append(dim)
+        pushable = narrowing
+
     cap = MAX_RANGE_DAYS_FILTERED if pushable else MAX_RANGE_DAYS
     if span > cap:
         if pushable:
             raise QueryError(
                 f'date range must not exceed {cap} days', 'rangeTooLong')
+        # Naming the broad filter matters: this user DID set one, so
+        # "needs a filter" would read as a bug in the page rather than as
+        # a fact about their selection, and the cheap fix — untick
+        # something — would be invisible.
+        if broad:
+            raise QueryError(
+                f'the filter on {", ".join(sorted(broad))} selects every '
+                f'option, so it narrows nothing — a range beyond '
+                f'{MAX_RANGE_DAYS} days needs a filter that excludes '
+                f'something',
+                'rangeFilterTooBroad')
         raise QueryError(
             f'date range must not exceed {cap} days without a filter on '
             f'{", ".join(_pushable_dims(subject))} — '
@@ -334,6 +383,93 @@ def _pushable_dims(subject: str) -> List[str]:
         if meta.get('filterable') and meta['field']
         and dim not in PUSHDOWN_EXCLUDED and subject in meta['subjects']
     )
+
+
+def _narrowing(dim: str, picked: List[str], universe: Optional[List[str]]) -> bool:
+    """Does this selection exclude anything at all?
+
+    True when the picked values leave something out, so SQL can use them
+    to read fewer rows. False when they cover the dimension's whole
+    universe, which is a filter in form only.
+
+    ⚠️ UNKNOWN WINS. A `None` universe means the lookup could not answer
+    (no connection, or the query failed), and an EMPTY one means it
+    answered something impossible — a dimension always has at least one
+    value. Both return True, deliberately: this gate is a cost control,
+    not an access control. Refusing a legitimate filtered report because
+    a 60ms lookup hiccuped would be a worse failure than allowing a
+    long query that the concurrency cap and the request timeout already
+    bound — and if Oracle cannot answer `SELECT DISTINCT vend_name`, the
+    report query behind it was never going to succeed anyway.
+
+    Compared as a SUPERSET, not for equality, so a stale or duplicated
+    client value cannot defeat the check by making the sets merely
+    unequal. Raw string comparison matches `_where_for` and `matches`,
+    which also compare what `value_of` returns without trimming or
+    folding case — the three must agree about the same row.
+    """
+    if not universe:
+        return True
+    return not set(picked) >= set(universe)
+
+
+# A `dim -> all its values` lookup, or None where it cannot say. Defined
+# as a name so `parse_query`'s signature reads as intent rather than as
+# plumbing.
+UniverseOf = Optional[Callable[[str], Optional[List[str]]]]
+
+
+@contextmanager
+def universe_lookup():
+    """Yield a `universe_of` for `parse_query`, backed by Oracle.
+
+    Lazy on purpose, at two levels. The CONNECTION is not opened until a
+    dimension is actually asked about — a request inside the plain
+    `MAX_RANGE_DAYS` cap asks nothing, so it pays neither the 0.25s
+    connect nor any query. And each dimension is asked at most once, so
+    two filters share one connection.
+
+    A failure to answer is swallowed into `None` rather than raised: see
+    `_narrowing` for why unknown has to mean "assume it narrows". That
+    also keeps a validation path from turning an Oracle blip into a 500
+    on a request that would otherwise have been a clean 400.
+    """
+    state: Dict[str, Any] = {'conn': None, 'tried': False, 'cache': {}}
+
+    def universe_of(dim: str) -> Optional[List[str]]:
+        if dim in state['cache']:
+            return state['cache'][dim]
+
+        # Free for the dimensions whose values are a constant in this
+        # file — `fpMd` is the likeliest "all options" of the lot (two
+        # checkboxes) and it costs nothing to catch.
+        if dim in _PICKER_FIXED:
+            state['cache'][dim] = list(_PICKER_FIXED[dim])
+            return state['cache'][dim]
+
+        if not state['tried']:
+            state['tried'] = True
+            state['conn'] = get_oracle_connection()
+        if state['conn'] is None:
+            state['cache'][dim] = None
+            return None
+
+        values: Optional[List[str]]
+        cur = state['conn'].cursor()
+        try:
+            values = _distinct_values(cur, dim)
+        except Exception:
+            values = None
+        finally:
+            cur.close()
+        state['cache'][dim] = values
+        return values
+
+    try:
+        yield universe_of
+    finally:
+        if state['conn'] is not None:
+            state['conn'].close()
 
 
 # ----------------------------------------------------------------------

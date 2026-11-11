@@ -120,7 +120,9 @@ def run_query():
         subject  — "sales" | "imports" | "sellThrough"
         from, to — inclusive ISO yyyy-mm-dd. At most 366 days apart, or
                    up to 1830 (five years) when at least one filter can
-                   be pushed into SQL — see `MAX_RANGE_DAYS_FILTERED`.
+                   be pushed into SQL AND actually excludes something —
+                   see `MAX_RANGE_DAYS_FILTERED` and `_narrowing`. A
+                   filter that selects every option does not count.
         filters  — { dimensionId: string[] }, empty array = no filter
         groupBy  — up to 3 dimension ids; [] means line detail
 
@@ -135,7 +137,12 @@ def run_query():
     one that was asked.
     """
     try:
-        query = engine.parse_query(request.get_json(silent=True))
+        # The lookup is what lets validation reject a filter that selects
+        # every option — see `engine._narrowing`. It opens no connection
+        # unless the range actually exceeds the plain cap, so the common
+        # request is unchanged.
+        with engine.universe_lookup() as universe_of:
+            query = engine.parse_query(request.get_json(silent=True), universe_of)
     except engine.QueryError as e:
         # `code` only where the frontend has a translation for it; the
         # English `error` remains the contract and the fallback.
