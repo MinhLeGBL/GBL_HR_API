@@ -3,6 +3,175 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.8.0] — 2026-11-10
+
+### Added — filter pushdown, and multi-year ranges that depend on it
+
+**Filters that SQL can apply are now applied in SQL**, inside the pull,
+instead of in Python after it. Measured on production, `COUNT(*)` over the
+`SALE_LINES` joins:
+
+| range | unfiltered | `brand = 'AKRIS'` |
+|---|---|---|
+| 1 year | 6.34s | **0.25s** |
+| 3 years | 20.62s | **0.53s** |
+
+End to end through `run_query`, against live Oracle, pushdown on vs off:
+
+| query | on | off | speedup |
+|---|---|---|---|
+| 1y, `brand=AKRIS`, groupBy store | 1.83s | 7.04s | 3.8x |
+| 1y, `customerTier=GOLD`, groupBy store | 0.56s | 7.46s | 13.3x |
+| 1y, `brand=AKRIS`, line detail | 0.62s | 7.04s | 11.3x |
+| 1y, `department=UNKNOWN`, groupBy brand | 0.50s | 7.13s | 14.2x |
+
+**Eight of the eleven filterable dimensions push down**: `store`,
+`brand`, `season`, `gender`, `department`, `category`, `fpMd`,
+`customerTier`. Three deliberately do not — see `PUSHDOWN_EXCLUDED`:
+
+- `size` — normalised per brand by `normalize_size()`, a Python table.
+- `customerType` — derived, and relative to the period.
+- `customer` — **has** a column, and is still held back: `_derive`
+  rewrites it to `None` for walk-ins and for the TOURIST aggregation
+  record, so a SQL filter would keep rows `matches()` drops.
+
+**`MAX_RANGE_DAYS_FILTERED = 1830` (five years)**, alongside the existing
+`MAX_RANGE_DAYS = 366`. A range beyond a year is allowed only when at
+least one *pushable* filter narrows it, so a multi-year single-brand
+report — now 2.13s for 3 years, 1.02s for 5 — is cheaper than the
+one-year unfiltered query that was always permitted. `size`,
+`customerType` and `customer` do not unlock it however selective they
+look: they run after the full pull, so they would license the long range
+without making it cheaper.
+
+**A filter that selects every option does not unlock it.** `split_filters`
+only answers whether a dimension *can* go into SQL, not whether the values
+picked exclude any row — so ticking every box bought five years at the
+price of a filter the request did not actually have. The low-cardinality
+dimensions make that easy rather than perverse; measured on production,
+2026-11-11:
+
+| dimension | options | picker lookup |
+|---|---|---|
+| `fpMd` | 2 | free (a constant in `engine.py`) |
+| `gender` | 4 | 0.154s |
+| `customerTier` | 5 | 0.059s |
+| `store` | 6 | 0.111s |
+| `department` | 7 | 0.055s |
+| `season` | 82 | 0.090s |
+| `category` | 125 | 0.169s |
+| `brand` | 381 | 0.239s |
+
+`_narrowing()` now compares the selection against the dimension's whole
+universe and drops it from the pushable set when it covers everything;
+`universe_lookup()` supplies the universes. Refused with the new code
+`rangeFilterTooBroad`, whose message **names the offending filter** — a
+user who ticked every box does have a filter, so "needs a filter" would
+read as a page bug rather than as a fact about their selection, and the
+cheap fix (untick something) would be invisible.
+
+Cost of the check: **nothing on an ordinary request.** The lookup is
+consulted only past `MAX_RANGE_DAYS`, where it cannot be redundant, and
+`universe_lookup()` opens no connection until a dimension is actually
+asked about. Verified against live Oracle: every ≤366-day case and every
+`fpMd` case resolves in 0.00s; a long-range case that must query takes
+0.54–0.96s against a report measured in seconds.
+
+It **fails open**. An unanswerable lookup — no connection, or a failed
+query — is treated as "assume it narrows", because this is a cost control
+and not an access control: refusing a legitimate filtered report over a
+60ms hiccup is the worse failure, and if Oracle cannot answer `SELECT
+DISTINCT vend_name` then the report behind it was never going to succeed.
+
+⚠️ The gate still does not judge HOW MUCH a filter removes, only that it
+removes something. Three years of `department = RTW` (~79% of lines) is
+**14.99s** — inside the worker timeout, and bounded by the concurrency
+cap, but not fast. Judging selectivity properly would mean counting rows
+first, and the COUNT is most of the query.
+
+⚠️ **The real request ceiling is nginx's `proxy_read_timeout 60s`, not
+gunicorn's `--timeout 120`** (found 2026-11-11 on the live vhost). Past
+60s nginx returns 504 while the query keeps running, holding its worker
+and its Oracle session. Nothing in this release can be known to exceed
+that, but the five-year allowance is the first thing that could, so the
+number is recorded here rather than discovered later.
+
+⚠️ `parse_query` now validates **filters before the date range**, because
+which cap applies depends on them. A malformed filter is still reported as
+a malformed filter; only the ordering of the two checks moved.
+
+### Added — a concurrency cap on `/query`
+
+`CUSTOM_REPORTS_MAX_CONCURRENT` (default **2**) in-flight queries per
+worker process; beyond that, **503** with `error: "reportsBusy"` and
+`Retry-After: 10`.
+
+gunicorn runs `--workers 3` with the default sync worker, so one query
+holds one of three processes for its whole duration. Three slow queries at
+once left nothing for `/auth/login` — the failure mode was not a slow
+report but the entire tool appearing dead. Capping at two leaves a worker
+free by construction. It refuses rather than queues: blocking would hold
+the very worker the cap exists to protect.
+
+### Added — stable error codes for the two failures the UI translates
+
+`QueryError` now carries an optional `code`, and `/query` returns it
+beside the English `error`:
+
+| code | status | when |
+|---|---|---|
+| `rangeNeedsFilter` | 400 | over a year with nothing pushable to narrow it |
+| `rangeFilterTooBroad` | 400 | over a year, filtered, but the filter selects every option |
+| `rangeTooLong` | 400 | over five years even when filtered |
+| `reportsBusy` | 503 | the concurrency cap is full |
+
+Only these four are emitted. Every other validation error stays prose,
+because it names a dimension or a field and reads fine untranslated — and
+because a code the frontend does not know would otherwise render as a raw
+key path, which is the defect the column labels already had once. The
+frontend maps these through an explicit allow-list and falls back to the
+server's own words for anything else.
+
+### Verified — pushdown does not change the answer
+
+11 query shapes run against live Oracle with pushdown on and off, covering
+all three subjects, grouped and line-detail, `UNKNOWN`/NULL handling, a
+mixed push+Python filter, and the FIFO sell-through path:
+**11/11 equivalent, 0 regressions.**
+
+Two benign differences, both expected and neither a value change:
+
+- **Row order** differs on 4 of the 11. Oracle's access path changes when
+  the predicate moves inside, and line detail has never had a defined
+  order in either engine — `mocks/engine.ts` maps lines in insertion
+  order too. Identical row *sets* and identical totals.
+- **Float associativity** shifts a few ratio measures (`fpSalesShare`,
+  `fpShare`) by ~1e-15 relative. Summing the same values in a different
+  order is not bit-identical; the figures are rendered to 1–3 decimals.
+
+84 new unit tests — 73 in `test_filter_pushdown.py` and 11 route-level
+ones covering the failure shapes below. Module suite 185, backend suite
+**1526**. The pushdown predicate is tested by **executing** it
+against an in-memory table and comparing row-for-row with `matches()`,
+rather than by string-matching the generated SQL — asserting on the text
+would pass a WHERE clause that is well-formed and wrong.
+
+⚠️ Every route test that asks for a range beyond `MAX_RANGE_DAYS` now
+mocks `get_oracle_connection` away. Past that cap the route consults
+`universe_lookup()`, and under `FLASK_ENV=testing` an unmocked call spends
+**~1.7s** failing to resolve the Oracle host before returning `None` — it
+was half this module's route-test runtime for one test until it was
+mocked. The module suite runs in 2.45s.
+
+### Known, not fixed
+
+**Line detail has no deterministic row order** — it never has, in either
+engine. Two exports of the same query can differ in order, which makes
+diffing them noisy. Pre-existing; pushdown makes it more visible by
+changing the order once. Fixing it means sorting detail rows in both the
+backend and `mocks/engine.ts`, which is a spec change rather than a
+performance one.
+
 ## [0.7.0] — 2026-11-05
 
 ### 🔴 Security — every route now requires the `CUSTOM_REPORTS` section
