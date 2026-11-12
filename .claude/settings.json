@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/dev/worklog_state.py\"; [ -f \"$f\" ] && python3 \"$f\" --hook || true",
+            "timeout": 20,
+            "statusMessage": "Checking cross-repo worklog against git..."
+          }
+        ]
+      }
+    ]
+  }
+}
