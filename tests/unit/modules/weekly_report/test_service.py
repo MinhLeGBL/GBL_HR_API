@@ -227,14 +227,31 @@ class TestRenderTemplate:
 
     def test_fills_the_vietnamese_opening_sentence(self, payload):
         out = render_template(DEFAULT_BODY_TEMPLATE, payload, 'PHÂN TÍCH')
-        # Year-on-year since 2026-09-22, so BOTH weeks carry their year. The
-        # sentence announces the comparison the analysis then makes; if it said
-        # "Tuần 37 so với Tuần 36" the email would contradict its own contents.
-        assert 'Tuần 37/2026 so với Tuần 37/2025' in out
+        # The sentence announces the two parts the analysis then makes.
+        assert 'gồm hai phần' in out
         assert 'lũy kế tháng 9 (01/09–13/09)' in out
+        assert 'lũy kế từ đầu năm' in out
         assert 'triệu đồng, chưa bao gồm VAT' in out
         assert 'PHÂN TÍCH' in out
         assert '{{' not in out
+
+    def test_the_two_part_count_describes_the_summary_not_the_attachment(self):
+        # The workbook still has three sheets (excel.SHEET_NAMES), so the
+        # sentence about the ATTACHMENT must not claim two parts. These are
+        # two sentences with two different subjects and merging them would
+        # make the email contradict the file opened next to it.
+        attachment, summary = (line for line in DEFAULT_BODY_TEMPLATE.splitlines()
+                               if line.startswith(('Đính kèm', 'Xin tóm tắt')))
+        assert 'phần' not in attachment
+        assert 'gồm hai phần' in summary
+
+    def test_the_opening_no_longer_announces_a_weekly_section(self):
+        # It used to read "gồm ba phần: Tuần X so với Tuần Y, ...". The
+        # commentary no longer writes that part, so announcing it would
+        # promise a section that never arrives.
+        assert 'ba phần' not in DEFAULT_BODY_TEMPLATE
+        assert '{{week_no}}' not in DEFAULT_BODY_TEMPLATE
+        assert '{{prior_week_no}}' not in DEFAULT_BODY_TEMPLATE
 
     def test_dates_are_day_first_for_the_vietnamese_reader(self, payload):
         assert render_template('{{week_range}}', payload) == '07/09–13/09'
