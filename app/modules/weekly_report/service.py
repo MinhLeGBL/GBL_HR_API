@@ -56,11 +56,22 @@ DEFAULT_SUBJECT_TEMPLATE = 'Báo cáo bán hàng định kỳ — Tuần {{week_
 #
 # The fixed wording is the company's own. Only the numbered analysis is written
 # by the model, through `{{commentary}}` — everything around it is template.
+#
+# Two sentences, two different subjects, and they must not be merged:
+#
+#   The FIRST describes the ATTACHMENT, which still carries three sheets —
+#   week, month to date, year to date (`excel.SHEET_NAMES`). It therefore
+#   names no part count at all; it used to say "gồm ba phần".
+#   The SECOND describes the WRITTEN SUMMARY, which since 2026-11-13 is two
+#   parts (`commentary.NARRATED_LABELS`).
+#
+# Saying "gồm hai phần" of the attachment would be false, and it is the
+# sentence a reader checks against the spreadsheet they just opened.
 DEFAULT_BODY_TEMPLATE = """Dear all,
 
-Đính kèm là báo cáo bán hàng định kỳ, gồm ba phần: Tuần {{week_no}}/{{week_year}} so với Tuần {{prior_week_no}}/{{prior_week_year}}, lũy kế tháng {{month_no}} ({{mtd_range}}) và lũy kế từ đầu năm, chia theo cửa hàng và ngành hàng. (Đơn vị tiền: triệu đồng, chưa bao gồm VAT.)
+Đính kèm là báo cáo bán hàng định kỳ, chia theo cửa hàng và ngành hàng. (Đơn vị tiền: triệu đồng, chưa bao gồm VAT.)
 
-Xin tóm tắt các điểm chính, theo thứ tự từ tuần gần nhất đến lũy kế năm:
+Xin tóm tắt các điểm chính, gồm hai phần — lũy kế tháng {{month_no}} ({{mtd_range}}) và lũy kế từ đầu năm:
 
 {{commentary}}
 
