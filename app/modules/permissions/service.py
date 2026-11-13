@@ -130,12 +130,22 @@ class PermissionService:
                 ('ACCOUNT_PAYABLE', 'Account Payable', 'AR payable reconciliation tool (CR #60)'),
                 ('HAND_CARRY', 'Hand Carry', 'Hand-carry UPC catalog under Commission (CR #57)'),
                 ('LIVE_COMPARISON', 'Live Sale Comparison', 'Two-period sale comparison report under Report (CR #78)'),
-                ('WEEKLY_REPORT', 'Weekly Report', 'Weekly sales report under Report — view, approve and send')
+                ('WEEKLY_REPORT', 'Weekly Report', 'Weekly sales report under Report — view, approve and send'),
+                ('CUSTOM_REPORTS', 'Custom Reports', 'Self-service query engine over sales, imports and sell-through under Report')
                 ON CONFLICT (code) DO NOTHING
             ''')
 
-            # Section permissions seed (additive — ON CONFLICT in _seed_v2_permissions)
-            self._seed_v2_permissions(cursor)
+            # Section permissions seed. Additive, and that now MATTERS: under
+            # department-only rule 5 a re-inserted department grant admits the
+            # whole department, so re-seeding over a migrated database would
+            # undo narrowing an administrator has done through the access page.
+            # Seed only when there is nothing to overwrite.
+            cursor.execute('SELECT COUNT(*) FROM section_departments')
+            if cursor.fetchone()[0] == 0:
+                self._seed_v2_permissions(cursor)
+            else:
+                print('[permissions] section grants already exist \u2014 seed skipped '
+                      '(re-seeding would restore grants removed via the UI)')
             self._migrate_periodic_report_to_weekly(cursor)
 
             conn.commit()
@@ -200,6 +210,21 @@ class PermissionService:
             'ACCOUNT_PAYABLE': ['HR', 'ACC'],
             'HAND_CARRY': ['HR'],
             'WEEKLY_REPORT': ['BOD'],
+            # CUSTOM_REPORTS is deliberately ABSENT, like CRM,
+            # BATHROOM_PRICE_CHECK and LIVE_COMPARISON: an admin or IT
+            # manager grants it on the access page (user's instruction,
+            # 2026-11-05 — "treat this feature like any other").
+            #
+            # ⚠️ Listing it here would be DEAD CODE in production anyway.
+            # `_seed_v2_permissions` only runs when `section_departments`
+            # is empty, which it has not been since the v2 migration, so
+            # a default grant added here reaches a fresh database only.
+            # It would also be the wrong default: the engine returns
+            # customer names, membership tiers and the full margin split.
+            #
+            # CONSEQUENCE, so it does not read as a bug on first deploy:
+            # the page is invisible to EVERY non-admin until someone
+            # grants the section. Admins resolve to all sections.
         }
         for section_code, depts in section_depts.items():
             for dept in depts:
@@ -213,7 +238,13 @@ class PermissionService:
             'COMMISSION_DATA': ['ADMIN', 'MANAGER', 'STAFF'],
             'USER_MANAGEMENT': ['ADMIN'],
             'EMPLOYEE_DATA': ['ADMIN', 'MANAGER'],
-            'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER'],
+            # Kept complete for the record, though `section_roles` is dead to
+            # resolution since rule 5 became department-only. STAFF was added
+            # when the rule still required a role match and an IT staff user
+            # was denied on that half; it now affects nothing at resolution
+            # time, and only shifts what the migration reads as the old
+            # baseline.
+            'ACCESS_MANAGEMENT': ['ADMIN', 'MANAGER', 'STAFF'],
             'BATHROOM_PRICE_CHECK': [],
             'CRM': [],
             'ACCOUNT_PAYABLE': ['ADMIN', 'MANAGER'],
@@ -616,8 +647,18 @@ class PermissionService:
         2. DASHBOARD → always included
         3. Excluded via section_exclusions_v2 → denied
         4. Included via section_inclusions → allowed
-        5. Department in section_departments AND role in section_roles → allowed
+        5. Department in section_departments → allowed
         6. Otherwise → denied
+
+        Rule 5 used to require department AND role. Role is no longer consulted:
+        the access page stores a department grant (everyone in it, standing) or
+        explicit users, and offers no role field, so keeping the role half would
+        mean every department grant matched nothing and silently granted nobody.
+
+        `section_roles` is left in place but is dead to resolution. It is not
+        dropped here because the data still describes who HAD access under the
+        old rules, which the migration in
+        `scripts/database/migrate_section_access_to_departments.py` reads.
         """
         conn = None
         try:
@@ -665,13 +706,6 @@ class PermissionService:
                 )
                 dept_sections = {r[0] for r in cursor.fetchall()}
 
-            # Sections where user's role is allowed
-            cursor.execute(
-                'SELECT section_code FROM section_roles WHERE role_code = %s',
-                (user_role.upper(),)
-            )
-            role_sections = {r[0] for r in cursor.fetchall()}
-
             result = []
             for code, name in all_sections:
                 # DASHBOARD always included
@@ -688,8 +722,9 @@ class PermissionService:
                     result.append({'section_code': code, 'section_name': name})
                     continue
 
-                # Department + role check
-                if code in dept_sections and code in role_sections:
+                # Department check. NOT "department AND role" any more — see
+                # the docstring.
+                if code in dept_sections:
                     result.append({'section_code': code, 'section_name': name})
 
             cursor.close()

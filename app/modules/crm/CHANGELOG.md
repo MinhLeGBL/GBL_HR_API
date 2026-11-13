@@ -100,8 +100,22 @@ bucket:
 - `count_full_price + count_discounted == total units sold` — exact (integer
   `QTY`, no rounding).
 
-Only `ITEM_TYPE = 1` lines participate (suitcase / gift-certificate / service
-items excluded), matching the existing revenue window (rolling 24 months).
+Only `ITEM_TYPE = 1` lines participate, matching the existing revenue window
+(rolling 24 months).
+
+> **Correction (2026-11-05) — the original justification for this filter was
+> factually wrong.** It read "suitcase / gift-certificate / service items
+> excluded". That is not what `ITEM_TYPE = 2` holds. Measured on production
+> (read-only): type 2 is **returns** — 1,109 lines, **1,107 of them carrying
+> `RETURNED_ITEM_INVOICE_SID`**, the invoice they reverse; sampled rows are
+> ordinary merchandise (GANNI tops, ERES swimwear). Types 3 (26 lines) and 5
+> (36 lines, **zero** qty) are negligible. So the filter's real effect is to
+> **exclude returns** from RFM and from the FP/MD split — defensible (a refund
+> is not a visit), but **no decision to do so is on record**: the module has
+> been sales-only since the CR #40 scaffold, and `ITEM_TYPE = 2` has never
+> appeared in it. **Behaviour is unchanged by this correction** — only the
+> explanation. See `custom_reports` v0.5.0 for the four different return
+> conventions that coexist across modules.
 
 This **replaces** the pre-CR#76 per-line *proportional* split that the customer
 drilldown used, so the drilldown and the segment dashboard now agree.

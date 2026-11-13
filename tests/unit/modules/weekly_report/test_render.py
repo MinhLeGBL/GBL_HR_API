@@ -3,11 +3,12 @@
 The draft is stored as lightly-marked text and rendered two ways at send time:
 HTML (where bold and bullets actually show) and a plain-text alternative.
 """
-from app.modules.weekly_report.render import (SIGNATURE, html_document,
+from app.modules.weekly_report.render import (HOMEPAGE_URL, LOGO_CID,
+                                                LOGO_HEIGHT, LOGO_WIDTH,
+                                                SIGNATURE, html_document,
                                                 markdown_to_html,
-                                                signature_html,
-                                                signature_text,
-                                                to_plain_text)
+                                                signature_html, signature_logo,
+                                                signature_text, to_plain_text)
 
 
 class TestBold:
@@ -107,42 +108,106 @@ class TestEmptyInput:
 
 
 class TestSignature:
-    """The sender's mail-server signature, appended at send time.
+    """The sender's signature, appended at send time.
 
     It lives in code rather than in the draft or the stored body_template, so a
     deploy ships it and neither an edit in the textarea nor a model-written
-    draft can drop it.
+    draft can drop it. Layout follows the company template issued 2026-10-02:
+    logo and rule on the left, then company, name and the contact rows.
     """
 
     def test_html_carries_every_field(self):
         html = signature_html()
-        for key in ('name', 'title', 'company', 'phone', 'address'):
+        for key in ('company', 'name', 'email', 'phone', 'home', 'address'):
             assert SIGNATURE[key] in html
 
-    def test_email_is_a_mailto_link(self):
-        html = signature_html()
-        assert f'href="mailto:{SIGNATURE["email"]}"' in html
+    def test_there_is_no_job_title(self):
+        # The issued template carries none, and the point of adopting it was to
+        # stop every signature in the company differing.
+        assert 'title' not in SIGNATURE
+        assert 'giám đốc' not in signature_html()
 
-    def test_name_is_bold_and_title_is_muted(self):
+    def test_the_email_address_is_NOT_a_link(self):
+        # A live mailto: reads as "click me" on an address nobody needs to
+        # click, and links in an automated report score worse with spam
+        # filters. Anyone replying uses Reply.
         html = signature_html()
+        assert 'mailto:' not in html
+        assert f'>{SIGNATURE["email"]}<' in html
+
+    def test_the_website_IS_a_link(self):
+        # It is the company's own site; following it is the point of listing it.
+        html = signature_html()
+        assert f'href="{HOMEPAGE_URL}"' in html
+        assert f'>{SIGNATURE["home"]}</a>' in html
+
+    def test_exactly_one_anchor_in_the_whole_signature(self):
+        assert signature_html().count('<a ') == 1
+
+    def test_company_is_muted_and_name_is_prominent(self):
+        html = signature_html()
+        assert '#5f6368' in html.split(SIGNATURE['company'])[0]
         assert 'font-weight:700' in html.split(SIGNATURE['name'])[0]
-        assert '#5f6368' in html.split(SIGNATURE['title'])[0]
+
+    def test_the_logo_is_referenced_by_cid_not_by_url(self):
+        # A remote src is blocked by default in Gmail and Outlook; a data: URI
+        # is stripped by Gmail. Only an inline cid: part renders unprompted.
+        html = signature_html()
+        assert f'src="cid:{LOGO_CID}"' in html
+        assert 'http://' not in html.split('<img')[1].split('>')[0]
+        assert 'data:image' not in html
+
+    def test_the_logo_states_its_dimensions(self):
+        # So clients reserve the space before the image decodes, instead of
+        # reflowing the signature as it loads.
+        html = signature_html()
+        assert f'width="{LOGO_WIDTH}"' in html
+        assert f'height="{LOGO_HEIGHT}"' in html
+
+    def test_signature_logo_returns_bytes_for_the_shipped_file(self):
+        cid, mime, payload = signature_logo()
+        assert cid == LOGO_CID
+        assert mime == 'image/jpeg'
+        assert payload.startswith(b'\xff\xd8\xff')   # JPEG SOI marker
+
+    def test_the_logo_is_the_supplied_file_not_a_re_encode(self):
+        # Re-encoding the supplied JPEG as PNG tripled it (5.6 KB -> 17.7 KB)
+        # for no gain — greyscale, no alpha, and every client that renders one
+        # renders the other. The image ships in EVERY email, so the size is
+        # paid per message.
+        _, _, payload = signature_logo()
+        assert len(payload) < 8_000
+
+    def test_a_missing_logo_drops_the_image_rather_than_breaking_it(self):
+        # Missing art must never stop the week's figures going out, and an
+        # <img> pointing at a cid nobody attached renders as a broken box.
+        html = signature_html(with_logo=False)
+        assert '<img' not in html
+        assert SIGNATURE['name'] in html
 
     def test_styles_stay_inline_like_the_rest_of_the_email(self):
         assert '<style' not in signature_html()
 
-    def test_plain_text_keeps_the_separator_and_the_fields(self):
+    def test_laid_out_with_tables_not_flex(self):
+        # Outlook renders Word's HTML engine, which supports neither flex nor
+        # float; the signature would collapse into a stack there.
+        html = signature_html()
+        assert '<table' in html
+        assert 'display:flex' not in html and 'float:' not in html
+
+    def test_plain_text_keeps_the_fields(self):
         text = signature_text()
-        assert text.lstrip().startswith('---')
-        for key in ('name', 'title', 'company', 'email', 'phone', 'address'):
+        for key in ('company', 'name', 'email', 'phone', 'home', 'address'):
             assert SIGNATURE[key] in text
 
+    def test_plain_text_carries_no_image_placeholder(self):
+        # Plain text cannot show a logo, and "[image]" tells the reader nothing.
+        text = signature_text()
+        assert 'cid:' not in text and '[image]' not in text.lower()
+
     def test_vietnamese_survives_escaping(self):
-        # escape() must not mangle the diacritics in the name or address.
-        html = signature_html()
-        assert 'Lê Minh' in html
-        assert 'Phó giám đốc' in html
-        assert 'Đặng Tất' in html
+        assert 'Lê Minh' in signature_html()
+        assert 'Lê Minh' in signature_text()
 
     def test_appends_after_the_draft_without_swallowing_it(self):
         draft = 'Dear all,\n\nBest regards,\n'

@@ -21,6 +21,9 @@ app/
     bathroom/              # Bathroom product catalog (Dolomite, Valsir, Paffoni)
     crm/                   # Customer RFM segmentation (luxury hybrid approach)
     handcarry/             # Hand-carry UPC list management (sub-feature of commission)
+    account_payable/       # Manual reconciliation tool (Phase 1 scaffold)
+    reports/               # Read-only Oracle reports (two-period sale comparison)
+    custom_reports/        # Self-service query engine (sales / imports / sell-through) + size-by-brand-season
   main.py                  # Flask app factory, blueprint registration
 config/                    # Environment-based settings (database.py, settings.py)
 scripts/                   # Operational scripts
@@ -48,6 +51,7 @@ tests/                     # Mirrors module structure
 | `modules/handcarry` | `handcarry_bp` | `/api/v1/handcarry` | `HandCarryService` | Hand-carry UPC list (rps.carrier_item) — list / bulk import / edit / delete |
 | `modules/account_payable` | `account_payable_bp` | `/api/v1/account-payable` | `AccountPayableService` | Manual reconciliation tool — closes CR #59 Phase C release tracking (Phase 1 scaffold, endpoints return 501) |
 | `modules/reports` | `reports_bp` | `/api/v1/reports` | `ReportsService` | Read-only Oracle reports — two-period sale comparison (revenue/bills/avg + new-vs-returning), CR #78 |
+| `modules/custom_reports` | `custom_reports_bp` | `/api/v1/custom-reports` | `CustomReportsService` | Self-service QUERY ENGINE over sales / imports / sell-through — one `POST /query` with user-chosen filters and group-by (max 3), plus the older size × brand × season and FIFO days-to-sell pulls |
 | `modules/weekly_report` | `weekly_report_bp` | `/api/v1/weekly-report` | `WeeklyReportService` | Weekly sales report — snapshot, .xlsx, email draft, approve-and-send workflow |
 
 ## Import Rules

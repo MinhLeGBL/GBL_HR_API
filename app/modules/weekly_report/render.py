@@ -23,6 +23,7 @@ the email or inject anything.
 """
 import re
 from html import escape
+from pathlib import Path
 
 _BOLD = re.compile(r'\*\*(.+?)\*\*', re.S)
 _BULLET = re.compile(r'^[-*•]\s+(.*)$')
@@ -88,59 +89,128 @@ def markdown_to_html(text: str) -> str:
 # The sender's mail-server signature, reproduced so the SMTP path matches what
 # the webmail client appends. One sender identity for this report, so these are
 # literals rather than configuration.
+#
+# Follows the company-wide template issued 2026-10-02: company line, then name,
+# then the contact rows. That template carries no job title, so neither does
+# this. "Corporation" is spelt correctly here; the issued template misspells it
+# "Coporation" — a deliberate departure, agreed with the sender.
 SIGNATURE = {
+    'company': 'Global Link Corporation',
     'name': 'Lê Minh',
-    'title': 'Phó giám đốc',
-    'company': 'Globallink',
     'email': 'minhle@globallink.vn',
     'phone': '0903951092',
-    'address': '20 Đặng Tất, Phường Tân Định, TP.HCM',
+    'home': 'www.runwayvietnam.com',
+    'address': '20 Dang Tat street, Tan Dinh District, Ho Chi Minh City, '
+               'Vietnam.',
 }
 
-_SIG_SEP_STYLE = 'margin:18px 0 12px 0;color:#9aa0a6'
-_SIG_NAME_STYLE = 'margin:0 0 3px 0;font-size:15px;font-weight:700;color:#1a1a1a'
-_SIG_MUTED_STYLE = 'margin:0;color:#5f6368'
-_SIG_TABLE_STYLE = 'margin:12px 0 0 0;border-collapse:collapse'
-_SIG_LABEL_STYLE = ('padding:0 14px 2px 0;font-weight:700;color:#1a1a1a;'
-                    'vertical-align:top;white-space:nowrap')
-_SIG_VALUE_STYLE = 'padding:0 0 2px 0;color:#1a1a1a;vertical-align:top'
-_SIG_LINK_STYLE = 'color:#1a73e8;text-decoration:none'
+# The logo sits to the LEFT of the text block, with a vertical rule between
+# them. The rule is part of the image rather than a CSS border: borders on
+# table cells are the first thing Outlook's renderer disagrees about, and a
+# one-pixel line that lands in the wrong place looks like a defect.
+# Kept as the JPEG that was supplied. Re-encoding it as PNG tripled the size
+# (5.6 KB -> 17.7 KB) and bought nothing: the source is greyscale with no alpha
+# channel, so there was no transparency to preserve, and every mail client that
+# renders a PNG renders a JPEG. The cost is per-message, since the image is
+# embedded in each email rather than fetched once.
+LOGO_PATH = Path(__file__).resolve().parent / 'assets' / 'runway_logo.jpg'
+LOGO_CID = 'runway-logo'
+LOGO_MIME = 'image/jpeg'
+LOGO_WIDTH = 150          # display px; the file is 330 wide, so it stays sharp
+LOGO_HEIGHT = 117         # 330x257 held to ratio — stated so clients reserve
+                          # the space before the image loads
 
 
-def signature_html() -> str:
-    """The signature as an HTML fragment, styled to match the mail client."""
+def signature_logo():
+    """(cid, mime, bytes) for the logo, or None when the file is missing.
+
+    Missing art must not stop a report going out: the figures are the point of
+    the email. `signature_html` drops the image column in that case and the
+    text block simply starts at the left margin.
+    """
+    try:
+        return (LOGO_CID, LOGO_MIME, LOGO_PATH.read_bytes())
+    except OSError:
+        return None
+
+
+_SIG_COMPANY = ('margin:0 0 2px 0;font-size:14px;font-weight:700;'
+                'color:#5f6368')
+_SIG_NAME = 'margin:0 0 8px 0;font-size:15px;font-weight:700;color:#1a1a1a'
+_SIG_TABLE = 'border-collapse:collapse;font-size:13px;line-height:1.5'
+_SIG_LABEL = ('padding:0 6px 2px 0;font-weight:700;color:#5f6368;'
+              'vertical-align:top;white-space:nowrap')
+_SIG_VALUE = 'padding:0 22px 2px 0;color:#1a1a1a;vertical-align:top'
+_SIG_LOGO_CELL = 'padding:0 18px 0 0;vertical-align:middle'
+_SIG_LINK = 'color:#1155cc;text-decoration:underline'
+
+# The EMAIL ADDRESS is plain text, not a mailto: anchor. Clients style a real
+# <a> blue and underlined, which reads as "click me" on an address nobody needs
+# to click — anyone replying uses Reply. The WEBSITE is a genuine link: it is
+# the company's own site and following it is the point of putting it there.
+HOMEPAGE_URL = 'https://www.runwayvietnam.com'
+
+
+def signature_html(with_logo=True):
+    """The signature as an HTML fragment: logo, rule, then the text block.
+
+    Laid out with tables rather than flex or float — Outlook renders Word's
+    HTML engine, which supports neither, and a signature that collapses into a
+    stack in the one client the board reads mail in is worse than no logo.
+    """
     s = SIGNATURE
     email = escape(s['email'])
-    rows = [
-        ('Email', f'<a href="mailto:{email}" style="{_SIG_LINK_STYLE}">{email}</a>'),
-        ('Phone', escape(s['phone'])),
-        ('Address', escape(s['address'])),
-    ]
-    cells = ''.join(
-        f'<tr><td style="{_SIG_LABEL_STYLE}">{escape(label)}:</td>'
-        f'<td style="{_SIG_VALUE_STYLE}">{value}</td></tr>'
-        for label, value in rows
+    rows = (
+        f'<tr>'
+        f'<td style="{_SIG_LABEL}">Email:</td>'
+        f'<td style="{_SIG_VALUE}">{email}</td>'
+        f'<td style="{_SIG_LABEL}">Phone:</td>'
+        f'<td style="{_SIG_VALUE}">{escape(s["phone"])}</td>'
+        f'</tr>'
+        f'<tr>'
+        f'<td style="{_SIG_LABEL}">Home:</td>'
+        f'<td style="{_SIG_VALUE}" colspan="3">'
+        f'<a href="{HOMEPAGE_URL}" style="{_SIG_LINK}">{escape(s["home"])}</a>'
+        f'</td>'
+        f'</tr>'
+        f'<tr>'
+        f'<td style="{_SIG_LABEL}">Address:</td>'
+        f'<td style="{_SIG_VALUE}" colspan="3">{escape(s["address"])}</td>'
+        f'</tr>'
     )
+    text_block = (
+        f'<p style="{_SIG_COMPANY}">{escape(s["company"])}</p>'
+        f'<p style="{_SIG_NAME}">{escape(s["name"])}</p>'
+        f'<table style="{_SIG_TABLE}" cellpadding="0" cellspacing="0">{rows}</table>'
+    )
+
+    logo_cell = ''
+    if with_logo and LOGO_PATH.exists():
+        logo_cell = (
+            f'<td style="{_SIG_LOGO_CELL}">'
+            f'<img src="cid:{LOGO_CID}" width="{LOGO_WIDTH}" '
+            f'height="{LOGO_HEIGHT}" alt="Runway" '
+            f'style="display:block;border:0;outline:none;text-decoration:none">'
+            f'</td>'
+        )
     return (
-        f'<p style="{_SIG_SEP_STYLE}">---</p>'
-        f'<p style="{_SIG_NAME_STYLE}">{escape(s["name"])}</p>'
-        f'<p style="{_SIG_MUTED_STYLE}">{escape(s["title"])}</p>'
-        f'<p style="{_SIG_MUTED_STYLE}">{escape(s["company"])}</p>'
-        f'<table style="{_SIG_TABLE_STYLE}" cellpadding="0" cellspacing="0">'
-        f'{cells}</table>'
+        f'<table style="margin:18px 0 0 0;border-collapse:collapse" '
+        f'cellpadding="0" cellspacing="0"><tr>{logo_cell}'
+        f'<td style="vertical-align:middle">{text_block}</td></tr></table>'
     )
 
 
-def signature_text() -> str:
-    """The signature as plain text, column-aligned like the HTML table."""
+def signature_text():
+    """The signature as plain text. No logo — plain text cannot carry one, and
+    an "[image]" placeholder tells the reader nothing."""
     s = SIGNATURE
     return (
-        '\n---\n\n'
-        f'{s["name"]}\n'
-        f'{s["title"]}\n'
-        f'{s["company"]}\n\n'
+        '\n--\n'
+        f'{s["company"]}\n'
+        f'{s["name"]}\n\n'
         f'Email:   {s["email"]}\n'
         f'Phone:   {s["phone"]}\n'
+        f'Home:    {s["home"]}\n'
         f'Address: {s["address"]}'
     )
 
