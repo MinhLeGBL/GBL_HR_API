@@ -37,6 +37,7 @@ from app.modules.handcarry.service import HandCarryService
 from app.modules.account_payable.service import AccountPayableService
 from app.modules.reports.service import ReportsService
 from app.modules.weekly_report.service import WeeklyReportService
+from app.modules.tracking_system.service import TrackingSystemService
 
 INIT_STEPS = [
     ('Permissions (departments, section_groups, sections, permissions)',
@@ -69,6 +70,8 @@ INIT_STEPS = [
      ReportsService().init_database),
     ('Periodic Report (runs, recipients, settings, sends)',
      WeeklyReportService().init_database),
+    ('Tracking system (tracking_system_access, tracking_system_unlock_attempts)',
+     TrackingSystemService().init_database),
 ]
 
 
