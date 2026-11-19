@@ -70,6 +70,7 @@ class TestParsing:
     @pytest.mark.parametrize('value,expected', [
         (str(BIG_SID), BIG_SID), (BIG_SID, BIG_SID), ('12', 12),
         (True, None), (12.0, None), ('12a', None), ('', None), (None, None), (0, None), (-3, None),
+        ('\u00b2', None), ('1\u0663', None),         # Unicode digits: isdigit() but not int()
     ])
     def test_sid(self, value, expected):
         assert _sid(value) == expected
@@ -203,6 +204,13 @@ class TestImportOut:
             assert svc.import_out(9, [row])['errors'][0]['error'] == error
         pg.assert_not_called()
 
+    def test_the_same_line_twice_is_rejected(self, svc):
+        ora, _ = _ora([[LINE_ROW]])
+        with patch(ORA, return_value=ora), patch(PG) as pg:
+            r = svc.import_out(9, [{'line_id': '3', 'entered_revenue': 1}, {'line_id': '3', 'entered_revenue': 2}])
+        assert r['errors'] == [{'index': 1, 'line_id': '3', 'error': 'Same bill line as row 1'}]
+        pg.assert_not_called()
+
     def test_line_not_in_oracle(self, svc):
         ora, _ = _ora([[]])
         with patch(ORA, return_value=ora), patch(PG) as pg:
@@ -328,7 +336,7 @@ class TestLookupUpcs:
         assert r['results'][1]['matches'][0]['received_by_year'] == {'2025': 3.0, '2026': 1.0}
         assert r['results'][0]['matches'][0]['received_by_year'] == {}
 
-    @pytest.mark.parametrize('upcs', [None, [], '157820', ['12a'], ['-1'], [True], ['1' * 16], ['1'] * 1001])
+    @pytest.mark.parametrize('upcs', [None, [], '157820', ['12a'], ['-1'], [True], ['1' * 16], ['1'] * 1001, ['\u00b2']])
     def test_rejects_bad_input_before_oracle(self, svc, upcs):
         with patch(ORA) as ora:
             assert svc.lookup_upcs(upcs)['code'] == 'INVALID_INPUT'
@@ -340,6 +348,7 @@ class TestYear:
     @pytest.mark.parametrize('value,expected', [
         (2025, 2025), ('2026', 2026), (' 2024 ', 2024), (2000, 2000), (2100, 2100),
         (1999, None), (2101, None), ('25', None), (True, None), (2025.0, None), ('abc', None),
+        ('\u0662\u0660\u0662\u0665', None),           # Arabic-Indic 2025: isdigit() but not ASCII
     ])
     def test_year_parsing(self, value, expected):
         from app.modules.tracking_system.service import _year

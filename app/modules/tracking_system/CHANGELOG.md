@@ -59,5 +59,17 @@ Tracked data (same release), all behind `token_required` + `unlock_required`:
   browser's preflight drops the header and every gated call fails in the browser,
   while curl and the unit tests pass. `TestCors` guards it.
 
+Review fixes before the first merge (same 1.0.0, nothing shipped yet):
+- Unlock attempts are serialised per user with `pg_advisory_xact_lock`. Before this,
+  parallel wrong guesses across workers all read "< 5 failures". Checked against the
+  local DB: 8 parallel guesses → 5 recorded, 3 RATE_LIMITED.
+- The allowlist query always runs, so "wrong code" and "right code, not listed" cost
+  the same.
+- A non-string or over-long `code` → 400, not 500. A non-ASCII code is a logged
+  failure, not a crash. SIDs, years and UPCs need ASCII digits (`'²'.isdigit()` is
+  True, but `int('²')` raises).
+- `import_out` rejects the same bill line twice in one request, as `import_in`
+  already did.
+
 ⚠ `deploy.yml` does not run `init_db.py`. Run it on the server after deploying,
 then add allowed codes with `INSERT INTO tracking_system_access ...`.

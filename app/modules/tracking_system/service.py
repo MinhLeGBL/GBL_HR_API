@@ -81,8 +81,19 @@ ORACLE_IN_CHUNK = 500     # Oracle caps an IN list at 1000
 YEAR_MIN, YEAR_MAX = 2000, 2100
 
 
-def _norm(code: Optional[str]) -> str:
-    return (code or '').strip().upper()
+MAX_CODE_LEN = 50
+# pg_advisory_xact_lock(int, int) namespace for unlock attempts ('trk' + 0).
+_UNLOCK_LOCK_NS = 0x74726B00
+
+
+def _norm(code: Any) -> str:
+    """Trimmed, upper-cased code. Anything but a string normalises to '' (= no code)."""
+    return code.strip().upper() if isinstance(code, str) else ''
+
+
+def _ascii_digits(text: str) -> bool:
+    """str.isdigit() alone accepts '²' and other Unicode digits that int() rejects."""
+    return text.isascii() and text.isdigit()
 
 
 def parse_landed_cost(raw: Any) -> Optional[float]:
@@ -122,7 +133,7 @@ def _sid(value: Any) -> Optional[int]:
         return None
     if isinstance(value, int):
         return value if value > 0 else None
-    if isinstance(value, str) and value.isdigit():
+    if isinstance(value, str) and _ascii_digits(value):
         return int(value)
     return None
 
@@ -135,7 +146,7 @@ def _year(value: Any) -> Optional[int]:
     """A receipt year from JSON (int or digit string), or None if out of range."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, str) and value.strip().isdigit():
+    if isinstance(value, str) and _ascii_digits(value.strip()):
         value = int(value.strip())
     if isinstance(value, int) and YEAR_MIN <= value <= YEAR_MAX:
         return value
@@ -296,7 +307,7 @@ class TrackingSystemService:
 
     def unlock(self, user_sid: int, entered_code: Optional[str]) -> Dict[str, Any]:
         """Check the typed employee number; on success return an unlock token."""
-        if not _norm(entered_code):
+        if not _norm(entered_code) or len(_norm(entered_code)) > MAX_CODE_LEN:
             return {'success': False, 'code': 'INVALID_INPUT',
                     'error': 'Enter your employee number'}
 
@@ -306,6 +317,11 @@ class TrackingSystemService:
                     'error': 'Failed to connect to database'}
         try:
             with conn.cursor() as cur:
+                # One attempt per user at a time, across all gunicorn workers:
+                # without this, N parallel guesses all read "< 5 failures"
+                # before any of them is recorded. Released at commit/rollback.
+                cur.execute('SELECT pg_advisory_xact_lock(%s, %s)',
+                            (_UNLOCK_LOCK_NS, user_sid % 2**31))
                 cur.execute('''
                     SELECT count(*) FROM tracking_system_unlock_attempts
                     WHERE user_sid = %s AND NOT success AND attempted_at > %s
@@ -315,9 +331,12 @@ class TrackingSystemService:
                             'error': 'Too many attempts. Try again later.'}
 
                 own = self._own_employee_code(cur, user_sid)
-                ok = bool(own) \
-                    and hmac.compare_digest(_norm(entered_code), _norm(own)) \
-                    and self._is_allowed(cur, own)
+                # Both checks always run, so "right code, not on the list" and
+                # "wrong code" cost the same queries and read the same.
+                allowed = self._is_allowed(cur, own) if own else False
+                matches = bool(own) and hmac.compare_digest(
+                    _norm(entered_code).encode('utf-8'), _norm(own).encode('utf-8'))
+                ok = matches and allowed
 
                 cur.execute(
                     'INSERT INTO tracking_system_unlock_attempts (user_sid, success) '
@@ -518,7 +537,7 @@ class TrackingSystemService:
         wanted: List[int] = []
         for u in upcs:
             text = str(u).strip() if isinstance(u, (str, int)) and not isinstance(u, bool) else ''
-            if not text.isdigit() or len(text) > 15 or int(text) <= 0:
+            if not _ascii_digits(text) or len(text) > 15 or int(text) <= 0:
                 return {'success': False, 'code': 'INVALID_INPUT',
                         'error': f'Not a UPC: {u!r}'}
             n = int(text)
@@ -680,6 +699,7 @@ class TrackingSystemService:
             return {'success': False, 'code': 'INVALID_INPUT',
                     'error': f'Send 1-{MAX_IMPORT_ROWS} lines'}
         errors, ready = [], []
+        seen_lines: Dict[int, int] = {}
         ora = get_oracle_connection()
         if ora is None:
             return {'success': False, 'code': 'SERVER_ERROR', 'error': 'Oracle unavailable'}
@@ -692,6 +712,10 @@ class TrackingSystemService:
                     errors.append({'index': i, 'error': 'line_id must be a SID string'}); continue
                 if rev is None:
                     errors.append({'index': i, 'line_id': str(lid), 'error': 'entered_revenue must be a number'}); continue
+                if lid in seen_lines:
+                    errors.append({'index': i, 'line_id': str(lid),
+                                   'error': f'Same bill line as row {seen_lines[lid] + 1}'}); continue
+                seen_lines[lid] = i
                 row = self._oracle_one(TrackingQueries.LINE_BY_ID, {'line_id': lid}, cur)
                 if row is None:
                     errors.append({'index': i, 'line_id': str(lid), 'error': 'Bill line not found in Oracle'}); continue

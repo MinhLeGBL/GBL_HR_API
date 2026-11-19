@@ -73,15 +73,39 @@ class TestUnlock:
         with patch(CONN, return_value=conn):
             r = svc.unlock(7, 'GH135')
         assert r['code'] == 'RATE_LIMITED'
-        # Refused before the code is even looked at, and not logged as an attempt.
-        assert cur.execute.call_count == 1
+        # Refused before the code is even looked at, and not logged as an attempt:
+        # only the per-user lock and the count ran.
+        assert cur.execute.call_count == 2
+        assert 'pg_advisory_xact_lock' in cur.execute.call_args_list[0].args[0]
 
-    @pytest.mark.parametrize('code', [None, '', '   '])
+    @pytest.mark.parametrize('code', [None, '', '   ', 123, ['GH135'], {'a': 1}, 'X' * 51])
     def test_blank_code_is_invalid_input_without_touching_db(self, svc, code):
         with patch(CONN) as get_conn:
             r = svc.unlock(7, code)
         assert r['code'] == 'INVALID_INPUT'
         get_conn.assert_not_called()
+
+    def test_attempts_are_serialised_per_user(self, svc):
+        conn, cur = _conn([(0,), ('GH135',), (1,)])
+        with patch(CONN, return_value=conn):
+            svc.unlock(7, 'GH135')
+        sql, args = cur.execute.call_args_list[0].args
+        assert 'pg_advisory_xact_lock' in sql and args[1] == 7
+
+    def test_allowlist_is_checked_even_when_the_code_is_wrong(self, svc):
+        # Same queries either way, so timing does not tell "wrong code" from
+        # "right code, not on the list".
+        conn, cur = _conn([(0,), ('GH135',), (1,)])
+        with patch(CONN, return_value=conn):
+            svc.unlock(7, 'WRONG')
+        assert any('tracking_system_access' in c.args[0] for c in cur.execute.call_args_list)
+
+    def test_non_ascii_code_is_a_logged_failure_not_a_crash(self, svc):
+        conn, cur = _conn([(0,), ('GH135',), (1,)])
+        with patch(CONN, return_value=conn):
+            r = svc.unlock(7, 'GHÉ35')
+        assert r['code'] == 'INVALID_CODE'
+        assert _inserted_success(cur) is False
 
     def test_db_unavailable(self, svc):
         with patch(CONN, return_value=None):
