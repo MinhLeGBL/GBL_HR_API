@@ -53,6 +53,7 @@ tests/                     # Mirrors module structure
 | `modules/reports` | `reports_bp` | `/api/v1/reports` | `ReportsService` | Read-only Oracle reports — two-period sale comparison (revenue/bills/avg + new-vs-returning), CR #78 |
 | `modules/custom_reports` | `custom_reports_bp` | `/api/v1/custom-reports` | `CustomReportsService` | Self-service QUERY ENGINE over sales / imports / sell-through — one `POST /query` with user-chosen filters and group-by (max 3), plus the older size × brand × season and FIFO days-to-sell pulls |
 | `modules/weekly_report` | `weekly_report_bp` | `/api/v1/weekly-report` | `WeeklyReportService` | Weekly sales report — snapshot, .xlsx, email draft, approve-and-send workflow |
+| `modules/tracking_system` | `tracking_system_bp` | `/api/v1/tracking-system` | `TrackingSystemService` | Hidden page tracking unofficial merchandise payments — employee-number gate (`/unlock`, `/session`, allowlist `tracking_system_access` edited by hand) + In/Out lists (`/in`, `/out`: search Oracle, import, delete). Landed cost = `INVN_SBS_ITEM.UDF1_STRING` |
 
 ## Import Rules
 

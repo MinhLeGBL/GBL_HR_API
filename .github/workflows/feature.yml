@@ -25,6 +25,7 @@ jobs:
       permissions: ${{ steps.changes.outputs.permissions }}
       reports: ${{ steps.changes.outputs.reports }}
       stores: ${{ steps.changes.outputs.stores }}
+      tracking_system: ${{ steps.changes.outputs.tracking_system }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -84,6 +85,9 @@ jobs:
             stores:
               - 'app/modules/stores/**'
               - 'tests/unit/modules/stores/**'
+            tracking_system:
+              - 'app/modules/tracking_system/**'
+              - 'tests/unit/modules/tracking_system/**'
 
   test:
     needs: detect
@@ -131,6 +135,7 @@ jobs:
           [ "${{ needs.detect.outputs.permissions }}" = "true" ] && PATHS="$PATHS tests/unit/modules/permissions"
           [ "${{ needs.detect.outputs.reports }}" = "true" ]     && PATHS="$PATHS tests/unit/modules/reports"
           [ "${{ needs.detect.outputs.stores }}" = "true" ]      && PATHS="$PATHS tests/unit/modules/stores"
+          [ "${{ needs.detect.outputs.tracking_system }}" = "true" ] && PATHS="$PATHS tests/unit/modules/tracking_system"
           if [ -n "$PATHS" ]; then
             echo "Running:$PATHS"
             pytest $PATHS -x -v
