@@ -74,7 +74,24 @@ PAYLOAD = {
                           'returns_value': 261_000_000},
                 'change': {'total_sales': {'value': 4.2, 'kind': 'pct', 'unfavourable': False}},
             },
-            'stores': [],
+            'stores': [
+                {'store': 'RWD',
+                 'current': {'total_sales': 221_000_000, 'avg_discount_pct': 44.8},
+                 'prior': {'total_sales': 232_000_000, 'avg_discount_pct': 28.9},
+                 'change': {
+                     'total_sales': {'value': -4.5, 'kind': 'pct', 'unfavourable': True},
+                     'avg_discount_pct': {'value': 15.9, 'kind': 'pp', 'unfavourable': True},
+                 },
+                 'departments': []},
+                {'store': 'RWT',
+                 'current': {'total_sales': 625_000_000, 'avg_discount_pct': 12.6},
+                 'prior': {'total_sales': 636_000_000, 'avg_discount_pct': 12.8},
+                 'change': {
+                     'total_sales': {'value': -1.8, 'kind': 'pct', 'unfavourable': True},
+                     'avg_discount_pct': {'value': -0.2, 'kind': 'pp', 'unfavourable': False},
+                 },
+                 'departments': []},
+            ],
         },
         'YTD': {
             'label': 'YTD',
@@ -141,8 +158,25 @@ class TestWhichPeriodsAreNarrated:
     was the more useful one, and it makes all three parts the same comparison.
     """
 
-    def test_the_analysis_covers_wtd_mtd_and_ytd(self):
+    def test_the_model_is_given_all_three_periods(self):
+        # What is SUPPLIED is unchanged: the week's figures are what the
+        # concentration facts in part 1 are built from.
         assert C.COMMENTARY_LABELS == ('WTD', 'MTD', 'YTD')
+
+    def test_only_month_and_year_to_date_get_a_section(self):
+        # Changed 2026-11-13 at the user's request: the commentary summarises
+        # the main points rather than mirroring the workbook, and MTD/YTD are
+        # the two that carry the decision. The workbook still has all three
+        # sheets — see excel.SHEET_NAMES.
+        assert C.NARRATED_LABELS == ('MTD', 'YTD')
+
+    def test_the_week_is_still_supplied_even_though_it_has_no_section(self):
+        # The distinction the whole change rests on. Dropping the week from the
+        # figures block would also lose the share-of-month facts that justify
+        # folding it into part 1.
+        assert 'WTD' in C.COMMENTARY_LABELS
+        assert 'WTD' not in C.NARRATED_LABELS
+        assert 'TUẦN GẦN NHẤT' in C.build_prompt(PAYLOAD)
 
     def test_week_over_week_is_not_narrated(self):
         # WOW is still a tab on the page; it is simply not in the email. If it
@@ -162,14 +196,22 @@ class TestWhichPeriodsAreNarrated:
         assert C._vi_week('Week 37 2026', True) == 'Tuần 37/2026'
         assert C._vi_week('Week 37 2026') == 'Tuần 37'
 
-    def test_the_model_is_told_part_one_is_not_week_over_week(self):
-        # The prompt used to say "Tuần X so với Tuần Y" and the model was free
-        # to read that as the previous week. Left alone it would narrate the
-        # right figures under the wrong baseline.
-        assert 'KHÔNG phải với tuần liền trước' in C.SYSTEM_PROMPT
-        assert 'CẢ BA PHẦN đều so sánh với CÙNG KỲ NĂM TRƯỚC' in C.SYSTEM_PROMPT
+    def test_both_narrated_parts_compare_year_on_year(self):
+        assert 'CẢ HAI PHẦN đều so sánh với CÙNG KỲ NĂM TRƯỚC' in C.SYSTEM_PROMPT
 
-    def test_a_payload_without_wtd_produces_no_week_section(self):
+    def test_the_model_is_told_not_to_give_the_week_its_own_section(self):
+        # The week's figures are in the prompt, so without this the model
+        # writes the three-part email it has the data for.
+        assert 'KHÔNG viết một phần riêng cho tuần gần nhất' in C.SYSTEM_PROMPT
+        assert 'Chỉ trả về hai phần' in C.SYSTEM_PROMPT
+
+    def test_the_week_is_given_a_job_rather_than_just_forbidden(self):
+        # Telling the model only what not to do leaves the week's figures
+        # sitting in the prompt with no use, which reads as an oversight.
+        assert 'ĐỊNH VỊ' in C.SYSTEM_PROMPT
+        assert 'MỨC ĐỘ TẬP TRUNG' in C.SYSTEM_PROMPT
+
+    def test_a_payload_without_wtd_still_produces_the_month(self):
         # Tolerance, not a crash: commentary is best-effort, and a partial
         # payload should still yield an analysis of the blocks it does have.
         payload = {**PAYLOAD, 'periods': {k: v for k, v in PAYLOAD['periods'].items()
@@ -241,6 +283,13 @@ class TestNotableMovements:
     def test_does_not_flag_a_store_that_barely_moved(self):
         out = '\n'.join(C.notable_movements(PAYLOAD))
         assert 'RWT' not in out
+
+    def test_a_weekly_store_move_is_not_offered_to_the_model(self):
+        # There is no weekly section for it to go in, so offering it invites
+        # the model to report a week's figure under the month's heading.
+        out = C.notable_movements(PAYLOAD)
+        assert C.PERIOD_VI['WTD'] not in '\n'.join(out)
+        assert any(C.PERIOD_VI['MTD'] in line for line in out)
 
     def test_says_so_explicitly_when_nothing_crosses_the_threshold(self):
         # A quiet week must not be padded with manufactured significance.
@@ -326,7 +375,18 @@ class TestOutputFormat:
 
     def test_asks_for_bold_on_the_claim_and_its_number(self):
         assert 'IN ĐẬM' in C.SYSTEM_PROMPT
-        assert '**3,961 so với 4,142 — giảm 4.4%**' in C.SYSTEM_PROMPT
+        assert '**giảm 38.2%**' in C.SYSTEM_PROMPT
+
+    def test_forbids_the_absolute_pair_that_the_old_style_led_with(self):
+        # The old house style opened every movement with "8,510 so với 5,928 —
+        # tăng 43.6%". The new one states the percentage and explains it; the
+        # absolute survives only where the number itself is the point.
+        assert 'KHÔNG viết cặp số tuyệt đối' in C.SYSTEM_PROMPT
+        assert 'RWP đạt doanh số 19,342' in C.SYSTEM_PROMPT
+
+    def test_asks_for_bare_store_codes(self):
+        # Earlier weeks read "RHN (Runway Ha Noi)"; the new style does not.
+        assert 'Dùng MÃ cửa hàng' in C.SYSTEM_PROMPT
 
     def test_tells_it_to_leave_parenthetical_detail_unbolded(self):
         # The screenshot bolds the claim but leaves "(113 so với 106)" plain.
@@ -337,9 +397,10 @@ class TestOutputFormat:
         # pass through as literal text.
         assert 'CHỈ dùng hai ký hiệu' in C.SYSTEM_PROMPT
 
-    def test_target_length_dropped_now_that_output_is_bulleted(self):
-        # Bullets are terser than flowing prose, which is the point.
-        assert C.DEFAULT_MAX_WORDS == 400
+    def test_target_length_dropped_again_for_the_two_part_summary(self):
+        # Two parts instead of three, and percentages instead of absolute
+        # pairs. The week-45 email the style was taken from is ~230 words.
+        assert C.DEFAULT_MAX_WORDS == 250
 
     def test_generated_bold_and_bullets_are_preserved_not_stripped(self):
         client = MagicMock()

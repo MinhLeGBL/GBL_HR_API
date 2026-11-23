@@ -19,6 +19,7 @@ from app.modules.handcarry.routes import handcarry_bp
 from app.modules.account_payable.routes import account_payable_bp
 from app.modules.reports.routes import reports_bp
 from app.modules.weekly_report.routes import weekly_report_bp
+from app.modules.tracking_system.routes import tracking_system_bp
 
 
 def create_app():
@@ -35,7 +36,9 @@ def create_app():
         r"/api/*": {
             "origins": ["http://localhost:5173", "http://127.0.0.1:5173", "http://192.168.10.39:5173"],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
+            # X-Unlock-Token: tracking_system's unlock proof. Without it here the
+            # browser's preflight drops the header and every gated request fails.
+            "allow_headers": ["Content-Type", "Authorization", "X-Unlock-Token"]
         }
     })
 
@@ -72,6 +75,7 @@ def create_app():
     app.register_blueprint(account_payable_bp)
     app.register_blueprint(reports_bp)
     app.register_blueprint(weekly_report_bp)
+    app.register_blueprint(tracking_system_bp)
     # TEMPORARY ALIAS — remove once the frontend rename has been live a while.
     # The two repos deploy independently, so between the backend landing and
     # the frontend landing the old page would call a path that no longer

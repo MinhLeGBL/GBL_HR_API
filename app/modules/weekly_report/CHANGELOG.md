@@ -934,3 +934,87 @@ Exactly one anchor in the signature, pinned by a test.
 - Plain text keeps the fields under a `--` rule and carries no image
   placeholder; `[image]` tells a reader nothing.
 - Full suite: **1314 passed**.
+
+---
+
+## 0.20.0 — 2026-11-13
+
+The commentary is a **two-part summary**, not a mirror of the workbook.
+Requested by the user, who had already hand-edited the week-45 email into the
+shape they wanted and asked for the generator to produce it by default:
+
+> *"the commentary is to summary main point from the report and for now MTD
+> and YTD is most relevant"*
+
+### Changed — the week loses its section, not its figures
+`commentary.NARRATED_LABELS = ('MTD', 'YTD')` is now the single switch for
+which periods get a numbered section. `COMMENTARY_LABELS` is unchanged at
+`('WTD', 'MTD', 'YTD')` and still decides what is **supplied**.
+
+That split is the whole design. Dropping the week from the figures block would
+also have lost `derived_facts()` — the week's share of the month's revenue and
+returns, and its discount rate against the month's — which are precisely what
+the new part 1 uses to position the month. So the week is fed in full and told
+where to go: *"chỉ dùng ĐỂ ĐỊNH VỊ bên trong phần 1"*.
+
+If the week ever becomes relevant again, `NARRATED_LABELS` is the one line to
+change, plus the template sentence below.
+
+### Changed — percentages, not absolute pairs
+The old house style opened every movement with both numbers and the change —
+`**8,510 so với 5,928 — tăng 43.6%**`. The new one states the percentage and
+spends the sentence explaining it instead:
+
+```
+Doanh thu **giảm 38.2%**, dù **số hóa đơn tăng 17.1%** và sản lượng tăng 13.6%;
+nguyên nhân nằm ở **giá trị mỗi hóa đơn giảm 47.3%**...
+```
+
+An absolute survives only where the number itself is the point — a new store's
+cumulative sales (`RWP đạt doanh số 19,342`). Store codes are now bare: earlier
+weeks read `RHN (Runway Ha Noi)`, the new style does not.
+
+`DEFAULT_MAX_WORDS` 400 → **250**. The week-45 email the style was taken from
+is about 230 words against roughly 450 for the weeks before it. (The module
+docstring had claimed a 600 default since the bullets landed; it said 400 in
+code. Corrected.)
+
+### Changed — `DEFAULT_BODY_TEMPLATE`, carefully
+It is now **two sentences with two different subjects**, and they must not be
+merged:
+
+- *"Đính kèm là báo cáo bán hàng định kỳ, chia theo cửa hàng và ngành hàng."* —
+  the **attachment**, which still carries three sheets. It names no part count.
+  It used to say `gồm ba phần`.
+- *"Xin tóm tắt các điểm chính, gồm hai phần — ..."* — the **written summary**,
+  which is two.
+
+Saying "gồm hai phần" of the attachment would be false, and it is the sentence
+a reader checks against the spreadsheet they have just opened. Pinned by
+`test_the_two_part_count_describes_the_summary_not_the_attachment`.
+
+`{{week_no}}` and `{{prior_week_no}}` are no longer used by the default
+template. Both still resolve — `render_template` is unchanged — so a custom
+template using them keeps working.
+
+### ⚠ Requires a settings update, not just a deploy
+`DEFAULT_BODY_TEMPLATE` is only the **fallback** for a settings row with no
+`body_template`. Production has had its own row since 2026-09-16, so deploying
+this changes the code default and **nothing the recipients see**. The live
+`periodic_report_settings.body_template` must be updated separately, per
+environment.
+
+This is the same trap `0.17.0` hit with the WTD wording. It is recorded here
+rather than in a migration because the template is user-editable data: silently
+overwriting an edited row on deploy would be worse than the stale sentence.
+
+### Notes
+- `notable_movements()` now iterates `NARRATED_LABELS`. A weekly store move
+  offered with no weekly section to hold it is how a week's figure ends up
+  reported under the month's heading — the model has to put it somewhere.
+- The MTD block in the commentary test fixture carried `'stores': []`, which
+  would have let that change pass unnoticed. It now carries the same two
+  stores as the week.
+- The workbook is untouched — `excel.SHEET_NAMES` is still WTD/MTD/YTD, and
+  the page still has every tab.
+- Full suite: **1535 passed** (367 in this module, up from 358).

@@ -1,9 +1,14 @@
 """LLM commentary for the weekly report email.
 
-Fills the `{{commentary}}` slot with the three-part Vietnamese analysis the
-email template is built around: the latest week, month to date, then year to
-date. Everything around it — greeting, the sentence naming the three parts, the
-sign-off — is fixed template text.
+Fills the `{{commentary}}` slot with the two-part Vietnamese analysis the
+email template is built around: month to date, then year to date. Everything
+around it — greeting, the sentence naming the parts, the sign-off — is fixed
+template text.
+
+The latest week is still SUPPLIED to the model and is still a sheet in the
+workbook; it simply no longer gets a section of its own. It appears inside the
+month-to-date part as positioning — what share of the month the week carried,
+how its discount rate sits against the month's. See `NARRATED_LABELS`.
 
 Best-effort by design. `service.draft_email` catches everything this raises and
 leaves the placeholder empty, because a missing analysis is a much better Monday
@@ -22,7 +27,7 @@ management board.
 Configuration (all optional):
   ANTHROPIC_API_KEY                      required; absent → commentary skipped
   WEEKLY_REPORT_MODEL                  model id (default: claude-opus-5)
-  WEEKLY_REPORT_COMMENTARY_MAX_WORDS   length target (default: 600)
+  WEEKLY_REPORT_COMMENTARY_MAX_WORDS   length target (default: 250)
 """
 import os
 
@@ -30,8 +35,16 @@ import os
 # deliberately kept out of the analysis.
 from .period import COMMENTARY_LABELS
 
+# Which periods get a NUMBERED SECTION, as against which are merely supplied.
+# These were the same thing until 2026-11-13, when the week lost its own
+# section and became positioning inside the month (see the module docstring).
+# The week's figures are still fed to the model in full — dropping them would
+# also lose the concentration facts that justify the change — so the split is
+# between "narrated" and "available", not between "sent" and "withheld".
+NARRATED_LABELS = ('MTD', 'YTD')
+
 DEFAULT_MODEL = 'claude-opus-5'
-DEFAULT_MAX_WORDS = 400
+DEFAULT_MAX_WORDS = 250
 
 # Vietnamese names for the figures, so the model does not have to invent
 # terminology or echo internal keys into the email.
@@ -79,32 +92,37 @@ Bạn viết phần phân tích của email báo cáo bán hàng định kỳ h�
 tập đoàn bán lẻ hàng cao cấp tại Việt Nam. Người đọc là Ban Giám đốc.
 
 NHIỆM VỤ
-Viết đúng BA phần được đánh số, theo thứ tự từ tuần gần nhất đến lũy kế năm:
+Viết đúng HAI phần được đánh số:
 
-1. Tuần gần nhất (Tuần X năm nay so với Tuần X năm trước)
-2. Lũy kế tháng M (dd/mm–dd/mm)
-3. Lũy kế từ đầu năm (dd/mm – dd/mm)
+1. Lũy kế tháng M (dd/mm–dd/mm)
+2. Lũy kế từ đầu năm (dd/mm – dd/mm)
 
-CẢ BA PHẦN đều so sánh với CÙNG KỲ NĂM TRƯỚC. Phần 1 so sánh tuần gần nhất với ĐÚNG tuần đó của năm trước (Tuần 38 so với Tuần 38), KHÔNG phải với tuần liền trước. Đừng mô tả phần 1 như một so sánh "so với tuần trước".
+CẢ HAI PHẦN đều so sánh với CÙNG KỲ NĂM TRƯỚC.
 
-Tiêu đề phần 3 có thể thêm một mệnh đề ngắn nêu kết luận chính, ví dụ \
+KHÔNG viết một phần riêng cho tuần gần nhất. Số liệu tuần gần nhất vẫn được \
+cung cấp, nhưng chỉ dùng ĐỂ ĐỊNH VỊ bên trong phần 1 — ví dụ tuần gần nhất \
+chiếm bao nhiêu phần trăm doanh thu lũy kế tháng, hoặc tỷ lệ giảm giá của tuần \
+so với mức chung của tháng. Đừng mô tả tuần như một kỳ độc lập.
+
+Tiêu đề phần 2 có thể thêm một mệnh đề ngắn nêu kết luận chính, ví dụ \
 "— cho thấy tháng 9 đang đi ngược xu hướng cả năm", khi dữ liệu thực sự cho \
 thấy điều đó.
 
 CÁCH VIẾT — điều quan trọng nhất
 Không liệt kê số liệu. Hãy GIẢI THÍCH. Với mỗi phần:
-- Nêu biến động doanh thu, rồi PHÂN TÍCH NGUYÊN NHÂN bằng các cấu phần của nó \
-(số hóa đơn và giá trị mỗi hóa đơn; hoặc sản lượng và giá bán trung bình). \
-Ví dụ: "Doanh thu giảm 4.4%, mặc dù số hóa đơn tăng 6.6% — nguyên nhân là giá \
-trị mỗi hóa đơn giảm 4.6% và sản lượng giảm 7.0%."
+- Nêu biến động doanh thu BẰNG PHẦN TRĂM, rồi PHÂN TÍCH NGUYÊN NHÂN bằng các \
+cấu phần của nó (số hóa đơn và giá trị mỗi hóa đơn; hoặc sản lượng và giá bán \
+trung bình). Ví dụ: "Doanh thu **giảm 38.2%**, dù **số hóa đơn tăng 17.1%** và \
+sản lượng tăng 13.6%; nguyên nhân nằm ở **giá trị mỗi hóa đơn giảm 47.3%** và \
+giá bán trung bình giảm 45.6%."
+- KHÔNG viết cặp số tuyệt đối "X so với Y" cho một chỉ số biến động — chỉ nêu \
+phần trăm. Con số tuyệt đối chỉ xuất hiện khi CHÍNH nó là nội dung cần nói, \
+ví dụ doanh số tích lũy của một cửa hàng mới ("RWP đạt doanh số 19,342").
 - Nêu rõ "Điểm tích cực:" khi có diễn biến tốt, và "Cần lưu ý:" khi có điều \
 cần chú ý. Dùng đúng hai cụm từ này.
-- ĐỊNH VỊ vấn đề theo thời gian bằng cách so sánh tuần với lũy kế tháng. \
-Ví dụ: nếu tỷ lệ giảm giá cả tháng cao hơn hẳn tuần gần nhất, điều đó nghĩa \
-là mức giảm giá cao tập trung ở đầu tháng và đã được siết lại.
-- Nêu MỨC ĐỘ TẬP TRUNG khi phần "SỐ LIỆU ĐÃ TÍNH SẴN" cho thấy một tuần chiếm \
-tỷ trọng lớn trong cả kỳ.
-- Ở phần 3, so sánh CƠ CẤU tăng trưởng cả năm với tháng hiện tại — chúng có thể \
+- Ở phần 1, NÊU MỨC ĐỘ TẬP TRUNG của tuần gần nhất trong cả kỳ khi phần \
+"SỐ LIỆU ĐÃ TÍNH SẴN" cho thấy điều đó.
+- Ở phần 2, so sánh CƠ CẤU tăng trưởng cả năm với tháng hiện tại — chúng có thể \
 ngược chiều nhau, và đó thường là phát hiện đáng giá nhất.
 - Nêu tên cửa hàng cụ thể khi phần "BIẾN ĐỘNG ĐÁNG CHÚ Ý" liệt kê chúng.
 
@@ -127,20 +145,20 @@ phải phần trăm.
 ĐỊNH DẠNG — bám sát mẫu của công ty
 - Viết bằng tiếng Việt.
 - Mỗi phần bắt đầu bằng một dòng tiêu đề in đậm, theo đúng mẫu:
-  **1. Tuần gần nhất (Tuần 38/2026 so với Tuần 38/2025)**
-  **2. Lũy kế tháng 9 (01–15/09)**
-  **3. Lũy kế từ đầu năm (01/01 – 15/09)**
+  **1. Lũy kế tháng 11 (01–08/11)**
+  **2. Lũy kế từ đầu năm (01/01 – 08/11)**
 - Dưới mỗi tiêu đề là 2-4 GẠCH ĐẦU DÒNG, mỗi dòng bắt đầu bằng "- ".
-- Mỗi gạch đầu dòng là một ý trọn vẹn, 1-3 câu. NGẮN GỌN.
-- IN ĐẬM bằng **...** cho: nhận định chính kèm con số của nó. Ví dụ:
-  "Doanh thu **3,961 so với 4,142 — giảm 4.4%**, mặc dù **số hóa đơn tăng 6.6%**
-  (113 so với 106)."
+- Mỗi gạch đầu dòng là một ý trọn vẹn, 1-2 câu. NGẮN GỌN — toàn bộ phần phân \
+tích chỉ dài khoảng một nửa so với một email dày đặc số liệu.
+- Dùng MÃ cửa hàng (RHN, RWD, RWR, RWT, RWP, HQ) chứ không viết kèm tên đầy đủ.
+- IN ĐẬM bằng **...** cho nhận định chính kèm con số của nó. Ví dụ:
+  "Doanh thu **giảm 38.2%**, dù **số hóa đơn tăng 17.1%** và sản lượng tăng 13.6%."
 - KHÔNG in đậm phần số liệu phụ trong ngoặc đơn — để chúng ở dạng thường.
 - Các nhãn "Điểm tích cực:" và "Cần lưu ý:" đứng đầu gạch đầu dòng, và phần
   nhận định ngay sau đó được in đậm.
 - CHỈ dùng hai ký hiệu: **...** để in đậm và "- " để gạch đầu dòng. Không dùng
   bất kỳ ký hiệu Markdown nào khác (không #, không *, không bảng).
-- Chỉ trả về ba phần. KHÔNG có lời chào, KHÔNG có lời kết, KHÔNG có tiêu đề
+- Chỉ trả về hai phần. KHÔNG có lời chào, KHÔNG có lời kết, KHÔNG có tiêu đề
   email — phần này được chèn vào giữa một mẫu email có sẵn.
 - Nếu dữ liệu quá thưa để đưa ra nhận định, hãy nói thẳng trong một gạch đầu dòng.
 """
@@ -271,7 +289,11 @@ def notable_movements(payload):
     """
     out = []
     names = payload.get('store_names') or {}
-    for label in COMMENTARY_LABELS:
+    # NARRATED_LABELS, not COMMENTARY_LABELS: a store move can only be stated
+    # under the period it belongs to, and the week no longer has a section.
+    # Offering one anyway is how a weekly figure ends up reported as a monthly
+    # one — the model has to put it somewhere.
+    for label in NARRATED_LABELS:
         period = (payload.get('periods') or {}).get(label) or {}
         rows = []
         for store in period.get('stores') or []:
