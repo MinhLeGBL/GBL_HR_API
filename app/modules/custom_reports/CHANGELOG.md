@@ -3,6 +3,69 @@
 All notable changes to this module. Versioning per
 [CLAUDE.md → Branch & Version Conventions](../../../CLAUDE.md).
 
+## [0.9.0] — 2026-11-26
+
+### Added — the reconciliation: actual values, for the tracking system's users
+
+The tracking system records where what was actually paid or received differs
+from Oracle. A report can now add those differences, so its figures are actual
+values. Only users whose own employee code is on `tracking_system_access`
+get them (no unlock prompt; the user's call, 2026-11-26).
+
+- **`POST /query`** accepts `"reconcile": true` (a literal `true` only). For an
+  allowed user the result is reconciled and carries `"reconciled": true`. For
+  anyone else the flag is ignored silently: they get the ordinary report. The
+  allowlist is re-checked on every request. If the differences cannot be read,
+  the response is 503, never system figures labelled as actual ones.
+- **`GET /reconcile`** returns 204 for an allowed user. For anyone else it
+  returns `abort(404)`, the same body a missing URL gets. The page asks this
+  before turning the mode on, so for others the command does nothing visible.
+- **`engine.reconcile`** does the arithmetic:
+  - **Sales:** per bill line, by `di.sid`, which is now selected as `line_id`
+    in `SALE_LINES`. The tracked difference (entered − Oracle revenue) is added
+    to `netSales`. A return is the mirror: subtracted from `returnValue`,
+    because the tracker stores returns negated. FP/MD, average bill and ASP
+    follow.
+  - **Imports:** per unit received, (entered − landed) × the receipt line's
+    units, added to `receivedCost`. A row for the receipt's year wins over the
+    item's all-years row, so an item tracked both ways is counted once.
+  - **Sell-through:** units only, so nothing changes.
+- Verified on local data, 2026-11-26:
+  - Sales: two tracked lines summing to 17,332,407.40 raised net sales by
+    17,332,408 (rounded).
+  - Imports, with a synthetic difference for an item received in 2025 and 2026
+    (+1,000 per unit for 2025, +10 for all years): exactly 1,148,270 =
+    1,122 × 1,000 + 2,627 × 10, on that item's row only.
+- Uses `TrackingSystemService.is_user_allowed` / `reconciliation_deltas`
+  (tracking_system 1.1.0), lazily imported per the cross-module rule.
+
+### Changed — no limit on the length of a period; it must start on or after 2024-01-01
+
+The user's call: the one-year guard is gone. `POST /query` used to refuse a
+period longer than 366 days unless a filter SQL could push down, and that
+excluded something, was set; even then the limit was 1830 days. Now the
+only rule is `from >= MIN_FROM_DATE` (2024-01-01), where Retail Pro's
+history starts. A request before it is a 400 with the new code
+**`rangeTooEarly`**. The frontend's calendar already has the same floor
+(`DATA_START_ISO`).
+
+Removed with the caps, since they existed only to serve them:
+- `MAX_RANGE_DAYS`, `MAX_RANGE_DAYS_FILTERED`;
+- `_narrowing`, `universe_lookup`, `_pushable_dims`, and `parse_query`'s
+  `universe_of` argument. Validation no longer opens an Oracle connection.
+- The codes `rangeNeedsFilter`, `rangeTooLong`, `rangeFilterTooBroad` are
+  no longer emitted.
+
+**Unchanged:** filter pushdown (filters still go into SQL wherever they can,
+and are what keeps a long report fast), the concurrency cap (2 per worker,
+503 `reportsBusy`), and every other validation.
+
+**Cost, measured 2026-11-09:** 3 years unfiltered is 20.62s for `COUNT(*)`
+alone, and ~28s end to end. The floor makes that the worst case today, and
+it grows by about a year each year. nginx's `proxy_read_timeout 60s` is the
+real ceiling: a report past it shows the user a 504 while the query keeps
+its worker.
+
 ## [0.8.0] — 2026-11-10
 
 ### Added — filter pushdown, and multi-year ranges that depend on it

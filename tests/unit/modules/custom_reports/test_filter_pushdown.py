@@ -22,9 +22,8 @@ import sqlite3
 import pytest
 
 from app.modules.custom_reports.engine import (
-    DIMENSIONS, MAX_RANGE_DAYS, MAX_RANGE_DAYS_FILTERED, PUSHDOWN_EXCLUDED,
-    UNKNOWN, QueryError, _narrowing, _where_for, matches, parse_query,
-    split_filters, universe_lookup,
+    DIMENSIONS, MIN_FROM_DATE, PUSHDOWN_EXCLUDED, UNKNOWN, QueryError,
+    _where_for, matches, parse_query, split_filters,
 )
 
 
@@ -188,311 +187,76 @@ class TestEquivalence:
 
 
 # ----------------------------------------------------------------------
-# The conditional range cap
+# The period: a floor date, no length cap (0.9.0)
 # ----------------------------------------------------------------------
+# Until 0.9.0 a period was capped at 366 days, or 1830 with a filter SQL
+# could push and that excluded something. Now the only rule is that it
+# starts on or after `MIN_FROM_DATE`. Kept in this file because the old
+# cap's tests were here: the point of several below is that a filter no
+# longer changes the answer.
 BASE = {'subject': 'sales', 'groupBy': []}
 
 
-def q(days, **over):
-    start = dt.date(2022, 1, 1)
-    body = dict(BASE, **{'from': start.isoformat(),
-                         'to': (start + dt.timedelta(days=days - 1)).isoformat()})
+def q(start, end, **over):
+    body = dict(BASE, **{'from': start, 'to': end})
     body.update(over)
     return body
 
 
-class TestConditionalRangeCap:
-    def test_unfiltered_still_capped_at_a_year(self):
-        parse_query(q(MAX_RANGE_DAYS))
-        with pytest.raises(QueryError, match='must not exceed'):
-            parse_query(q(MAX_RANGE_DAYS + 1))
+class TestDateFloor:
+    def test_the_floor_is_the_start_of_the_data(self):
+        assert MIN_FROM_DATE == dt.date(2024, 1, 1)
 
-    def test_a_pushable_filter_unlocks_multi_year(self):
-        """The whole point: 3 years by brand is 0.53s, cheaper than the
-        one year unfiltered that was already allowed."""
-        parse_query(q(1095, filters={'brand': ['AKRIS']}))
+    def test_starting_on_the_floor_is_allowed(self):
+        parse_query(q('2024-01-01', '2024-01-31'))
 
-    def test_the_long_cap_is_still_a_cap(self):
-        parse_query(q(MAX_RANGE_DAYS_FILTERED, filters={'brand': ['AKRIS']}))
-        with pytest.raises(QueryError, match='must not exceed'):
-            parse_query(q(MAX_RANGE_DAYS_FILTERED + 1,
-                          filters={'brand': ['AKRIS']}))
+    def test_starting_the_day_before_is_refused(self):
+        with pytest.raises(QueryError) as e:
+            parse_query(q('2023-12-31', '2024-01-31'))
+        assert e.value.code == 'rangeTooEarly'
+        assert '2024-01-01' in str(e.value)
 
-    @pytest.mark.parametrize('dim, value', [
-        ('size', 'M'),
-        ('customerType', 'new'),
-        ('customer', 'Nguyen A'),
+    def test_the_whole_history_unfiltered_is_allowed(self):
+        """The change itself: no filter, longer than a year — and longer
+        than the five years the old filtered cap allowed."""
+        parse_query(q('2024-01-01', '2026-11-22'))
+        parse_query(q('2024-01-01', '2030-12-31'))
+
+    @pytest.mark.parametrize('filters', [
+        {},
+        {'brand': ['AKRIS']},
+        {'fpMd': ['FP', 'MD']},          # selects everything: once refused
+        {'size': ['M']},                 # Python-only: once refused
+        {'brand': []},
     ])
-    def test_a_python_only_filter_does_not_unlock_it(self, dim, value):
-        """However selective it looks, it is applied AFTER the full pull —
-        so it would license the long range without making it cheaper."""
-        with pytest.raises(QueryError, match='must not exceed'):
-            parse_query(q(1095, filters={dim: [value]}))
+    def test_filters_no_longer_decide_the_length(self, filters):
+        parse_query(q('2024-01-01', '2026-11-22', filters=filters))
 
-    def test_the_unfiltered_error_names_what_would_unlock_it(self):
+    @pytest.mark.parametrize('filters', [{}, {'brand': ['AKRIS']}])
+    def test_a_filter_does_not_lift_the_floor(self, filters):
         with pytest.raises(QueryError) as e:
-            parse_query(q(1095))
-        msg = str(e.value)
-        assert 'brand' in msg and 'department' in msg
-        # Not offered as a way out, because it is not one.
-        assert 'customerType' not in msg
+            parse_query(q('2023-06-01', '2023-06-30', filters=filters))
+        assert e.value.code == 'rangeTooEarly'
 
-    def test_an_empty_filter_array_does_not_unlock_it(self):
-        """`parse_query` drops empty lists, so this is unfiltered."""
-        with pytest.raises(QueryError, match='must not exceed'):
-            parse_query(q(1095, filters={'brand': []}))
-
-    def test_a_python_only_filter_alongside_a_pushable_one_is_fine(self):
-        parse_query(q(1095, filters={'brand': ['AKRIS'], 'size': ['M']}))
-
-    def test_range_is_checked_after_the_filters_are_validated(self):
-        """Reordered in v0.8.0 so the cap can depend on them — a bad
-        filter must still be reported as a bad filter."""
+    def test_the_filters_are_validated_before_the_floor(self):
+        """A bad filter is still reported as a bad filter, not as a date."""
         with pytest.raises(QueryError, match='cannot be filtered'):
-            parse_query(q(1095, filters={'alu': ['X']}))
-        with pytest.raises(QueryError, match='unknown dimension'):
-            parse_query(q(1095, filters={'nope': ['X']}))
+            parse_query(q('2023-01-01', '2023-01-31', filters={'alu': ['X']}))
 
+    def test_an_inverted_range_is_still_refused_first(self):
+        with pytest.raises(QueryError, match='to must not be before from'):
+            parse_query(q('2023-02-01', '2023-01-01'))
 
-# ----------------------------------------------------------------------
-# A filter that selects everything is not a filter
-# ----------------------------------------------------------------------
-# Measured option counts on production, 2026-11-11 — the reason this
-# check exists. The small ones are selectable in full by hand:
-#
-#     fpMd 2 · gender 4 · customerTier 5 · store 6 · department 7
-#     season 82 · category 125 · brand 381
-#
-# `parse_query` is handed a stub universe here. The real one talks to
-# Oracle (`universe_lookup`); what needs testing is the DECISION, and a
-# stub makes every case — including the ones a live DB cannot produce,
-# like a lookup that fails — reachable and deterministic.
-UNIVERSE = {
-    'department': ['ACC', 'BAG', 'COSM', 'HOME', 'RTW', 'SHO', UNKNOWN],
-    'fpMd': ['FP', 'MD'],
-    'brand': ['AKRIS', 'NANIS', 'THE ROW'],
-    'store': ['HQ', 'RHN', 'RWD', 'RWR', 'RWT', 'RHX'],
-}
-
-
-def stub_universe(mapping=None):
-    src = UNIVERSE if mapping is None else mapping
-    return lambda dim: src.get(dim)
-
-
-class TestNarrowingPredicate:
-    def test_a_subset_narrows(self):
-        assert _narrowing('brand', ['AKRIS'], ['AKRIS', 'NANIS']) is True
-
-    def test_every_option_does_not_narrow(self):
-        assert _narrowing('brand', ['AKRIS', 'NANIS'], ['AKRIS', 'NANIS']) is False
-
-    def test_order_does_not_matter(self):
-        assert _narrowing('brand', ['NANIS', 'AKRIS'], ['AKRIS', 'NANIS']) is False
-
-    def test_a_superset_does_not_narrow(self):
-        """Compared as a superset, so a stale client value cannot defeat
-        the check by merely making the two sets unequal."""
-        assert _narrowing('brand', ['AKRIS', 'NANIS', 'GONE'],
-                          ['AKRIS', 'NANIS']) is False
-
-    def test_duplicates_do_not_defeat_it(self):
-        assert _narrowing('brand', ['AKRIS', 'AKRIS'], ['AKRIS']) is False
-
-    def test_the_unknown_bucket_counts_as_an_option(self):
-        """UNKNOWN is a real selectable value, so covering it matters."""
-        assert _narrowing('brand', ['AKRIS'], ['AKRIS', UNKNOWN]) is True
-        assert _narrowing('brand', ['AKRIS', UNKNOWN], ['AKRIS', UNKNOWN]) is False
-
-    def test_case_and_padding_are_not_folded(self):
-        """`_where_for` and `matches` compare raw strings; this must too,
-        or the three disagree about the same row."""
-        assert _narrowing('brand', ['akris'], ['AKRIS']) is True
-        assert _narrowing('brand', [' AKRIS'], ['AKRIS']) is True
-
-    @pytest.mark.parametrize('universe', [None, []])
-    def test_an_unanswerable_lookup_assumes_it_narrows(self, universe):
-        """Fails OPEN. A cost gate is not an access gate: refusing a
-        legitimate report because a 60ms lookup hiccuped is the worse
-        failure, and the concurrency cap still bounds the damage."""
-        assert _narrowing('brand', ['AKRIS'], universe) is True
-
-
-class TestBroadFilterDoesNotUnlockTheLongRange:
-    def test_every_department_is_refused(self):
-        with pytest.raises(QueryError) as e:
-            parse_query(q(1095, filters={'department': UNIVERSE['department']}),
-                        stub_universe())
-        assert e.value.code == 'rangeFilterTooBroad'
-
-    def test_both_fp_and_md_is_refused(self):
-        """Two checkboxes — the easiest way to buy five years for free."""
-        with pytest.raises(QueryError) as e:
-            parse_query(q(1095, filters={'fpMd': ['FP', 'MD']}), stub_universe())
-        assert e.value.code == 'rangeFilterTooBroad'
-
-    def test_one_of_two_still_unlocks_it(self):
-        parse_query(q(1095, filters={'fpMd': ['FP']}), stub_universe())
-
-    def test_the_error_names_the_broad_filter(self):
-        with pytest.raises(QueryError) as e:
-            parse_query(q(1095, filters={'fpMd': ['FP', 'MD']}), stub_universe())
-        msg = str(e.value)
-        assert 'fpMd' in msg and 'selects every option' in msg
-
-    def test_a_narrowing_filter_rescues_a_broad_one(self):
-        """All departments AND one brand is still cheap — the brand does
-        the work. One narrowing filter is all the cap ever asked for."""
-        parse_query(q(1095, filters={'department': UNIVERSE['department'],
-                                     'brand': ['AKRIS']}), stub_universe())
-
-    def test_all_broad_together_is_still_refused(self):
-        with pytest.raises(QueryError) as e:
-            parse_query(q(1095, filters={'fpMd': ['FP', 'MD'],
-                                         'department': UNIVERSE['department']}),
-                        stub_universe())
-        assert e.value.code == 'rangeFilterTooBroad'
-        # Plural phrasing, and both named: "the filterS ... EACH select".
-        msg = str(e.value)
-        assert 'the filters on department, fpMd each select' in msg
-
-    def test_inside_the_plain_cap_a_broad_filter_is_fine(self):
-        """Nothing that worked before fails. A year of everything was
-        always allowed and still is — and the lookup is never consulted,
-        which is why the common request pays nothing."""
-        asked = []
-
-        def spy(dim):
-            asked.append(dim)
-            return UNIVERSE.get(dim)
-
-        parse_query(q(MAX_RANGE_DAYS, filters={'fpMd': ['FP', 'MD']}), spy)
-        assert asked == []
-
-    def test_the_lookup_is_only_asked_about_pushable_dims(self):
-        asked = []
-
-        def spy(dim):
-            asked.append(dim)
-            return UNIVERSE.get(dim)
-
-        parse_query(q(1095, filters={'brand': ['AKRIS'], 'size': ['M']}), spy)
-        assert asked == ['brand']          # not `size` — it never pushes
-
-    def test_without_a_lookup_behaviour_is_unchanged(self):
-        """`parse_query` stays pure when given no universe: the 46 tests
-        above it, and every other caller, are unaffected."""
-        parse_query(q(1095, filters={'fpMd': ['FP', 'MD']}))
-
-    def test_an_unanswerable_lookup_lets_the_request_through(self):
-        parse_query(q(1095, filters={'fpMd': ['FP', 'MD']}),
-                    stub_universe({}))
-
-    def test_a_broad_filter_is_still_applied_to_the_query(self):
-        """Refused for the LONG range only. Inside a year the filter is
-        kept and pushed — being unselective is not being invalid."""
-        query = parse_query(q(MAX_RANGE_DAYS,
-                              filters={'fpMd': ['FP', 'MD']}), stub_universe())
+    def test_a_filter_is_kept_and_pushed_on_a_long_period(self):
+        query = parse_query(q('2024-01-01', '2026-11-22',
+                              filters={'fpMd': ['FP', 'MD']}))
         assert query['filters'] == {'fpMd': ['FP', 'MD']}
         assert split_filters(query['filters'])[0] == {'fpMd': ['FP', 'MD']}
 
-
-class TestUniverseLookup:
-    def test_it_opens_no_connection_until_asked(self, monkeypatch):
-        """The property that makes this affordable: an ordinary request
-        validates without touching Oracle at all."""
-        opened = []
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: opened.append(1))
-        with universe_lookup():
-            pass
-        assert opened == []
-
-    def test_a_fixed_dimension_needs_no_connection(self, monkeypatch):
-        """`fpMd` is a constant in the module — the likeliest broad
-        filter is also the one that costs nothing to catch."""
-        opened = []
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: opened.append(1))
-        with universe_lookup() as universe_of:
-            assert universe_of('fpMd') == ['FP', 'MD']
-        assert opened == []
-
-    def test_no_connection_answers_unknown(self, monkeypatch):
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: None)
-        with universe_lookup() as universe_of:
-            assert universe_of('brand') is None
-
-    def test_a_failing_query_answers_unknown_and_does_not_raise(self, monkeypatch):
-        """A validation path must not turn an Oracle blip into a 500 on a
-        request that would otherwise have been a clean 400."""
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: _FakeConn(fail=True))
-        with universe_lookup() as universe_of:
-            assert universe_of('brand') is None
-
-    def test_each_dimension_is_queried_once(self, monkeypatch):
-        conn = _FakeConn()
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: conn)
-        with universe_lookup() as universe_of:
-            universe_of('brand')
-            universe_of('brand')
-            universe_of('store')
-        assert conn.cursors == 2        # one per DIMENSION, not per call
-
-    def test_one_connection_is_shared_and_then_closed(self, monkeypatch):
-        conn = _FakeConn()
-        opened = []
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: (opened.append(1), conn)[1])
-        with universe_lookup() as universe_of:
-            universe_of('brand')
-            universe_of('store')
-            assert conn.closed is False
-        assert opened == [1]
-        assert conn.closed is True
-
-    def test_the_connection_is_closed_even_if_the_caller_raises(self, monkeypatch):
-        conn = _FakeConn()
-        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection',
-                            lambda: conn)
-        with pytest.raises(QueryError):
-            with universe_lookup() as universe_of:
-                universe_of('brand')
-                raise QueryError('boom')
-        assert conn.closed is True
-
-
-class _FakeCursor:
-    def __init__(self, fail):
-        self.fail = fail
-        self.closed = False
-
-    def execute(self, sql, binds=None):
-        if self.fail:
-            raise RuntimeError('ORA-00942')
-
-    def fetchall(self):
-        return [('AKRIS',), ('NANIS',)]
-
-    def close(self):
-        self.closed = True
-
-
-class _FakeConn:
-    def __init__(self, fail=False):
-        self.fail = fail
-        self.closed = False
-        self.cursors = 0
-        self.handed = []
-
-    def cursor(self):
-        self.cursors += 1
-        cur = _FakeCursor(self.fail)
-        self.handed.append(cur)
-        return cur
-
-    def close(self):
-        self.closed = True
+    def test_validation_touches_no_database(self, monkeypatch):
+        """The old cap opened an Oracle connection to judge a filter; the
+        floor is a date comparison and must stay one."""
+        def boom():
+            raise AssertionError('parse_query opened a connection')
+        monkeypatch.setattr('app.modules.custom_reports.engine.get_oracle_connection', boom)
+        parse_query(q('2024-01-01', '2026-11-22', filters={'brand': ['AKRIS']}))

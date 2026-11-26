@@ -393,6 +393,60 @@ class TrackingSystemService:
         finally:
             conn.close()
 
+    # ======================================================= other features
+
+    def is_user_allowed(self, user_sid: int) -> bool:
+        """True when the user's own employee code is on the allowlist.
+
+        No unlock token: for other features that show tracked figures to the
+        same people, where the gate is the account itself (the user's call,
+        2026-11-26, for custom reports' reconciliation). The tracker page
+        keeps its own employee-number unlock. Any failure answers False.
+        """
+        conn = get_postgres_connection()
+        if conn is None:
+            return False
+        try:
+            with conn.cursor() as cur:
+                own = self._own_employee_code(cur, user_sid)
+                return bool(own) and self._is_allowed(cur, own)
+        except Exception:
+            logger.exception('tracking_system is_user_allowed failed')
+            return False
+        finally:
+            conn.close()
+
+    def reconciliation_deltas(self) -> Optional[Dict[str, Dict[Any, float]]]:
+        """Every tracked difference, for adding to the system's figures.
+
+            {'out': {line_id: entered_revenue - oracle_revenue},
+             'in':  {(item_sid, year or None): entered_unit_cost - landed_unit_cost}}
+
+        `out` is per bill line, exactly the tracking revenue the Out tab
+        shows (a return line is negative here, as on that tab). `in` is per
+        UNIT: the caller multiplies by the units it counts. None when the
+        database cannot answer, so a caller can refuse rather than show
+        system figures as if reconciled.
+        """
+        conn = get_postgres_connection()
+        if conn is None:
+            return None
+        try:
+            with conn.cursor() as cur:
+                cur.execute('SELECT line_id, entered_revenue - oracle_revenue '
+                            'FROM tracking_out_lines')
+                out = {int(lid): float(d) for lid, d in cur.fetchall()}
+                cur.execute('SELECT item_sid, year, entered_unit_cost - landed_unit_cost '
+                            'FROM tracking_in_items')
+                in_ = {(int(sid), int(yr) if yr is not None else None): float(d)
+                       for sid, yr, d in cur.fetchall()}
+            return {'out': out, 'in': in_}
+        except Exception:
+            logger.exception('tracking_system reconciliation_deltas failed')
+            return None
+        finally:
+            conn.close()
+
     # ================================================================ Oracle
 
     @staticmethod

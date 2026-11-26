@@ -98,13 +98,14 @@ class TestParseQuery:
             parse_query(body)
         assert fragment in str(e.value)
 
-    def test_one_year_cap_is_enforced_server_side(self):
-        """The picker enforces it, but a client is not a validator."""
-        parse_query({'subject': 'sales', 'from': '2026-01-01',
-                     'to': '2026-12-31', 'groupBy': []})          # 365 days, ok
-        with pytest.raises(QueryError, match='must not exceed'):
-            parse_query({'subject': 'sales', 'from': '2025-01-01',
-                         'to': '2026-12-31', 'groupBy': []})
+    def test_date_floor_is_enforced_server_side(self):
+        """The picker enforces it, but a client is not a validator. There
+        is no cap on the length since 0.9.0, only on how early it starts."""
+        parse_query({'subject': 'sales', 'from': '2024-01-01',
+                     'to': '2026-12-31', 'groupBy': []})          # 3 years, ok
+        with pytest.raises(QueryError, match='must not be before 2024-01-01'):
+            parse_query({'subject': 'sales', 'from': '2023-12-31',
+                         'to': '2024-12-31', 'groupBy': []})
 
     def test_empty_filter_array_is_not_a_filter(self):
         q = parse_query(dict(BASE, filters={'brand': []}, groupBy=[]))

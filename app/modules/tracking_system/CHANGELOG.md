@@ -1,5 +1,17 @@
 # Tracking System — Changelog
 
+## 1.1.0 — 2026-11-26
+
+For custom reports' reconciliation (custom_reports 0.9.0). Read-only; this
+module's own routes are unchanged.
+
+- `TrackingSystemService.is_user_allowed(user_sid)`: the user's own employee
+  code is on the allowlist. No unlock token: for other features, where the
+  gate is the account itself. Any failure answers False.
+- `TrackingSystemService.reconciliation_deltas()`: `{'out': {line_id: entered −
+  oracle revenue}, 'in': {(item_sid, year|None): entered − landed per unit}}`,
+  or None when the database cannot answer.
+
 ## 1.0.0 — 2026-11-19
 
 New module: the employee-number gate for the hidden tracking-system page.
