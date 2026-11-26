@@ -21,8 +21,7 @@ The request contract is in
 """
 import datetime as dt
 import time
-from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.database import get_oracle_connection
 from .queries import EngineQueries
@@ -41,34 +40,26 @@ UNKNOWN = '—'   # em dash
 # the result is detail wearing a summary's clothes.
 MAX_GROUP_BY = 3
 
-# The picker enforces these spans; enforced here too, because a client is
-# not a validator.
+# The earliest `from` a report may ask for. Retail Pro's history starts
+# here, so a period reaching further back is not an empty answer but a
+# misleading one: it reads as "no sales" rather than "no records". The
+# frontend's calendar has the same floor (`DATA_START_ISO`).
 #
-# TWO caps, because the cost of a range depends almost entirely on how
-# much of it a filter throws away. Measured on production 2026-11-09,
-# COUNT(*) over the SALE_LINES joins:
+# There is NO cap on the period's LENGTH (removed in 0.9.0, the user's
+# call). Until then a period was limited to 366 days, or 1830 with a
+# filter that SQL could push down and that excluded something. The floor
+# bounds the length instead: about three years in late 2026, one more
+# each year. Measured on production 2026-11-09, COUNT(*) over the
+# SALE_LINES joins:
 #
 #     1 year, unfiltered           6.34s    16,321 rows
-#     1 year, brand = AKRIS        0.25s       192 rows
 #     3 years, unfiltered         20.62s    48,097 rows
 #     3 years, brand = AKRIS       0.53s       555 rows
 #
-# So a multi-year single-brand report is CHEAPER than the one-year
-# unfiltered query the old single cap already allowed, while a multi-year
-# unfiltered one is ~28s end to end and would hold a gunicorn worker (of
-# three) for that long. The honest limit is therefore not "days" but "how
-# many lines will this pull", and a pushable filter is the proxy for it.
-#
-# ⚠️ IT IS ONLY A PROXY, and a coarse one: the gate asks whether a
-# pushable filter EXISTS, not how much it removes. A broad one barely
-# helps — measured the same day, three years of `department = RTW` (about
-# 79% of all lines) is 14.99s, against 2.13s for three years of one
-# brand. Still inside the 120s worker timeout, and the route's
-# concurrency cap is what keeps even that from starving the API. Judging
-# selectivity properly would mean counting rows before deciding, and the
-# COUNT is most of the query — so the cheap proxy is the right trade.
-MAX_RANGE_DAYS = 366
-MAX_RANGE_DAYS_FILTERED = 1830          # five years
+# so a whole-history unfiltered report is ~20-30s today and grows with
+# it. Two things bound it: the route's concurrency cap (2 per worker), and
+# the request timeouts, nginx's 60s being the shorter of them.
+MIN_FROM_DATE = dt.date(2024, 1, 1)
 
 # Filters that can be applied in SQL instead of in Python — see
 # `_where_for`. A dimension qualifies only when the column and the value
@@ -236,22 +227,12 @@ class QueryError(ValueError):
 # ----------------------------------------------------------------------
 # Request validation
 # ----------------------------------------------------------------------
-def parse_query(body: Any, universe_of: 'UniverseOf' = None) -> Dict[str, Any]:
+def parse_query(body: Any) -> Dict[str, Any]:
     """Validate a request body into a normalised query dict, or raise.
 
     Everything is checked here rather than trusted from the client — the
-    picker enforces the one-year cap and the three-dimension limit, but a
+    picker enforces the date floor and the three-dimension limit, but a
     client is not a validator.
-
-    `universe_of` is optional and, when given, is asked `dim -> every
-    value that dimension can take`. It exists for ONE check — whether a
-    filter that looks pushable actually narrows anything (see
-    `_narrowing`). Default `None` keeps this function PURE: no argument,
-    no database, same behaviour as before. The route supplies a real one
-    via `universe_lookup()`.
-
-    ⚠️ It is asked ONLY when the range exceeds `MAX_RANGE_DAYS`, so an
-    ordinary request never pays for it. See the comment at the call site.
     """
     if not isinstance(body, dict):
         raise QueryError('request body must be an object')
@@ -309,66 +290,10 @@ def parse_query(body: Any, universe_of: 'UniverseOf' = None) -> Dict[str, Any]:
             raise QueryError(f'{dim} does not apply to {subject}')
         filters[dim] = [str(v) for v in picked]
 
-    # ⚠️ CHECKED AFTER THE FILTERS, because which cap applies depends on
-    # them. A range beyond a year needs at least one PUSHABLE filter —
-    # one SQL can actually use to narrow the scan. `size` and
-    # `customerType` do not count however selective they look: they are
-    # applied in Python, after the full pull, so they would license the
-    # long range without making it any cheaper. `customer` is excluded
-    # for the same reason (see `PUSHDOWN_EXCLUDED`).
-    span = (date_to - date_from).days + 1
-    pushable, _ = split_filters(filters)
-
-    # ⚠️ A FILTER THAT SELECTS EVERY OPTION NARROWS NOTHING.
-    #
-    # `split_filters` only asks whether a dimension CAN go into SQL, not
-    # whether the values picked exclude any row. Tick every box and the
-    # `IN (...)` list matches the whole table, so the request was buying
-    # five years at the price of a filter it does not actually have. The
-    # low-cardinality dimensions make that easy rather than perverse —
-    # `fpMd` has 2 options, `gender` 4, `customerTier` 5, `store` 6,
-    # `department` 7, so "all of them" is a few clicks, not a script.
-    #
-    # Checked HERE and only here, because this is the one decision that
-    # turns on it. Asked only past `MAX_RANGE_DAYS`: inside the plain cap
-    # the question cannot change the answer, so no ordinary request pays
-    # the lookup. Measured on production, the lookup is 0.055–0.239s per
-    # dimension (`fpMd` is free, it is a constant) against a query that
-    # is seconds — and a 5-year request asks at most three of them.
-    broad: List[str] = []
-    if span > MAX_RANGE_DAYS and pushable and universe_of is not None:
-        narrowing = {}
-        for dim, picked in pushable.items():
-            if _narrowing(dim, picked, universe_of(dim)):
-                narrowing[dim] = picked
-            else:
-                broad.append(dim)
-        pushable = narrowing
-
-    cap = MAX_RANGE_DAYS_FILTERED if pushable else MAX_RANGE_DAYS
-    if span > cap:
-        if pushable:
-            raise QueryError(
-                f'date range must not exceed {cap} days', 'rangeTooLong')
-        # Naming the broad filter matters: this user DID set one, so
-        # "needs a filter" would read as a bug in the page rather than as
-        # a fact about their selection, and the cheap fix — untick
-        # something — would be invisible.
-        if broad:
-            named = ', '.join(sorted(broad))
-            lead = (f'the filter on {named} selects every option, so it '
-                    f'narrows nothing' if len(broad) == 1 else
-                    f'the filters on {named} each select every option, so '
-                    f'they narrow nothing')
-            raise QueryError(
-                f'{lead} — a range beyond {MAX_RANGE_DAYS} days needs a '
-                f'filter that excludes something',
-                'rangeFilterTooBroad')
+    if date_from < MIN_FROM_DATE:
         raise QueryError(
-            f'date range must not exceed {cap} days without a filter on '
-            f'{", ".join(_pushable_dims(subject))} — '
-            f'a longer range is allowed once one of those narrows it',
-            'rangeNeedsFilter')
+            f'from must not be before {MIN_FROM_DATE.isoformat()} '
+            f'— there is no data before then', 'rangeTooEarly')
 
     return {
         'subject': subject,
@@ -377,102 +302,6 @@ def parse_query(body: Any, universe_of: 'UniverseOf' = None) -> Dict[str, Any]:
         'filters': filters,
         'groupBy': list(group_by),
     }
-
-
-def _pushable_dims(subject: str) -> List[str]:
-    """The filters that unlock the long range, for this subject."""
-    return sorted(
-        dim for dim, meta in DIMENSIONS.items()
-        if meta.get('filterable') and meta['field']
-        and dim not in PUSHDOWN_EXCLUDED and subject in meta['subjects']
-    )
-
-
-def _narrowing(dim: str, picked: List[str], universe: Optional[List[str]]) -> bool:
-    """Does this selection exclude anything at all?
-
-    True when the picked values leave something out, so SQL can use them
-    to read fewer rows. False when they cover the dimension's whole
-    universe, which is a filter in form only.
-
-    ⚠️ UNKNOWN WINS. A `None` universe means the lookup could not answer
-    (no connection, or the query failed), and an EMPTY one means it
-    answered something impossible — a dimension always has at least one
-    value. Both return True, deliberately: this gate is a cost control,
-    not an access control. Refusing a legitimate filtered report because
-    a 60ms lookup hiccuped would be a worse failure than allowing a
-    long query that the concurrency cap and the request timeout already
-    bound — and if Oracle cannot answer `SELECT DISTINCT vend_name`, the
-    report query behind it was never going to succeed anyway.
-
-    Compared as a SUPERSET, not for equality, so a stale or duplicated
-    client value cannot defeat the check by making the sets merely
-    unequal. Raw string comparison matches `_where_for` and `matches`,
-    which also compare what `value_of` returns without trimming or
-    folding case — the three must agree about the same row.
-    """
-    if not universe:
-        return True
-    return not set(picked) >= set(universe)
-
-
-# A `dim -> all its values` lookup, or None where it cannot say. Defined
-# as a name so `parse_query`'s signature reads as intent rather than as
-# plumbing.
-UniverseOf = Optional[Callable[[str], Optional[List[str]]]]
-
-
-@contextmanager
-def universe_lookup():
-    """Yield a `universe_of` for `parse_query`, backed by Oracle.
-
-    Lazy on purpose, at two levels. The CONNECTION is not opened until a
-    dimension is actually asked about — a request inside the plain
-    `MAX_RANGE_DAYS` cap asks nothing, so it pays neither the 0.25s
-    connect nor any query. And each dimension is asked at most once, so
-    two filters share one connection.
-
-    A failure to answer is swallowed into `None` rather than raised: see
-    `_narrowing` for why unknown has to mean "assume it narrows". That
-    also keeps a validation path from turning an Oracle blip into a 500
-    on a request that would otherwise have been a clean 400.
-    """
-    state: Dict[str, Any] = {'conn': None, 'tried': False, 'cache': {}}
-
-    def universe_of(dim: str) -> Optional[List[str]]:
-        if dim in state['cache']:
-            return state['cache'][dim]
-
-        # Free for the dimensions whose values are a constant in this
-        # file — `fpMd` is the likeliest "all options" of the lot (two
-        # checkboxes) and it costs nothing to catch.
-        if dim in _PICKER_FIXED:
-            state['cache'][dim] = list(_PICKER_FIXED[dim])
-            return state['cache'][dim]
-
-        if not state['tried']:
-            state['tried'] = True
-            state['conn'] = get_oracle_connection()
-        if state['conn'] is None:
-            state['cache'][dim] = None
-            return None
-
-        values: Optional[List[str]]
-        cur = state['conn'].cursor()
-        try:
-            values = _distinct_values(cur, dim)
-        except Exception:
-            values = None
-        finally:
-            cur.close()
-        state['cache'][dim] = values
-        return values
-
-    try:
-        yield universe_of
-    finally:
-        if state['conn'] is not None:
-            state['conn'].close()
 
 
 # ----------------------------------------------------------------------
@@ -582,6 +411,58 @@ def _sale_fact(row: Dict[str, Any]) -> Dict[str, Any]:
     return f
 
 
+def reconcile(facts: List[Dict[str, Any]], subject: str,
+              deltas: Dict[str, Dict[Any, float]]) -> None:
+    """Add the tracked differences to the system's figures, in place.
+
+    The tracking system records what was actually paid or received where
+    it differs from Oracle. With these added, a report shows the ACTUAL
+    value. Only the users on that system's allowlist can ask for it (the
+    route decides); this function only does the arithmetic.
+
+      · SALES — per bill line. `out[line_id]` is entered − Oracle revenue,
+        so it is added to the line's net sales. A RETURN is the mirror: the
+        tracker stores it negated (Oracle's −1,166,852 entered as −900,000
+        is +266,852), while here a return's value is positive, so the
+        difference is SUBTRACTED from `returnValue`: 1,166,852 → 900,000.
+        FP/MD, average bill and ASP follow, since they are built from
+        `netSales` in `accumulate`.
+      · IMPORTS — per unit received. `in[(item, year)]` is entered − landed
+        per unit, times this receipt line's units: the tracking cost the In
+        tab shows. A row for the receipt's YEAR wins over the item's
+        all-years row (year None), so an item tracked both ways is counted
+        once per receipt, not twice.
+      · SELL-THROUGH counts units only. Nothing to add.
+
+    Same definitions on both sides (net line revenue ex-VAT, posted
+    receipts), so a line here is the line the tracker priced.
+    """
+    if subject == 'sales':
+        out = deltas.get('out') or {}
+        if not out:
+            return
+        for f in facts:
+            d = out.get(f.get('line_id'))
+            if d is None:
+                continue
+            if f.get('returnedUnits'):
+                f['returnValue'] -= d
+            else:
+                f['netSales'] += d
+    elif subject == 'imports':
+        in_ = deltas.get('in') or {}
+        if not in_:
+            return
+        for f in facts:
+            sid = f.get('item_sid')
+            year = int(f['line_date'][:4]) if f.get('line_date') else None
+            unit = in_.get((sid, year))
+            if unit is None:
+                unit = in_.get((sid, None))
+            if unit is not None:
+                f['receivedCost'] += unit * f['receivedUnits']
+
+
 def _receipt_fact(row: Dict[str, Any]) -> Dict[str, Any]:
     f = _blank_fact()
     f.update(row)
@@ -609,7 +490,7 @@ def _fetch(cur, sql: str, binds: Dict[str, Any],
     list) documented at length in `queries.py`, and editing it to thread
     a WHERE through would put all of that at risk for no gain. Oracle
     pushes the outer predicate down through the view anyway — the 25x
-    measured in `MAX_RANGE_DAYS` was measured in exactly this form.
+    measured in `MIN_FROM_DATE`'s comment was measured in exactly this form.
     """
     if where:
         sql = f'SELECT * FROM ({sql}) WHERE {where}'
@@ -1001,6 +882,10 @@ def run_query(query: Dict[str, Any],
         conn.close()
 
     subject = query['subject']
+    # Set by the route, and only for an allowed user — see `reconcile`.
+    reconciled = query.get('reconcile') is not None
+    if reconciled:
+        reconcile(facts, subject, query['reconcile'])
     # Only the half SQL could not do. The pushed-down half was applied by
     # `facts_for`, and re-testing it here would be pure waste on the
     # hottest loop in the engine.
@@ -1068,6 +953,9 @@ def run_query(query: Dict[str, Any],
             'rowCount': len(out),
             'queryMs': int((time.perf_counter() - t0) * 1000),
             'notes': notes_for(query, grand['returnedUnits'] > 0),
+            # Present only when the tracked differences were added, so an
+            # ordinary result is byte-for-byte what it was before.
+            **({'reconciled': True} if reconciled else {}),
         },
     }
 

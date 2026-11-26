@@ -1,5 +1,6 @@
 """Unit tests for TrackingSystemService — the employee-number gate."""
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import jwt
@@ -162,3 +163,57 @@ class TestInitDatabase:
         assert 'tracking_system_access' in sql
         assert 'tracking_system_unlock_attempts' in sql
         conn.commit.assert_called_once()
+
+
+class TestIsUserAllowed:
+    """The account-level check other features use (custom reports'
+    reconciliation): own employee code on the allowlist, no unlock token."""
+
+    def test_allowed(self, svc):
+        conn, _ = _conn([('GH135',), (1,)])
+        with patch(CONN, return_value=conn):
+            assert svc.is_user_allowed(7) is True
+
+    def test_own_code_not_on_the_list(self, svc):
+        conn, _ = _conn([('GH135',), None])
+        with patch(CONN, return_value=conn):
+            assert svc.is_user_allowed(7) is False
+
+    def test_no_employee_record(self, svc):
+        conn, _ = _conn([None])
+        with patch(CONN, return_value=conn):
+            assert svc.is_user_allowed(7) is False
+
+    def test_db_unavailable_or_failing_answers_no(self, svc):
+        with patch(CONN, return_value=None):
+            assert svc.is_user_allowed(7) is False
+        conn, cur = _conn([])
+        cur.execute.side_effect = RuntimeError('boom')
+        with patch(CONN, return_value=conn):
+            assert svc.is_user_allowed(7) is False
+        conn.close.assert_called_once()
+
+
+class TestReconciliationDeltas:
+
+    def test_reads_both_tables_as_differences(self, svc):
+        conn, cur = _conn([])
+        cur.fetchall.side_effect = [
+            [(690838565000149556, Decimal('266851.85'))],
+            [(11, 2025, Decimal('-1500')), (11, None, Decimal('300'))],
+        ]
+        with patch(CONN, return_value=conn):
+            d = svc.reconciliation_deltas()
+        assert d == {'out': {690838565000149556: 266851.85},
+                     'in': {(11, 2025): -1500.0, (11, None): 300.0}}
+        sql = ' '.join(c.args[0] for c in cur.execute.call_args_list)
+        assert 'entered_revenue - oracle_revenue' in sql
+        assert 'entered_unit_cost - landed_unit_cost' in sql
+
+    def test_failure_is_none_so_the_caller_can_refuse(self, svc):
+        with patch(CONN, return_value=None):
+            assert svc.reconciliation_deltas() is None
+        conn, cur = _conn([])
+        cur.execute.side_effect = RuntimeError('boom')
+        with patch(CONN, return_value=conn):
+            assert svc.reconciliation_deltas() is None

@@ -238,6 +238,9 @@ class EngineQueries:
         SELECT
             TO_CHAR(d.invc_post_date, 'YYYY-MM-DD')      AS line_date,
             d.sid                                        AS bill_id,
+            -- The line's own id. Not a dimension: it is what the tracking
+            -- system's Out rows are keyed by, for the reconciliation.
+            di.sid                                       AS line_id,
             st.store_code || '-' || d.doc_no             AS bill,
             st.store_code                                AS store,
             di.item_type                                 AS item_type,

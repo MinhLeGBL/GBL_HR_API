@@ -20,7 +20,7 @@ size report, is not enough for the query engine.
 import os
 import threading
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, abort, g, jsonify, request
 
 from app.core.auth.middleware import section_required
 from . import engine
@@ -118,13 +118,15 @@ def run_query():
 
     Body:
         subject  — "sales" | "imports" | "sellThrough"
-        from, to — inclusive ISO yyyy-mm-dd. At most 366 days apart, or
-                   up to 1830 (five years) when at least one filter can
-                   be pushed into SQL AND actually excludes something —
-                   see `MAX_RANGE_DAYS_FILTERED` and `_narrowing`. A
-                   filter that selects every option does not count.
+        from, to — inclusive ISO yyyy-mm-dd. `from` no earlier than
+                   2024-01-01 (`MIN_FROM_DATE`, 400 `rangeTooEarly`); no
+                   limit on the length of the period.
         filters  — { dimensionId: string[] }, empty array = no filter
         groupBy  — up to 3 dimension ids; [] means line detail
+        reconcile — optional `true`: add the tracking system's differences,
+                   so the figures are ACTUAL values. Honoured only for a user
+                   on that system's allowlist (else ignored, silently); the
+                   result then carries `reconciled: true`.
 
     Returns `{ success, result: { subject, groupBy, columns, rows,
     totals, rowCount, queryMs, notes } }`. The contract is recorded in
@@ -137,12 +139,8 @@ def run_query():
     one that was asked.
     """
     try:
-        # The lookup is what lets validation reject a filter that selects
-        # every option — see `engine._narrowing`. It opens no connection
-        # unless the range actually exceeds the plain cap, so the common
-        # request is unchanged.
-        with engine.universe_lookup() as universe_of:
-            query = engine.parse_query(request.get_json(silent=True), universe_of)
+        body = request.get_json(silent=True)
+        query = engine.parse_query(body)
     except engine.QueryError as e:
         # `code` only where the frontend has a translation for it; the
         # English `error` remains the contract and the fallback.
@@ -150,6 +148,22 @@ def run_query():
         if e.code:
             body['code'] = e.code
         return jsonify(body), 400
+
+    # The reconciliation: actual values, with the tracking system's
+    # differences added (see `engine.reconcile`). Only for a user on that
+    # system's allowlist, re-checked on every request so removing someone
+    # takes effect on their next Run. Anyone else asking for it gets the
+    # ordinary report, with no sign the flag was read.
+    if isinstance(body, dict) and body.get('reconcile') is True:
+        from app.modules.tracking_system import TrackingSystemService
+        tracking = TrackingSystemService()
+        if tracking.is_user_allowed(g.sid):
+            deltas = tracking.reconciliation_deltas()
+            if deltas is None:
+                # Never system figures labelled as actual ones.
+                return jsonify({'success': False,
+                                'error': 'reconciliation data unavailable'}), 503
+            query['reconcile'] = deltas
 
     # Refuse rather than queue. Flask is already holding a worker to read
     # this request; blocking here would hold it for the length of someone
@@ -189,3 +203,19 @@ def dimension_values(dim):
     except engine.QueryError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     return jsonify(result), 200 if result.get('success') else 500
+
+
+@custom_reports_bp.route('/reconcile', methods=['GET'])
+@section_required(SECTION)
+def reconcile_check():
+    """May this user see the reconciled report? 204, or the app's 404.
+
+    The page asks before turning the mode on, so that for anyone not on
+    the tracking system's allowlist the command does nothing visible. The
+    refusal is `abort(404)`, the same "Endpoint not found" a URL that does
+    not exist gets, so the answer says nothing about the feature.
+    """
+    from app.modules.tracking_system import TrackingSystemService
+    if not TrackingSystemService().is_user_allowed(g.sid):
+        abort(404)
+    return '', 204
